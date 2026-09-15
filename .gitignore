@@ -1,0 +1,15 @@
+bin/
+mco-it-test-framework
+
+# Output of go coverage
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
