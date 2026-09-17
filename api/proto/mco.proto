@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package mkit;
+
+option go_package = "github.com/openshift-eng/machine-config-mkit/api";
+
+service Daemon {
+  rpc CreateCluster(CreateClusterRequest) returns (stream LogMessage);
+  rpc DestroyCluster(DestroyClusterRequest) returns (stream LogMessage);
+}
+
+message CreateClusterRequest {
+  string name = 1;
+}
+
+message LogMessage {
+  string message = 1;
+}
+
+message DestroyClusterRequest {
+  string name = 1;
+}

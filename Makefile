@@ -1,6 +1,6 @@
 all: build
 
-.PHONY: all build test lint clean verify go-deps
+.PHONY: all build test lint clean verify verify-generate generate go-deps
 
 build:
 	hack/build.sh
@@ -11,7 +11,13 @@ test:
 lint:
 	hack/go-lint.sh
 
-verify: lint test
+generate:
+	hack/update-protobuf.sh
+
+verify-generate:
+	hack/verify-protobuf.sh
+
+verify: lint test verify-generate
 
 clean:
 	rm -rf bin/
