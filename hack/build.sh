@@ -1,8 +1,8 @@
 #!/bin/sh
 set -ex
 
-GO_PKG="github.com/openshift-eng/machine-config-mkit"
-BINARY="${BINARY:-mkit}"
+GO_PKG="github.com/openshift-eng/kubernetes-integration-testing"
+BINARY="${BINARY:-kit}"
 OUTPUT="${OUTPUT:-bin/${BINARY}}"
 MODE="${MODE:-release}"
 
