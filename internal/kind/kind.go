@@ -1,4 +1,4 @@
-package kwok
+package kind
 
 import (
 	"context"
@@ -17,54 +17,60 @@ import (
 
 const (
 	clusterPrefix  = "kit-"
-	defaultVersion = "0.7.0"
-	releaseBaseURL = "https://github.com/kubernetes-sigs/kwok/releases/download"
+	defaultVersion = "0.27.0"
+	releaseBaseURL = "https://github.com/kubernetes-sigs/kind/releases/download"
 )
-
-func binID(name, version string) string {
-	return fmt.Sprintf("%s-%s", name, version)
-}
-
-func registerBinaries(s store.Store, version string) {
-	for _, name := range []string{"kwokctl", "kwok"} {
-		n, v := name, version
-		s.Register(binID(n, v), func(dest string) error {
-			ver := "v" + strings.TrimPrefix(v, "v")
-			url := fmt.Sprintf("%s/%s/%s-%s-%s", releaseBaseURL, ver, n, runtime.GOOS, runtime.GOARCH)
-			return store.DownloadBinary(url, dest)
-		})
-	}
-}
-
 
 type provider struct {
 	store    store.Store
 	log      *slog.Logger
 	mu       sync.Mutex
-	clusters map[string]*kwokCluster
+	clusters map[string]*kindCluster
 }
 
 func NewProvider(s store.Store, log *slog.Logger) cluster.Provider {
-	registerBinaries(s, defaultVersion)
-	p := &provider{store: s, log: log, clusters: make(map[string]*kwokCluster)}
+	registerBinary(s, defaultVersion)
+	p := &provider{store: s, log: log, clusters: make(map[string]*kindCluster)}
 	p.recover()
 	return p
 }
 
+func registerBinary(s store.Store, version string) {
+	s.Register(binID(version), func(dest string) error {
+		ver := "v" + strings.TrimPrefix(version, "v")
+		url := fmt.Sprintf("%s/%s/kind-%s-%s", releaseBaseURL, ver, runtime.GOOS, runtime.GOARCH)
+		return store.DownloadBinary(url, dest)
+	})
+}
+
+func binID(version string) string {
+	return fmt.Sprintf("kind-%s", version)
+}
+
+
+
+func (p *provider) kindBin(version string) (string, error) {
+	if version == "" {
+		version = defaultVersion
+	}
+	registerBinary(p.store, version)
+	return p.store.Get(binID(version))
+}
+
 func (p *provider) recover() {
-	if !p.store.Has(binID("kwokctl", defaultVersion)) {
+	if !p.store.Has(binID(defaultVersion)) {
 		return
 	}
-	bin, err := p.kwokctl(defaultVersion)
+	bin, err := p.kindBin(defaultVersion)
 	if err != nil {
-		p.log.Warn("could not resolve kwokctl", "error", err)
+		p.log.Warn("could not resolve kind", "error", err)
 		return
 	}
 
 	ctx := context.Background()
 	out, err := exec.CommandContext(ctx, bin, "get", "clusters").Output()
 	if err != nil {
-		p.log.Warn("could not list existing kwok clusters", "error", err)
+		p.log.Warn("could not list existing kind clusters", "error", err)
 		return
 	}
 
@@ -81,17 +87,9 @@ func (p *provider) recover() {
 			continue
 		}
 
-		p.clusters[name] = &kwokCluster{name: name, kubeconfigPath: kubeconfigPath, bin: bin, store: p.store, log: p.log}
+		p.clusters[name] = &kindCluster{name: name, kubeconfigPath: kubeconfigPath, bin: bin, store: p.store, log: p.log}
 		p.log.Info("recovered cluster", "name", name)
 	}
-}
-
-func (p *provider) kwokctl(version string) (string, error) {
-	if version == "" {
-		version = defaultVersion
-	}
-	registerBinaries(p.store, version)
-	return p.store.Get(binID("kwokctl", version))
 }
 
 func (p *provider) Get(name string) (cluster.Cluster, bool) {
@@ -99,6 +97,44 @@ func (p *provider) Get(name string) (cluster.Cluster, bool) {
 	defer p.mu.Unlock()
 	c, ok := p.clusters[name]
 	return c, ok
+}
+
+func (p *provider) Create(ctx context.Context, opts cluster.CreateOpts) (cluster.Cluster, error) {
+	p.mu.Lock()
+	if _, exists := p.clusters[opts.Name]; exists {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("cluster %q already exists", opts.Name)
+	}
+	p.mu.Unlock()
+
+	bin, err := p.kindBin(opts.Version)
+	if err != nil {
+		return nil, err
+	}
+
+	dir, err := p.store.ClusterDir(opts.Name)
+	if err != nil {
+		return nil, err
+	}
+	kubeconfigPath := filepath.Join(dir, "kubeconfig")
+
+	toolName := prefixed(opts.Name)
+	args := []string{"create", "cluster", "--name", toolName, "--kubeconfig", kubeconfigPath}
+	if opts.Version != "" {
+		args = append(args, "--image", fmt.Sprintf("kindest/node:v%s", strings.TrimPrefix(opts.Version, "v")))
+	}
+
+	if err := run(ctx, p.log, bin, args...); err != nil {
+		return nil, err
+	}
+
+	c := &kindCluster{name: opts.Name, kubeconfigPath: kubeconfigPath, bin: bin, store: p.store, log: p.log}
+
+	p.mu.Lock()
+	p.clusters[opts.Name] = c
+	p.mu.Unlock()
+
+	return c, nil
 }
 
 func (p *provider) Destroy(ctx context.Context, name string) error {
@@ -114,44 +150,6 @@ func (p *provider) Destroy(ctx context.Context, name string) error {
 	return c.Teardown(ctx)
 }
 
-func (p *provider) Create(ctx context.Context, opts cluster.CreateOpts) (cluster.Cluster, error) {
-	p.mu.Lock()
-	if _, exists := p.clusters[opts.Name]; exists {
-		p.mu.Unlock()
-		return nil, fmt.Errorf("cluster %q already exists", opts.Name)
-	}
-	p.mu.Unlock()
-
-	bin, err := p.kwokctl(opts.Version)
-	if err != nil {
-		return nil, err
-	}
-
-	dir, err := p.store.ClusterDir(opts.Name)
-	if err != nil {
-		return nil, err
-	}
-	kubeconfigPath := filepath.Join(dir, "kubeconfig")
-
-	toolName := prefixed(opts.Name)
-	args := []string{"create", "cluster", "--name", toolName, "--runtime", "binary", "--kubeconfig", kubeconfigPath}
-	if opts.Version != "" {
-		args = append(args, "--kube-version", "v"+strings.TrimPrefix(opts.Version, "v"))
-	}
-
-	if err := run(ctx, p.log, bin, args...); err != nil {
-		return nil, err
-	}
-
-	c := &kwokCluster{name: opts.Name, kubeconfigPath: kubeconfigPath, bin: bin, store: p.store, log: p.log}
-
-	p.mu.Lock()
-	p.clusters[opts.Name] = c
-	p.mu.Unlock()
-
-	return c, nil
-}
-
 func prefixed(name string) string {
 	if strings.HasPrefix(name, clusterPrefix) {
 		return name
@@ -159,7 +157,7 @@ func prefixed(name string) string {
 	return clusterPrefix + name
 }
 
-type kwokCluster struct {
+type kindCluster struct {
 	name           string
 	kubeconfigPath string
 	bin            string
@@ -167,11 +165,11 @@ type kwokCluster struct {
 	log            *slog.Logger
 }
 
-func (c *kwokCluster) KubeConfig() string {
+func (c *kindCluster) KubeConfig() string {
 	return c.kubeconfigPath
 }
 
-func (c *kwokCluster) Teardown(ctx context.Context) error {
+func (c *kindCluster) Teardown(ctx context.Context) error {
 	if err := run(ctx, c.log, c.bin, "delete", "cluster", "--name", prefixed(c.name)); err != nil {
 		return err
 	}

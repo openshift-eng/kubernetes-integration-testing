@@ -22,8 +22,8 @@ func TestPaths(t *testing.T) {
 	if got := s.PidPath(); got != "/data/pid" {
 		t.Errorf("PidPath() = %q, want /data/pid", got)
 	}
-	if got := s.SocketPath(); got != "/data/mco-it.sock" {
-		t.Errorf("SocketPath() = %q, want /data/mco-it.sock", got)
+	if got := s.SocketPath(); got != "/data/kit.sock" {
+		t.Errorf("SocketPath() = %q, want /data/kit.sock", got)
 	}
 }
 
@@ -51,7 +51,9 @@ func TestGetFetches(t *testing.T) {
 func TestGetCached(t *testing.T) {
 	fs := afero.NewMemMapFs()
 	s, _ := NewWithRoot(fs, "/data")
-	afero.WriteFile(fs, "/data/cache/kwokctl-0.7.0", []byte("cached"), 0o755)
+	if err := afero.WriteFile(fs, "/data/cache/kwokctl-0.7.0", []byte("cached"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	fetched := false
 	s.Register("kwokctl-0.7.0", func(dest string) error {
@@ -99,7 +101,7 @@ func TestDirsCreated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, dir := range []string{"/data", "/data/cache"} {
+	for _, dir := range []string{"/data", "/data/cache", "/data/clusters"} {
 		exists, _ := afero.DirExists(fs, dir)
 		if !exists {
 			t.Errorf("directory %q should exist", dir)

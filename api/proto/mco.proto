@@ -1,22 +1,43 @@
 syntax = "proto3";
 
-package mkit;
+package kit;
 
-option go_package = "github.com/openshift-eng/machine-config-mkit/api";
+option go_package = "github.com/openshift-eng/kubernetes-integration-testing/api";
 
 service Daemon {
-  rpc CreateCluster(CreateClusterRequest) returns (stream LogMessage);
-  rpc DestroyCluster(DestroyClusterRequest) returns (stream LogMessage);
+  rpc CreateCluster(CreateClusterRequest) returns (stream ClusterStatus);
+  rpc DestroyCluster(DestroyClusterRequest) returns (stream ClusterStatus);
+  rpc GetClusterKubeConfig(GetClusterKubeConfigRequest) returns (GetClusterKubeConfigResponse);
 }
 
 message CreateClusterRequest {
   string name = 1;
+  string provider = 2;
 }
 
-message LogMessage {
-  string message = 1;
+enum ClusterState {
+  UNKNOWN = 0;
+  CREATING = 1;
+  CREATED = 2;
+  DELETING = 3;
+  DELETED = 4;
+}
+
+message ClusterStatus {
+  ClusterState state = 1;
+  string kubeconfig = 2;
 }
 
 message DestroyClusterRequest {
   string name = 1;
+}
+
+message GetClusterKubeConfigRequest {
+  string name = 1;
+  bool content = 2;
+}
+
+message GetClusterKubeConfigResponse {
+  string path = 1;
+  string content = 2;
 }

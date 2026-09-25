@@ -1,7 +1,10 @@
 package store
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,7 +19,10 @@ type FetchFunc func(dest string) error
 type Store interface {
 	Fs() afero.Fs
 	Register(id string, fetch FetchFunc)
+	Has(id string) bool
 	Get(id string) (string, error)
+	ClusterDir(name string) (string, error)
+	RemoveClusterDir(name string) error
 	PidPath() string
 	SocketPath() string
 	LogPath() string
@@ -35,7 +41,7 @@ func New() (Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newStore(afero.NewOsFs(), filepath.Join(home, ".local", "share", "mco-it"))
+	return newStore(afero.NewOsFs(), filepath.Join(home, ".local", "share", "openshift-kit"))
 }
 
 func NewWithRoot(fs afero.Fs, root string) (Store, error) {
@@ -46,6 +52,7 @@ func newStore(fs afero.Fs, root string) (Store, error) {
 	dirs := []string{
 		root,
 		filepath.Join(root, "cache"),
+		filepath.Join(root, "clusters"),
 	}
 	for _, d := range dirs {
 		if err := fs.MkdirAll(d, 0o755); err != nil {
@@ -68,7 +75,7 @@ func (s *store) PidPath() string {
 }
 
 func (s *store) SocketPath() string {
-	return filepath.Join(s.root, "mco-it.sock")
+	return filepath.Join(s.root, "kit.sock")
 }
 
 func (s *store) LogPath() string {
@@ -79,6 +86,24 @@ func (s *store) Register(id string, fetch FetchFunc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.registry[id] = fetch
+}
+
+func (s *store) Has(id string) bool {
+	path := filepath.Join(s.root, "cache", id)
+	exists, _ := afero.Exists(s.fs, path)
+	return exists
+}
+
+func (s *store) ClusterDir(name string) (string, error) {
+	dir := filepath.Join(s.root, "clusters", name)
+	if err := s.fs.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+func (s *store) RemoveClusterDir(name string) error {
+	return s.fs.RemoveAll(filepath.Join(s.root, "clusters", name))
 }
 
 func (s *store) Get(id string) (string, error) {
@@ -118,6 +143,7 @@ func ReadPid(fs afero.Fs, path string) (int, error) {
 	return strconv.Atoi(string(data))
 }
 
+//nolint:errcheck
 func IsRunning(pidPath, sockPath string) (int, bool) {
 	pid, err := ReadPid(afero.NewOsFs(), pidPath)
 	if err != nil {
@@ -151,6 +177,7 @@ func Stop(pidPath, sockPath string) error {
 	return proc.Signal(syscall.SIGTERM)
 }
 
+//nolint:errcheck
 func Cleanup(pidPath, sockPath string) {
 	osFs := afero.NewOsFs()
 	if pid, err := ReadPid(osFs, pidPath); err == nil {
@@ -160,4 +187,41 @@ func Cleanup(pidPath, sockPath string) {
 	}
 	osFs.Remove(pidPath)
 	osFs.Remove(sockPath)
+}
+
+func DownloadBinary(url, dest string) (err error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		err = errors.Join(err, resp.Body.Close())
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GET %s: %s", url, resp.Status)
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(dest), "download-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+
+	if _, err := io.Copy(tmp, resp.Body); err != nil {
+		return errors.Join(err, tmp.Close(), os.Remove(tmpPath))
+	}
+	if err := tmp.Close(); err != nil {
+		return errors.Join(err, os.Remove(tmpPath))
+	}
+
+	if err := os.Chmod(tmpPath, 0o755); err != nil {
+		return errors.Join(err, os.Remove(tmpPath))
+	}
+
+	if err := os.Rename(tmpPath, dest); err != nil {
+		return errors.Join(err, os.Remove(tmpPath))
+	}
+
+	return nil
 }
