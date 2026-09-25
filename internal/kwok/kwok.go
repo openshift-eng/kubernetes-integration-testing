@@ -1,12 +1,9 @@
 package kwok
 
 import (
-	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,12 +11,12 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/openshift-eng/machine-config-mkit/internal/cluster"
-	"github.com/openshift-eng/machine-config-mkit/internal/store"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/cluster"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/store"
 )
 
 const (
-	clusterPrefix  = "mco-"
+	clusterPrefix  = "kit-"
 	defaultVersion = "0.7.0"
 	releaseBaseURL = "https://github.com/kubernetes-sigs/kwok/releases/download"
 )
@@ -32,50 +29,13 @@ func registerBinaries(s store.Store, version string) {
 	for _, name := range []string{"kwokctl", "kwok"} {
 		n, v := name, version
 		s.Register(binID(n, v), func(dest string) error {
-			return downloadRelease(n, v, dest)
+			ver := "v" + strings.TrimPrefix(v, "v")
+			url := fmt.Sprintf("%s/%s/%s-%s-%s", releaseBaseURL, ver, n, runtime.GOOS, runtime.GOARCH)
+			return store.DownloadBinary(url, dest)
 		})
 	}
 }
 
-func downloadRelease(name, version, dest string) error {
-	ver := "v" + strings.TrimPrefix(version, "v")
-	url := fmt.Sprintf("%s/%s/%s-%s-%s", releaseBaseURL, ver, name, runtime.GOOS, runtime.GOARCH)
-
-	resp, err := http.Get(url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: %s", url, resp.Status)
-	}
-
-	tmp, err := os.CreateTemp(filepath.Dir(dest), name+"-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
-		tmp.Close()
-		os.Remove(tmpPath)
-		return err
-	}
-	tmp.Close()
-
-	if err := os.Chmod(tmpPath, 0o755); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-
-	if err := os.Rename(tmpPath, dest); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-
-	return nil
-}
 
 type provider struct {
 	store    store.Store
@@ -92,6 +52,9 @@ func NewProvider(s store.Store, log *slog.Logger) cluster.Provider {
 }
 
 func (p *provider) recover() {
+	if !p.store.Has(binID("kwokctl", defaultVersion)) {
+		return
+	}
 	bin, err := p.kwokctl(defaultVersion)
 	if err != nil {
 		p.log.Warn("could not resolve kwokctl", "error", err)
@@ -105,19 +68,20 @@ func (p *provider) recover() {
 		return
 	}
 
-	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		name = strings.TrimSpace(name)
-		if name == "" || !strings.HasPrefix(name, clusterPrefix) {
+	for _, toolName := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		toolName = strings.TrimSpace(toolName)
+		if toolName == "" || !strings.HasPrefix(toolName, clusterPrefix) {
+			continue
+		}
+		name := strings.TrimPrefix(toolName, clusterPrefix)
+
+		kubeconfigPath := p.kubeconfigPath(name)
+		if err := ensureKubeConfig(ctx, bin, toolName, kubeconfigPath); err != nil {
+			p.log.Warn("could not ensure kubeconfig", "cluster", name, "error", err)
 			continue
 		}
 
-		kubeconfig, err := getKubeConfig(ctx, bin, name)
-		if err != nil {
-			p.log.Warn("could not get kubeconfig", "cluster", name, "error", err)
-			continue
-		}
-
-		p.clusters[name] = &kwokCluster{name: name, kubeconfig: kubeconfig, bin: bin}
+		p.clusters[name] = &kwokCluster{name: name, kubeconfigPath: kubeconfigPath, bin: bin, store: p.store, log: p.log}
 		p.log.Info("recovered cluster", "name", name)
 	}
 }
@@ -133,30 +97,26 @@ func (p *provider) kwokctl(version string) (string, error) {
 func (p *provider) Get(name string) (cluster.Cluster, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	c, ok := p.clusters[prefixed(name)]
+	c, ok := p.clusters[name]
 	return c, ok
 }
 
-func (p *provider) Destroy(ctx context.Context, name string, logfn func(string)) error {
-	full := prefixed(name)
-
+func (p *provider) Destroy(ctx context.Context, name string) error {
 	p.mu.Lock()
-	c, exists := p.clusters[full]
+	c, exists := p.clusters[name]
 	if !exists {
 		p.mu.Unlock()
 		return fmt.Errorf("cluster %q not found", name)
 	}
-	delete(p.clusters, full)
+	delete(p.clusters, name)
 	p.mu.Unlock()
 
-	return c.Teardown(ctx, logfn)
+	return c.Teardown(ctx)
 }
 
-func (p *provider) Create(ctx context.Context, opts cluster.CreateOpts, logfn func(string)) (cluster.Cluster, error) {
-	full := prefixed(opts.Name)
-
+func (p *provider) Create(ctx context.Context, opts cluster.CreateOpts) (cluster.Cluster, error) {
 	p.mu.Lock()
-	if _, exists := p.clusters[full]; exists {
+	if _, exists := p.clusters[opts.Name]; exists {
 		p.mu.Unlock()
 		return nil, fmt.Errorf("cluster %q already exists", opts.Name)
 	}
@@ -167,24 +127,26 @@ func (p *provider) Create(ctx context.Context, opts cluster.CreateOpts, logfn fu
 		return nil, err
 	}
 
-	args := []string{"create", "cluster", "--name", full, "--runtime", "binary"}
+	dir, err := p.store.ClusterDir(opts.Name)
+	if err != nil {
+		return nil, err
+	}
+	kubeconfigPath := filepath.Join(dir, "kubeconfig")
+
+	toolName := prefixed(opts.Name)
+	args := []string{"create", "cluster", "--name", toolName, "--runtime", "binary", "--kubeconfig", kubeconfigPath}
 	if opts.Version != "" {
 		args = append(args, "--kube-version", "v"+strings.TrimPrefix(opts.Version, "v"))
 	}
 
-	if err := run(ctx, logfn, bin, args...); err != nil {
+	if err := run(ctx, p.log, bin, args...); err != nil {
 		return nil, err
 	}
 
-	kubeconfig, err := getKubeConfig(ctx, bin, full)
-	if err != nil {
-		return nil, fmt.Errorf("getting kubeconfig: %w", err)
-	}
-
-	c := &kwokCluster{name: full, kubeconfig: kubeconfig, bin: bin}
+	c := &kwokCluster{name: opts.Name, kubeconfigPath: kubeconfigPath, bin: bin, store: p.store, log: p.log}
 
 	p.mu.Lock()
-	p.clusters[full] = c
+	p.clusters[opts.Name] = c
 	p.mu.Unlock()
 
 	return c, nil
@@ -198,51 +160,51 @@ func prefixed(name string) string {
 }
 
 type kwokCluster struct {
-	name       string
-	kubeconfig string
-	bin        string
+	name           string
+	kubeconfigPath string
+	bin            string
+	store          store.Store
+	log            *slog.Logger
 }
 
 func (c *kwokCluster) KubeConfig() string {
-	return c.kubeconfig
+	return c.kubeconfigPath
 }
 
-func (c *kwokCluster) Teardown(ctx context.Context, logfn func(string)) error {
-	return run(ctx, logfn, c.bin, "delete", "cluster", "--name", c.name)
-}
-
-func getKubeConfig(ctx context.Context, bin, name string) (string, error) {
-	out, err := exec.CommandContext(ctx, bin, "get", "kubeconfig", "--name", name).Output()
-	if err != nil {
-		return "", err
+func (c *kwokCluster) Teardown(ctx context.Context) error {
+	if err := run(ctx, c.log, c.bin, "delete", "cluster", "--name", prefixed(c.name)); err != nil {
+		return err
 	}
-	return strings.TrimSpace(string(out)), nil
+	return c.store.RemoveClusterDir(c.name)
 }
 
-func run(ctx context.Context, logfn func(string), name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
-
-	stdout, err := cmd.StdoutPipe()
+func ensureKubeConfig(ctx context.Context, bin, name, path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	out, err := exec.CommandContext(ctx, bin, "get", "kubeconfig", "--name", name).Output()
 	if err != nil {
 		return err
 	}
-	cmd.Stderr = cmd.Stdout
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("starting %s: %w", name, err)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
 	}
+	return os.WriteFile(path, out, 0o600)
+}
 
-	streamLines(stdout, logfn)
+func (p *provider) kubeconfigPath(name string) string {
+	dir, _ := p.store.ClusterDir(name)
+	return filepath.Join(dir, "kubeconfig")
+}
 
-	if err := cmd.Wait(); err != nil {
+func run(ctx context.Context, log *slog.Logger, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	out, err := cmd.CombinedOutput()
+	if len(out) > 0 {
+		log.Info(string(out))
+	}
+	if err != nil {
 		return fmt.Errorf("%s failed: %w", name, err)
 	}
 	return nil
-}
-
-func streamLines(r io.Reader, logfn func(string)) {
-	s := bufio.NewScanner(r)
-	for s.Scan() {
-		logfn(s.Text())
-	}
 }

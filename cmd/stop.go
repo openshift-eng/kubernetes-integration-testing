@@ -3,7 +3,7 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/openshift-eng/machine-config-mkit/internal/store"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/store"
 	"github.com/spf13/cobra"
 )
 

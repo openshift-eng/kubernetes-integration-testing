@@ -1,4 +1,4 @@
-module github.com/openshift-eng/machine-config-mkit
+module github.com/openshift-eng/kubernetes-integration-testing
 
 go 1.26
 

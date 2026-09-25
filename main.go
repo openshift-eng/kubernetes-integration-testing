@@ -1,6 +1,6 @@
 package main
 
-import "github.com/openshift-eng/machine-config-mkit/cmd"
+import "github.com/openshift-eng/kubernetes-integration-testing/cmd"
 
 func main() {
 	cmd.Execute()

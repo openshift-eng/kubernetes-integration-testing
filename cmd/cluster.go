@@ -2,25 +2,32 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"time"
 
-	pb "github.com/openshift-eng/machine-config-mkit/api/proto"
-	"github.com/openshift-eng/machine-config-mkit/internal/daemon"
-	"github.com/openshift-eng/machine-config-mkit/internal/store"
+	pb "github.com/openshift-eng/kubernetes-integration-testing/api/proto"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/daemon"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/store"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
+var clusterProvider string
+
 var clusterCmd = &cobra.Command{
 	Use:   "cluster",
 	Short: "Manage clusters",
+}
+
+var stateMessages = map[pb.ClusterState]string{
+	pb.ClusterState_CREATING: "Creating cluster...",
+	pb.ClusterState_CREATED:  "Cluster created",
+	pb.ClusterState_DELETING: "Deleting cluster...",
+	pb.ClusterState_DELETED:  "Cluster deleted",
 }
 
 var clusterCreateCmd = &cobra.Command{
@@ -32,23 +39,18 @@ var clusterCreateCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer conn.Close()
+		defer func() {
+			if err := conn.Close(); err != nil {
+				log.Warn("closing connection", "error", err)
+			}
+		}()
 
-		stream, err := client.CreateCluster(context.Background(), &pb.CreateClusterRequest{Name: args[0]})
+		stream, err := client.CreateCluster(context.Background(), &pb.CreateClusterRequest{Name: args[0], Provider: clusterProvider})
 		if err != nil {
 			return grpcError(err)
 		}
 
-		for {
-			msg, err := stream.Recv()
-			if err != nil {
-				if err == io.EOF {
-					return nil
-				}
-				return grpcError(err)
-			}
-			fmt.Println(prettyLog(msg.GetMessage()))
-		}
+		return printStatusStream(stream)
 	},
 }
 
@@ -61,24 +63,43 @@ var clusterDestroyCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		defer conn.Close()
+		defer func() {
+			if err := conn.Close(); err != nil {
+				log.Warn("closing connection", "error", err)
+			}
+		}()
 
 		stream, err := client.DestroyCluster(context.Background(), &pb.DestroyClusterRequest{Name: args[0]})
 		if err != nil {
 			return grpcError(err)
 		}
 
-		for {
-			msg, err := stream.Recv()
-			if err != nil {
-				if err == io.EOF {
-					return nil
-				}
-				return grpcError(err)
-			}
-			fmt.Println(prettyLog(msg.GetMessage()))
-		}
+		return printStatusStream(stream)
 	},
+}
+
+type statusReceiver interface {
+	Recv() (*pb.ClusterStatus, error)
+}
+
+func printStatusStream(stream statusReceiver) error {
+	for {
+		msg, err := stream.Recv()
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return grpcError(err)
+		}
+		message, ok := stateMessages[msg.GetState()]
+		if !ok {
+			message = msg.GetState().String()
+		}
+		if kc := msg.GetKubeconfig(); kc != "" {
+			message += fmt.Sprintf(" (kubeconfig: %s)", kc)
+		}
+		fmt.Println(message)
+	}
 }
 
 func ensureDaemon() error {
@@ -118,30 +139,47 @@ func grpcError(err error) error {
 	return err
 }
 
-func prettyLog(line string) string {
-	var entry map[string]any
-	if err := json.Unmarshal([]byte(line), &entry); err != nil {
-		return line
-	}
+var kubeconfigOutput bool
 
-	msg, _ := entry["msg"].(string)
-	cluster, _ := entry["cluster"].(string)
-
-	var parts []string
-	if cluster != "" {
-		parts = append(parts, fmt.Sprintf("[%s]", cluster))
-	}
-	parts = append(parts, msg)
-	if elapsed, ok := entry["elapsed"].(map[string]any); ok {
-		if human, ok := elapsed["human"].(string); ok {
-			parts = append(parts, fmt.Sprintf("elapsed=%s", human))
+var clusterKubeconfigCmd = &cobra.Command{
+	Use:           "kubeconfig [name]",
+	Short:         "Print the kubeconfig path for a cluster",
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		client, conn, err := daemonClient()
+		if err != nil {
+			return err
 		}
-	}
-	return strings.Join(parts, " ")
+		defer func() {
+			if err := conn.Close(); err != nil {
+				log.Warn("closing connection", "error", err)
+			}
+		}()
+
+		resp, err := client.GetClusterKubeConfig(context.Background(), &pb.GetClusterKubeConfigRequest{
+			Name:    args[0],
+			Content: kubeconfigOutput,
+		})
+		if err != nil {
+			return grpcError(err)
+		}
+
+		if kubeconfigOutput {
+			fmt.Print(resp.GetContent())
+		} else {
+			fmt.Println(resp.GetPath())
+		}
+		return nil
+	},
 }
 
 func init() {
+	clusterCreateCmd.Flags().StringVar(&clusterProvider, "provider", "kwok", "cluster provider (kwok, kind)")
+	clusterKubeconfigCmd.Flags().BoolVar(&kubeconfigOutput, "output", false, "print kubeconfig content instead of path")
 	clusterCmd.AddCommand(clusterCreateCmd)
 	clusterCmd.AddCommand(clusterDestroyCmd)
+	clusterCmd.AddCommand(clusterKubeconfigCmd)
 	rootCmd.AddCommand(clusterCmd)
 }

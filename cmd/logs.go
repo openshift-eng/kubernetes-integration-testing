@@ -26,7 +26,11 @@ var logsCmd = &cobra.Command{
 			}
 			return err
 		}
-		defer f.Close()
+		defer func() {
+			if err := f.Close(); err != nil {
+				log.Warn("closing log file", "error", err)
+			}
+		}()
 
 		if follow {
 			return tailFollow(f)
@@ -61,7 +65,9 @@ func tailLines(f *os.File, n int) error {
 }
 
 func tailFollow(f *os.File) error {
-	f.Seek(0, io.SeekEnd)
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		return fmt.Errorf("seeking to end of log: %w", err)
+	}
 
 	reader := bufio.NewReader(f)
 	for {

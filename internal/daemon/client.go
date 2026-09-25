@@ -9,8 +9,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	pb "github.com/openshift-eng/machine-config-mkit/api/proto"
-	"github.com/openshift-eng/machine-config-mkit/internal/store"
+	pb "github.com/openshift-eng/kubernetes-integration-testing/api/proto"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/store"
 )
 
 func NewClient(s store.Store) (pb.DaemonClient, *grpc.ClientConn, error) {

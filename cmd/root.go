@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/openshift-eng/machine-config-mkit/internal/store"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/store"
 	"github.com/spf13/cobra"
 )
 
@@ -13,8 +13,8 @@ var log *slog.Logger
 var appStore store.Store
 
 var rootCmd = &cobra.Command{
-	Use:   "mkit",
-	Short: "MCO Kubernetes Integration Test tool",
+	Use:   "kit",
+	Short: "Kubernetes Integration Testing tool",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		s, err := store.New()
 		if err != nil {
