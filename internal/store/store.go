@@ -23,6 +23,7 @@ type Store interface {
 	Get(id string) (string, error)
 	ClusterDir(name string) (string, error)
 	RemoveClusterDir(name string) error
+	ImageCacheDir() string
 	PidPath() string
 	SocketPath() string
 	LogPath() string
@@ -53,6 +54,7 @@ func newStore(fs afero.Fs, root string) (Store, error) {
 		root,
 		filepath.Join(root, "cache"),
 		filepath.Join(root, "clusters"),
+		filepath.Join(root, "images"),
 	}
 	for _, d := range dirs {
 		if err := fs.MkdirAll(d, 0o755); err != nil {
@@ -68,6 +70,10 @@ func newStore(fs afero.Fs, root string) (Store, error) {
 
 func (s *store) Fs() afero.Fs {
 	return s.fs
+}
+
+func (s *store) ImageCacheDir() string {
+	return filepath.Join(s.root, "images")
 }
 
 func (s *store) PidPath() string {

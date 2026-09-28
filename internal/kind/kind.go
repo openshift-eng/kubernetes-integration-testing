@@ -2,6 +2,7 @@ package kind
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/cluster"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/store"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -124,9 +126,17 @@ func (p *provider) Create(ctx context.Context, opts cluster.CreateOpts) (cluster
 		args = append(args, "--image", fmt.Sprintf("kindest/node:v%s", strings.TrimPrefix(opts.Version, "v")))
 	}
 
+	cfgPath := filepath.Join(dir, "kind-config.yaml")
+	if err := writeKindConfig(cfgPath, opts.Workers, opts.PullSecret); err != nil {
+		return nil, fmt.Errorf("writing kind config: %w", err)
+	}
+	args = append(args, "--config", cfgPath)
+
 	if err := run(ctx, p.log, bin, args...); err != nil {
 		return nil, err
 	}
+
+	labelNodes(ctx, p.log, kubeconfigPath)
 
 	c := &kindCluster{name: opts.Name, kubeconfigPath: kubeconfigPath, bin: bin, store: p.store, log: p.log}
 
@@ -193,6 +203,99 @@ func ensureKubeConfig(ctx context.Context, bin, name, path string) error {
 func (p *provider) kubeconfigPath(name string) string {
 	dir, _ := p.store.ClusterDir(name)
 	return filepath.Join(dir, "kubeconfig")
+}
+
+type kindConfig struct {
+	Kind                    string     `json:"kind"`
+	APIVersion              string     `json:"apiVersion"`
+	ContainerdConfigPatches []string   `json:"containerdConfigPatches,omitempty"`
+	Nodes                   []kindNode `json:"nodes"`
+}
+
+type kindNode struct {
+	Role string `json:"role"`
+}
+
+func writeKindConfig(path string, workers int, pullSecretPath string) error {
+	cfg := kindConfig{
+		Kind:       "Cluster",
+		APIVersion: "kind.x-k8s.io/v1alpha4",
+		Nodes:      []kindNode{{Role: "control-plane"}},
+	}
+	for range workers {
+		cfg.Nodes = append(cfg.Nodes, kindNode{Role: "worker"})
+	}
+
+	if pullSecretPath != "" {
+		patch, err := containerdAuthPatch(pullSecretPath)
+		if err != nil {
+			return fmt.Errorf("generating containerd auth patch: %w", err)
+		}
+		if patch != "" {
+			cfg.ContainerdConfigPatches = []string{patch}
+		}
+	}
+
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+func containerdAuthPatch(pullSecretPath string) (string, error) {
+	data, err := os.ReadFile(pullSecretPath)
+	if err != nil {
+		return "", fmt.Errorf("reading pull secret: %w", err)
+	}
+
+	var dockerCfg struct {
+		Auths map[string]struct {
+			Auth string `json:"auth"`
+		} `json:"auths"`
+	}
+	if err := json.Unmarshal(data, &dockerCfg); err != nil {
+		return "", fmt.Errorf("parsing pull secret: %w", err)
+	}
+
+	if len(dockerCfg.Auths) == 0 {
+		return "", nil
+	}
+
+	var sb strings.Builder
+	for registry, creds := range dockerCfg.Auths {
+		if creds.Auth == "" {
+			continue
+		}
+		fmt.Fprintf(&sb, "[plugins.\"io.containerd.grpc.v1.cri\".registry.configs.%q.auth]\n", registry)
+		fmt.Fprintf(&sb, "  auth = %q\n", creds.Auth)
+	}
+	return sb.String(), nil
+}
+
+// TODO(pabrodri): remove once MCO migrates its nodeSelector from node-role.kubernetes.io/master to control-plane.
+func labelNodes(ctx context.Context, log *slog.Logger, kubeconfigPath string) error {
+	labels := map[string]map[string]string{
+		"control-plane": {"node-role.kubernetes.io/master": ""},
+		"worker":        {"node-role.kubernetes.io/worker": ""},
+	}
+	for role, lset := range labels {
+		for k, v := range lset {
+			args := []string{
+				"--kubeconfig", kubeconfigPath,
+				"label", "nodes",
+				"-l", fmt.Sprintf("node-role.kubernetes.io/%s", role),
+				fmt.Sprintf("%s=%s", k, v),
+				"--overwrite",
+			}
+			cmd := exec.CommandContext(ctx, "kubectl", args...)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				log.Warn("labeling nodes", "role", role, "output", string(out), "error", err)
+			}
+		}
+	}
+	return nil
 }
 
 func run(ctx context.Context, log *slog.Logger, name string, args ...string) error {

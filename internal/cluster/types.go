@@ -16,6 +16,8 @@ type Provider interface {
 }
 
 type CreateOpts struct {
-	Name    string
-	Version string
+	Name       string
+	Version    string
+	Workers    int
+	PullSecret string
 }

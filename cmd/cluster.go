@@ -16,7 +16,14 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-var clusterProvider string
+var (
+	clusterProvider   string
+	clusterImage      string
+	clusterPullSecret string
+	clusterFeatureSet string
+	clusterIncludes   []string
+	clusterWorkers    int32
+)
 
 var clusterCmd = &cobra.Command{
 	Use:   "cluster",
@@ -24,10 +31,12 @@ var clusterCmd = &cobra.Command{
 }
 
 var stateMessages = map[pb.ClusterState]string{
-	pb.ClusterState_CREATING: "Creating cluster...",
-	pb.ClusterState_CREATED:  "Cluster created",
-	pb.ClusterState_DELETING: "Deleting cluster...",
-	pb.ClusterState_DELETED:  "Cluster deleted",
+	pb.ClusterState_CREATING:  "Creating cluster...",
+	pb.ClusterState_CREATED:   "Cluster created",
+	pb.ClusterState_DELETING:  "Deleting cluster...",
+	pb.ClusterState_DELETED:   "Cluster deleted",
+	pb.ClusterState_DEPLOYING: "Deploying...",
+	pb.ClusterState_DEPLOYED:  "Deploy complete",
 }
 
 var clusterCreateCmd = &cobra.Command{
@@ -45,7 +54,15 @@ var clusterCreateCmd = &cobra.Command{
 			}
 		}()
 
-		stream, err := client.CreateCluster(context.Background(), &pb.CreateClusterRequest{Name: args[0], Provider: clusterProvider})
+		stream, err := client.CreateCluster(context.Background(), &pb.CreateClusterRequest{
+			Name:       args[0],
+			Provider:   clusterProvider,
+			Image:      clusterImage,
+			PullSecret: clusterPullSecret,
+			FeatureSet: clusterFeatureSet,
+			Includes:   clusterIncludes,
+			Workers:    clusterWorkers,
+		})
 		if err != nil {
 			return grpcError(err)
 		}
@@ -94,6 +111,9 @@ func printStatusStream(stream statusReceiver) error {
 		message, ok := stateMessages[msg.GetState()]
 		if !ok {
 			message = msg.GetState().String()
+		}
+		if m := msg.GetMessage(); m != "" {
+			message += fmt.Sprintf(": %s", m)
 		}
 		if kc := msg.GetKubeconfig(); kc != "" {
 			message += fmt.Sprintf(" (kubeconfig: %s)", kc)
@@ -177,6 +197,11 @@ var clusterKubeconfigCmd = &cobra.Command{
 
 func init() {
 	clusterCreateCmd.Flags().StringVar(&clusterProvider, "provider", "kwok", "cluster provider (kwok, kind)")
+	clusterCreateCmd.Flags().StringVar(&clusterImage, "image", "", "release image to deploy CRDs and resources from")
+	clusterCreateCmd.Flags().StringVar(&clusterPullSecret, "pull-secret", "", "path to pull secret for the release image")
+	clusterCreateCmd.Flags().StringVar(&clusterFeatureSet, "feature-set", "", "feature set for manifest filtering (Default, TechPreviewNoUpgrade)")
+	clusterCreateCmd.Flags().StringSliceVar(&clusterIncludes, "include", nil, "regex patterns for non-CRD manifests to include")
+	clusterCreateCmd.Flags().Int32Var(&clusterWorkers, "workers", 1, "number of worker nodes (kind provider only)")
 	clusterKubeconfigCmd.Flags().BoolVar(&kubeconfigOutput, "output", false, "print kubeconfig content instead of path")
 	clusterCmd.AddCommand(clusterCreateCmd)
 	clusterCmd.AddCommand(clusterDestroyCmd)
