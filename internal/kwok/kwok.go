@@ -11,8 +11,18 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/cluster"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/image"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/store"
+
+	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apiextclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 const (
@@ -133,8 +143,13 @@ func (p *provider) Create(ctx context.Context, opts cluster.CreateOpts) (cluster
 	}
 	kubeconfigPath := filepath.Join(dir, "kubeconfig")
 
+	kwokCfgPath := filepath.Join(dir, "kwok-config.yaml")
+	if err := writeKwokConfig(kwokCfgPath); err != nil {
+		return nil, fmt.Errorf("writing kwok config: %w", err)
+	}
+
 	toolName := prefixed(opts.Name)
-	args := []string{"create", "cluster", "--name", toolName, "--runtime", "binary", "--kubeconfig", kubeconfigPath}
+	args := []string{"create", "cluster", "--name", toolName, "--runtime", "binary", "--kubeconfig", kubeconfigPath, "--config", kwokCfgPath}
 	if opts.Version != "" {
 		args = append(args, "--kube-version", "v"+strings.TrimPrefix(opts.Version, "v"))
 	}
@@ -143,7 +158,41 @@ func (p *provider) Create(ctx context.Context, opts cluster.CreateOpts) (cluster
 		return nil, err
 	}
 
-	c := &kwokCluster{name: opts.Name, kubeconfigPath: kubeconfigPath, bin: bin, store: p.store, log: p.log}
+	if err := setupCluster(ctx, kubeconfigPath, opts.Workers); err != nil {
+		p.log.Warn("cluster setup", "error", err)
+	}
+
+	logsDir := filepath.Join(dir, "logs")
+	volumesDir := filepath.Join(dir, "volumes")
+
+	var keychain authn.Keychain
+	if opts.PullSecret != "" {
+		keychain, err = image.KeychainFromFile(opts.PullSecret)
+		if err != nil {
+			run(ctx, p.log, bin, "delete", "cluster", "--name", toolName)
+			return nil, fmt.Errorf("loading pull secret: %w", err)
+		}
+	}
+
+	registry := image.NewRegistry(p.store.ImageCacheDir(), keychain, p.log)
+	changes := make(chan ContainerStateChange, 100)
+
+	runner, err := newProcessRunner(kubeconfigPath, registry, logsDir, volumesDir, changes, p.log)
+	if err != nil {
+		run(ctx, p.log, bin, "delete", "cluster", "--name", toolName)
+		return nil, fmt.Errorf("creating process runner: %w", err)
+	}
+
+	ctrl := newController(kubeconfigPath, runner, changes, p.log)
+
+	ctrlCtx, cancelCtrl := context.WithCancel(context.Background())
+	go func() {
+		if err := ctrl.run(ctrlCtx); err != nil && ctrlCtx.Err() == nil {
+			p.log.Error("controller stopped unexpectedly", "cluster", opts.Name, "error", err)
+		}
+	}()
+
+	c := &kwokCluster{name: opts.Name, kubeconfigPath: kubeconfigPath, bin: bin, store: p.store, log: p.log, cancelCtrl: cancelCtrl}
 
 	p.mu.Lock()
 	p.clusters[opts.Name] = c
@@ -165,6 +214,7 @@ type kwokCluster struct {
 	bin            string
 	store          store.Store
 	log            *slog.Logger
+	cancelCtrl     context.CancelFunc
 }
 
 func (c *kwokCluster) KubeConfig() string {
@@ -172,6 +222,9 @@ func (c *kwokCluster) KubeConfig() string {
 }
 
 func (c *kwokCluster) Teardown(ctx context.Context) error {
+	if c.cancelCtrl != nil {
+		c.cancelCtrl()
+	}
 	if err := run(ctx, c.log, c.bin, "delete", "cluster", "--name", prefixed(c.name)); err != nil {
 		return err
 	}
@@ -196,6 +249,121 @@ func (p *provider) kubeconfigPath(name string) string {
 	dir, _ := p.store.ClusterDir(name)
 	return filepath.Join(dir, "kubeconfig")
 }
+
+func setupCluster(ctx context.Context, kubeconfigPath string, workers int) error {
+	if workers <= 0 {
+		workers = 1
+	}
+
+	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	if err != nil {
+		return fmt.Errorf("building kubeconfig: %w", err)
+	}
+
+	clientset, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("creating clientset: %w", err)
+	}
+
+	type fakeNode struct {
+		name   string
+		labels map[string]string
+	}
+
+	nodes := []fakeNode{
+		{
+			name: "kit-control-plane-0",
+			labels: map[string]string{
+				"type":                                  "kwok",
+				"node-role.kubernetes.io/master":        "",
+				"node-role.kubernetes.io/control-plane": "",
+			},
+		},
+	}
+	for i := range workers {
+		nodes = append(nodes, fakeNode{
+			name: fmt.Sprintf("kit-worker-%d", i),
+			labels: map[string]string{
+				"type":                          "kwok",
+				"node-role.kubernetes.io/worker": "",
+			},
+		})
+	}
+
+	for _, n := range nodes {
+		node := &corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   n.name,
+				Labels: n.labels,
+				Annotations: map[string]string{
+					"kwok.x-k8s.io/node": "fake",
+				},
+			},
+		}
+		if _, err := clientset.CoreV1().Nodes().Create(ctx, node, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("creating node %s: %w", n.name, err)
+		}
+	}
+
+	if err := installLogsCRD(ctx, cfg); err != nil {
+		return fmt.Errorf("installing Logs CRD: %w", err)
+	}
+
+	return nil
+}
+
+func writeKwokConfig(path string) error {
+	const config = `apiVersion: config.kwok.x-k8s.io/v1alpha1
+kind: KwokConfiguration
+metadata:
+  name: kwok
+options:
+  enableCRDs:
+    - Logs
+`
+	return os.WriteFile(path, []byte(config), 0o644)
+}
+
+func installLogsCRD(ctx context.Context, cfg *rest.Config) error {
+	extClient, err := apiextclient.NewForConfig(cfg)
+	if err != nil {
+		return err
+	}
+
+	crd := &apiextensionsv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "logs.kwok.x-k8s.io",
+		},
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
+			Group: "kwok.x-k8s.io",
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
+				Kind:     "Logs",
+				ListKind: "LogsList",
+				Plural:   "logs",
+				Singular: "logs",
+			},
+			Scope: apiextensionsv1.NamespaceScoped,
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
+				{
+					Name:    "v1alpha1",
+					Served:  true,
+					Storage: true,
+					Schema: &apiextensionsv1.CustomResourceValidation{
+						OpenAPIV3Schema: &apiextensionsv1.JSONSchemaProps{
+							Type:                   "object",
+							XPreserveUnknownFields: boolPtr(true),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, err = extClient.ApiextensionsV1().CustomResourceDefinitions().Create(ctx, crd, metav1.CreateOptions{})
+	return err
+}
+
+func boolPtr(b bool) *bool { return &b }
 
 func run(ctx context.Context, log *slog.Logger, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
