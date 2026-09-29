@@ -18,6 +18,7 @@ message CreateClusterRequest {
   string feature_set = 5;
   repeated string includes = 6;
   int32 workers = 7;
+  string runtime = 8;
 }
 
 enum ClusterState {

@@ -29,7 +29,7 @@ func (s *server) CreateCluster(req *pb.CreateClusterRequest, stream pb.Daemon_Cr
 		return err
 	}
 
-	opts := cluster.CreateOpts{Name: name, Workers: int(req.GetWorkers()), PullSecret: req.GetPullSecret()}
+	opts := cluster.CreateOpts{Name: name, Workers: int(req.GetWorkers()), PullSecret: req.GetPullSecret(), Runtime: cluster.RuntimeMode(req.GetRuntime())}
 	c, err := s.registry.Create(stream.Context(), req.GetProvider(), opts)
 	if err != nil {
 		s.log.Error("cluster creation failed", "name", name, "error", err)
@@ -76,7 +76,7 @@ func (s *server) deploy(ctx context.Context, req *pb.CreateClusterRequest, kubec
 		Includes:   req.GetIncludes(),
 		PullSecret: req.GetPullSecret(),
 	}, func(msg string) {
-		stream.Send(&pb.ClusterStatus{State: pb.ClusterState_DEPLOYING, Message: msg})
+		_ = stream.Send(&pb.ClusterStatus{State: pb.ClusterState_DEPLOYING, Message: msg})
 	})
 }
 

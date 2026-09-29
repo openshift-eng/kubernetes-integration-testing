@@ -91,6 +91,7 @@ type CreateClusterRequest struct {
 	FeatureSet    string                 `protobuf:"bytes,5,opt,name=feature_set,json=featureSet,proto3" json:"feature_set,omitempty"`
 	Includes      []string               `protobuf:"bytes,6,rep,name=includes,proto3" json:"includes,omitempty"`
 	Workers       int32                  `protobuf:"varint,7,opt,name=workers,proto3" json:"workers,omitempty"`
+	Runtime       string                 `protobuf:"bytes,8,opt,name=runtime,proto3" json:"runtime,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -172,6 +173,13 @@ func (x *CreateClusterRequest) GetWorkers() int32 {
 		return x.Workers
 	}
 	return 0
+}
+
+func (x *CreateClusterRequest) GetRuntime() string {
+	if x != nil {
+		return x.Runtime
+	}
+	return ""
 }
 
 type ClusterStatus struct {
@@ -386,7 +394,7 @@ var File_api_proto_mco_proto protoreflect.FileDescriptor
 
 const file_api_proto_mco_proto_rawDesc = "" +
 	"\n" +
-	"\x13api/proto/mco.proto\x12\x03kit\"\xd4\x01\n" +
+	"\x13api/proto/mco.proto\x12\x03kit\"\xee\x01\n" +
 	"\x14CreateClusterRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x14\n" +
@@ -396,7 +404,8 @@ const file_api_proto_mco_proto_rawDesc = "" +
 	"\vfeature_set\x18\x05 \x01(\tR\n" +
 	"featureSet\x12\x1a\n" +
 	"\bincludes\x18\x06 \x03(\tR\bincludes\x12\x18\n" +
-	"\aworkers\x18\a \x01(\x05R\aworkers\"r\n" +
+	"\aworkers\x18\a \x01(\x05R\aworkers\x12\x18\n" +
+	"\aruntime\x18\b \x01(\tR\aruntime\"r\n" +
 	"\rClusterStatus\x12'\n" +
 	"\x05state\x18\x01 \x01(\x0e2\x11.kit.ClusterStateR\x05state\x12\x1e\n" +
 	"\n" +

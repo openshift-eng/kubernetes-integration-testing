@@ -146,7 +146,7 @@ func (r *Registry) Extract(ref string, matchers []Matcher) (map[string]string, e
 		}
 
 		found, err := extractFromLayer(rc, filesDir, pending, results)
-		rc.Close()
+		_ = rc.Close()
 		if err != nil {
 			return results, err
 		}
@@ -208,10 +208,10 @@ func (r *Registry) ExtractDir(ref string, dirPrefix string) (map[string]string, 
 		}
 
 		if err := extractDirFromLayer(rc, filesDir, prefix, results); err != nil {
-			rc.Close()
+			_ = rc.Close()
 			return results, err
 		}
-		rc.Close()
+		_ = rc.Close()
 	}
 
 	r.log.Info("extracted directory", "ref", ref, "dir", dirPrefix, "files", len(results))
@@ -260,7 +260,7 @@ func extractFromLayer(rc io.ReadCloser, filesDir string, matchers []Matcher, res
 	if err != nil {
 		return 0, fmt.Errorf("decompressing layer: %w", err)
 	}
-	defer gr.Close()
+	defer func() { _ = gr.Close() }()
 
 	tr := tar.NewReader(gr)
 	found := 0
@@ -300,10 +300,10 @@ func extractFromLayer(rc io.ReadCloser, filesDir string, matchers []Matcher, res
 			}
 
 			if _, err := io.Copy(f, tr); err != nil {
-				f.Close()
+				_ = f.Close()
 				return found, err
 			}
-			f.Close()
+			_ = f.Close()
 
 			results[key] = dest
 			found++
@@ -317,7 +317,7 @@ func extractDirFromLayer(rc io.ReadCloser, filesDir, prefix string, results map[
 	if err != nil {
 		return fmt.Errorf("decompressing layer: %w", err)
 	}
-	defer gr.Close()
+	defer func() { _ = gr.Close() }()
 
 	tr := tar.NewReader(gr)
 
@@ -355,10 +355,10 @@ func extractDirFromLayer(rc io.ReadCloser, filesDir, prefix string, results map[
 		}
 
 		if _, err := io.Copy(f, tr); err != nil {
-			f.Close()
+			_ = f.Close()
 			return err
 		}
-		f.Close()
+		_ = f.Close()
 
 		results[rel] = dest
 	}

@@ -15,9 +15,17 @@ type Provider interface {
 	Get(name string) (Cluster, bool)
 }
 
+type RuntimeMode string
+
+const (
+	RuntimeProcess RuntimeMode = "process"
+	RuntimePodman  RuntimeMode = "podman"
+)
+
 type CreateOpts struct {
 	Name       string
 	Version    string
 	Workers    int
 	PullSecret string
+	Runtime    RuntimeMode
 }
