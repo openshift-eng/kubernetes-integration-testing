@@ -34,6 +34,10 @@ type controller struct {
 	dynClient  dynamic.Interface
 	restartsMu sync.Mutex
 	restarts   map[string]int
+	// claimed tracks pod UIDs for which RunPod is already in progress,
+	// preventing duplicate goroutines from concurrent informer events.
+	claimedMu sync.Mutex
+	claimed   map[string]bool
 }
 
 func newController(kubeconfig string, runner PodRunner, changes <-chan ContainerStateChange, log *slog.Logger) *controller {
@@ -43,6 +47,7 @@ func newController(kubeconfig string, runner PodRunner, changes <-chan Container
 		changes:    changes,
 		log:        log,
 		restarts:   make(map[string]int),
+		claimed:    make(map[string]bool),
 	}
 }
 
@@ -70,7 +75,7 @@ func (c *controller) run(ctx context.Context) error {
 	factory := informers.NewSharedInformerFactory(clientset, 0)
 	podInformer := factory.Core().V1().Pods().Informer()
 
-	podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, _ = podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			if pod, ok := obj.(*corev1.Pod); ok {
 				c.handlePod(ctx, pod)
@@ -89,7 +94,11 @@ func (c *controller) run(ctx context.Context) error {
 				}
 			}
 			if pod != nil {
-				c.runner.StopPod(string(pod.UID))
+				uid := string(pod.UID)
+				c.claimedMu.Lock()
+				delete(c.claimed, uid)
+				c.claimedMu.Unlock()
+				c.runner.StopPod(uid)
 			}
 		},
 	})
@@ -106,14 +115,29 @@ func (c *controller) handlePod(ctx context.Context, pod *corev1.Pod) {
 	if pod.Spec.NodeName == "" {
 		return
 	}
-	if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 		return
 	}
+
+	uid := string(pod.UID)
+	c.claimedMu.Lock()
+	if c.claimed[uid] {
+		c.claimedMu.Unlock()
+		return
+	}
+	c.claimed[uid] = true
+	c.claimedMu.Unlock()
 
 	pod = pod.DeepCopy()
 	go func() {
 		if err := c.runner.RunPod(ctx, pod); err != nil {
 			c.log.Error("failed to run pod", "pod", pod.Name, "namespace", pod.Namespace, "error", err)
+
+			c.claimedMu.Lock()
+			delete(c.claimed, uid)
+			c.claimedMu.Unlock()
+
+			c.setPodWaiting(pod, err)
 		}
 	}()
 }
@@ -259,7 +283,7 @@ func (c *controller) ensureLogsResource(ctx context.Context, pod *corev1.Pod, co
 	if err == nil {
 		logs, _, _ := unstructured.NestedSlice(existing.Object, "spec", "logs")
 		logs = append(logs, entry)
-		unstructured.SetNestedSlice(existing.Object, logs, "spec", "logs")
+		_ = unstructured.SetNestedSlice(existing.Object, logs, "spec", "logs")
 		if _, err := res.Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
 			c.log.Warn("failed to update Logs resource", "pod", pod.Name, "namespace", pod.Namespace, "error", err)
 		}
@@ -279,5 +303,47 @@ func (c *controller) ensureLogsResource(ctx context.Context, pod *corev1.Pod, co
 	}}
 	if _, err := res.Create(ctx, obj, metav1.CreateOptions{}); err != nil {
 		c.log.Warn("failed to create Logs resource", "pod", pod.Name, "namespace", pod.Namespace, "error", err)
+	}
+}
+
+func (c *controller) setPodWaiting(pod *corev1.Pod, reason error) {
+	if c.clientset == nil {
+		return
+	}
+
+	latest, err := c.clientset.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
+	if err != nil {
+		c.log.Warn("failed to get pod for waiting status", "pod", pod.Name, "namespace", pod.Namespace, "error", err)
+		return
+	}
+
+	now := metav1.NewTime(time.Now())
+	latest.Status.Phase = corev1.PodPending
+	latest.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.PodScheduled, Status: corev1.ConditionTrue, LastTransitionTime: now},
+		{Type: corev1.PodInitialized, Status: corev1.ConditionTrue, LastTransitionTime: now},
+		{Type: corev1.ContainersReady, Status: corev1.ConditionFalse, LastTransitionTime: now},
+		{Type: corev1.PodReady, Status: corev1.ConditionFalse, LastTransitionTime: now},
+	}
+
+	msg := reason.Error()
+	var statuses []corev1.ContainerStatus
+	for _, cs := range pod.Spec.Containers {
+		statuses = append(statuses, corev1.ContainerStatus{
+			Name:  cs.Name,
+			Image: cs.Image,
+			Ready: false,
+			State: corev1.ContainerState{
+				Waiting: &corev1.ContainerStateWaiting{
+					Reason:  "ContainerCreating",
+					Message: msg,
+				},
+			},
+		})
+	}
+	latest.Status.ContainerStatuses = statuses
+
+	if _, err := c.clientset.CoreV1().Pods(pod.Namespace).UpdateStatus(context.TODO(), latest, metav1.UpdateOptions{}); err != nil {
+		c.log.Warn("failed to set pod waiting status", "pod", pod.Name, "namespace", pod.Namespace, "error", err)
 	}
 }

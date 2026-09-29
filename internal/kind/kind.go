@@ -136,7 +136,7 @@ func (p *provider) Create(ctx context.Context, opts cluster.CreateOpts) (cluster
 		return nil, err
 	}
 
-	labelNodes(ctx, p.log, kubeconfigPath)
+	_ = labelNodes(ctx, p.log, kubeconfigPath)
 
 	c := &kindCluster{name: opts.Name, kubeconfigPath: kubeconfigPath, bin: bin, store: p.store, log: p.log}
 

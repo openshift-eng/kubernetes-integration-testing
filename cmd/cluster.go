@@ -23,6 +23,7 @@ var (
 	clusterFeatureSet string
 	clusterIncludes   []string
 	clusterWorkers    int32
+	clusterRuntime    string
 )
 
 var clusterCmd = &cobra.Command{
@@ -62,6 +63,7 @@ var clusterCreateCmd = &cobra.Command{
 			FeatureSet: clusterFeatureSet,
 			Includes:   clusterIncludes,
 			Workers:    clusterWorkers,
+			Runtime:    clusterRuntime,
 		})
 		if err != nil {
 			return grpcError(err)
@@ -202,6 +204,7 @@ func init() {
 	clusterCreateCmd.Flags().StringVar(&clusterFeatureSet, "feature-set", "", "feature set for manifest filtering (Default, TechPreviewNoUpgrade)")
 	clusterCreateCmd.Flags().StringSliceVar(&clusterIncludes, "include", nil, "regex patterns for non-CRD manifests to include")
 	clusterCreateCmd.Flags().Int32Var(&clusterWorkers, "workers", 1, "number of worker nodes (kind provider only)")
+	clusterCreateCmd.Flags().StringVar(&clusterRuntime, "runtime", "podman", "container runtime for kwok provider (process, podman)")
 	clusterKubeconfigCmd.Flags().BoolVar(&kubeconfigOutput, "output", false, "print kubeconfig content instead of path")
 	clusterCmd.AddCommand(clusterCreateCmd)
 	clusterCmd.AddCommand(clusterDestroyCmd)

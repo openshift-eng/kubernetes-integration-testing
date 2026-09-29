@@ -114,7 +114,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts Opts, statusFn func(string))
 	}
 
 	version := releaseVersion(allFiles, d.log)
-	if err := d.ensureBootstrapResources(ctx, cfg, opts, version, statusFn); err != nil {
+	if err := d.ensureBootstrapResources(ctx, cfg, opts, version, all, statusFn); err != nil {
 		return err
 	}
 
@@ -280,7 +280,7 @@ func (d *Deployer) deployResources(ctx context.Context, cfg *rest.Config, resour
 	return nil
 }
 
-func (d *Deployer) ensureBootstrapResources(ctx context.Context, cfg *rest.Config, opts Opts, version string, statusFn func(string)) error {
+func (d *Deployer) ensureBootstrapResources(ctx context.Context, cfg *rest.Config, opts Opts, version string, allManifests []manifest, statusFn func(string)) error {
 	statusFn("Creating bootstrap resources")
 
 	dynClient, err := dynamic.NewForConfig(cfg)
@@ -330,7 +330,7 @@ func (d *Deployer) ensureBootstrapResources(ctx context.Context, cfg *rest.Confi
 				"platformStatus": map[string]interface{}{
 					"type": "None",
 				},
-				"apiServerInternalURL": apiServerURL(opts.Kubeconfig),
+				"apiServerInternalURI": apiServerURL(opts.Kubeconfig),
 			},
 		}}},
 		{configRes("dnses"), &unstructured.Unstructured{Object: map[string]interface{}{
@@ -369,40 +369,62 @@ func (d *Deployer) ensureBootstrapResources(ctx context.Context, cfg *rest.Confi
 		d.log.Info("ensured bootstrap resource", "kind", r.obj.GetKind(), "name", r.obj.GetName())
 	}
 
-	// Infrastructure status must be set via the status subresource.
 	infraRes := configRes("infrastructures")
 	infra, err := dynClient.Resource(infraRes).Get(ctx, "cluster", metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("getting Infrastructure for status update: %w", err)
 	}
+	apiURL := apiServerURL(opts.Kubeconfig)
+	d.log.Info("setting Infrastructure status", "apiServerInternalURL", apiURL)
 	infra.Object["status"] = map[string]interface{}{
 		"platform": "None",
 		"platformStatus": map[string]interface{}{
 			"type": "None",
 		},
-		"apiServerInternalURL": apiServerURL(opts.Kubeconfig),
+		"apiServerInternalURI": apiURL,
 	}
 	if _, err := dynClient.Resource(infraRes).UpdateStatus(ctx, infra, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("updating Infrastructure status: %w", err)
 	}
 
-	if version != "" {
+	cvRes := configRes("clusterversions")
+	cv, err := dynClient.Resource(cvRes).Get(ctx, "version", metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("getting ClusterVersion for status update: %w", err)
+	}
+	cv.Object["status"] = map[string]interface{}{
+		"desired": map[string]interface{}{
+			"image":   opts.Image,
+			"version": version,
+		},
+		"observedGeneration": 0,
+		"versionHash":        "",
+		"availableUpdates":   []interface{}{},
+	}
+	if _, err := dynClient.Resource(cvRes).UpdateStatus(ctx, cv, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("updating ClusterVersion status: %w", err)
+	}
+
+	if fgStatus := findFeatureGateStatus(allManifests, opts.FeatureSet); fgStatus != nil {
+		if version != "" {
+			if gates, ok := fgStatus["featureGates"].([]interface{}); ok {
+				for _, g := range gates {
+					if entry, ok := g.(map[string]interface{}); ok {
+						entry["version"] = version
+					}
+				}
+			}
+		}
 		fgRes := configRes("featuregates")
 		fg, err := dynClient.Resource(fgRes).Get(ctx, "cluster", metav1.GetOptions{})
 		if err != nil {
 			return fmt.Errorf("getting FeatureGate for status update: %w", err)
 		}
-		unstructured.SetNestedSlice(fg.Object, []interface{}{
-			map[string]interface{}{
-				"version":  version,
-				"enabled":  []interface{}{},
-				"disabled": []interface{}{},
-			},
-		}, "status", "featureGates")
+		fg.Object["status"] = fgStatus
 		if _, err := dynClient.Resource(fgRes).UpdateStatus(ctx, fg, metav1.UpdateOptions{}); err != nil {
 			return fmt.Errorf("updating FeatureGate status: %w", err)
 		}
-		d.log.Info("set FeatureGate status", "version", version)
+		d.log.Info("set FeatureGate status from release manifest", "version", version)
 	}
 
 	return nil
@@ -640,6 +662,27 @@ func apiServerURL(kubeconfigPath string) string {
 	return cfg.Host
 }
 
+func findFeatureGateStatus(manifests []manifest, featureSet string) map[string]interface{} {
+	if featureSet == "" {
+		featureSet = "Default"
+	}
+	for _, m := range manifests {
+		if m.obj.GetKind() != "FeatureGate" || m.obj.GetName() != "cluster" {
+			continue
+		}
+		annotations := m.obj.GetAnnotations()
+		fsValue, ok := annotations["release.openshift.io/feature-set"]
+		if !ok || fsValue != featureSet {
+			continue
+		}
+		status, ok := m.obj.Object["status"].(map[string]interface{})
+		if ok {
+			return status
+		}
+	}
+	return nil
+}
+
 func applyOne(ctx context.Context, client dynamic.ResourceInterface, obj *unstructured.Unstructured) error {
 	existing, err := client.Get(ctx, obj.GetName(), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
@@ -847,26 +890,6 @@ func splitNamespaces(resources []manifest) (namespaces, rest []manifest) {
 	return
 }
 
-func collectNamespaces(resources []manifest) []string {
-	seen := make(map[string]bool)
-	for _, m := range resources {
-		if m.obj.GetKind() == "Namespace" {
-			if n := m.obj.GetName(); n != "" {
-				seen[n] = true
-			}
-			continue
-		}
-		if ns := m.obj.GetNamespace(); ns != "" {
-			seen[ns] = true
-		}
-	}
-	out := make([]string, 0, len(seen))
-	for ns := range seen {
-		out = append(out, ns)
-	}
-	sort.Strings(out)
-	return out
-}
 
 func isManifestFile(name string) bool {
 	for _, ext := range []string{".yaml", ".yml", ".json"} {

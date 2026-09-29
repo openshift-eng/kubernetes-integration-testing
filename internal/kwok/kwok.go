@@ -10,10 +10,10 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/cluster"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/image"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/deployer"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/store"
 
 	corev1 "k8s.io/api/core/v1"
@@ -143,13 +143,23 @@ func (p *provider) Create(ctx context.Context, opts cluster.CreateOpts) (cluster
 	}
 	kubeconfigPath := filepath.Join(dir, "kubeconfig")
 
+	logsDir := filepath.Join(dir, "logs")
+	if err := os.MkdirAll(logsDir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating logs dir: %w", err)
+	}
+
 	kwokCfgPath := filepath.Join(dir, "kwok-config.yaml")
-	if err := writeKwokConfig(kwokCfgPath); err != nil {
+	if err := writeKwokConfig(kwokCfgPath, logsDir); err != nil {
 		return nil, fmt.Errorf("writing kwok config: %w", err)
 	}
 
 	toolName := prefixed(opts.Name)
-	args := []string{"create", "cluster", "--name", toolName, "--runtime", "binary", "--kubeconfig", kubeconfigPath, "--config", kwokCfgPath}
+	kwokNetwork := "kwok-" + toolName
+	// kwokctl names containers as "kwok-<cluster>-<component>"
+	apiServerHost := "kwok-" + toolName + "-kube-apiserver"
+	apiServerPort := "6443"
+
+	args := []string{"create", "cluster", "--name", toolName, "--runtime", "podman", "--config", kwokCfgPath}
 	if opts.Version != "" {
 		args = append(args, "--kube-version", "v"+strings.TrimPrefix(opts.Version, "v"))
 	}
@@ -158,29 +168,39 @@ func (p *provider) Create(ctx context.Context, opts cluster.CreateOpts) (cluster
 		return nil, err
 	}
 
+	// TODO: kwokctl doesn't mount PKI volumes with :z, so SELinux blocks
+	// access from the containers on Fedora/RHEL. Remove this workaround
+	// once https://github.com/kubernetes-sigs/kwok/issues/XXX is fixed.
+	fixKwokPodmanSELinux(toolName, logsDir, p.log)
+
+	if err := ensureKubeConfig(ctx, bin, toolName, kubeconfigPath); err != nil {
+		return nil, fmt.Errorf("getting kubeconfig: %w", err)
+	}
+
+	if err := waitForAPIServer(ctx, kubeconfigPath, p.log); err != nil {
+		return nil, fmt.Errorf("waiting for API server: %w", err)
+	}
+
 	if err := setupCluster(ctx, kubeconfigPath, opts.Workers); err != nil {
 		p.log.Warn("cluster setup", "error", err)
 	}
 
-	logsDir := filepath.Join(dir, "logs")
 	volumesDir := filepath.Join(dir, "volumes")
-
-	var keychain authn.Keychain
-	if opts.PullSecret != "" {
-		keychain, err = image.KeychainFromFile(opts.PullSecret)
-		if err != nil {
-			run(ctx, p.log, bin, "delete", "cluster", "--name", toolName)
-			return nil, fmt.Errorf("loading pull secret: %w", err)
-		}
-	}
-
-	registry := image.NewRegistry(p.store.ImageCacheDir(), keychain, p.log)
 	changes := make(chan ContainerStateChange, 100)
 
-	runner, err := newProcessRunner(kubeconfigPath, registry, logsDir, volumesDir, changes, p.log)
+	var runner PodRunner
+	runner, err = newPodmanRunner(podmanRunnerOpts{
+		Kubeconfig:    kubeconfigPath,
+		AuthFile:      opts.PullSecret,
+		LogsDir:       logsDir,
+		VolumesDir:    volumesDir,
+		Network:       kwokNetwork,
+		APIServerHost: apiServerHost,
+		APIServerPort: apiServerPort,
+	}, changes, p.log)
 	if err != nil {
-		run(ctx, p.log, bin, "delete", "cluster", "--name", toolName)
-		return nil, fmt.Errorf("creating process runner: %w", err)
+		_ = run(ctx, p.log, bin, "delete", "cluster", "--name", toolName)
+		return nil, fmt.Errorf("creating podman runner: %w", err)
 	}
 
 	ctrl := newController(kubeconfigPath, runner, changes, p.log)
@@ -192,7 +212,18 @@ func (p *provider) Create(ctx context.Context, opts cluster.CreateOpts) (cluster
 		}
 	}()
 
-	c := &kwokCluster{name: opts.Name, kubeconfigPath: kubeconfigPath, bin: bin, store: p.store, log: p.log, cancelCtrl: cancelCtrl}
+	secretProv, err := deployer.NewSecretProvisioner(kubeconfigPath, p.log)
+	if err != nil {
+		p.log.Warn("failed to start secret provisioner", "error", err)
+	} else {
+		go func() {
+			if err := secretProv.Run(ctrlCtx); err != nil && ctrlCtx.Err() == nil {
+				p.log.Error("secret provisioner stopped unexpectedly", "cluster", opts.Name, "error", err)
+			}
+		}()
+	}
+
+	c := &kwokCluster{name: opts.Name, kubeconfigPath: kubeconfigPath, bin: bin, store: p.store, log: p.log, cancelCtrl: cancelCtrl, runner: runner}
 
 	p.mu.Lock()
 	p.clusters[opts.Name] = c
@@ -215,6 +246,7 @@ type kwokCluster struct {
 	store          store.Store
 	log            *slog.Logger
 	cancelCtrl     context.CancelFunc
+	runner         PodRunner
 }
 
 func (c *kwokCluster) KubeConfig() string {
@@ -224,6 +256,9 @@ func (c *kwokCluster) KubeConfig() string {
 func (c *kwokCluster) Teardown(ctx context.Context) error {
 	if c.cancelCtrl != nil {
 		c.cancelCtrl()
+	}
+	if c.runner != nil {
+		c.runner.StopAll()
 	}
 	if err := run(ctx, c.log, c.bin, "delete", "cluster", "--name", prefixed(c.name)); err != nil {
 		return err
@@ -275,6 +310,8 @@ func setupCluster(ctx context.Context, kubeconfigPath string, workers int) error
 			name: "kit-control-plane-0",
 			labels: map[string]string{
 				"type":                                  "kwok",
+				"kubernetes.io/os":                      "linux",
+				"kubernetes.io/arch":                    runtime.GOARCH,
 				"node-role.kubernetes.io/master":        "",
 				"node-role.kubernetes.io/control-plane": "",
 			},
@@ -285,6 +322,8 @@ func setupCluster(ctx context.Context, kubeconfigPath string, workers int) error
 			name: fmt.Sprintf("kit-worker-%d", i),
 			labels: map[string]string{
 				"type":                          "kwok",
+				"kubernetes.io/os":              "linux",
+				"kubernetes.io/arch":            runtime.GOARCH,
 				"node-role.kubernetes.io/worker": "",
 			},
 		})
@@ -312,15 +351,49 @@ func setupCluster(ctx context.Context, kubeconfigPath string, workers int) error
 	return nil
 }
 
-func writeKwokConfig(path string) error {
-	const config = `apiVersion: config.kwok.x-k8s.io/v1alpha1
+// writeKwokConfig writes the kwok configuration. It includes a custom
+// pod-delete Stage so that kwokctl skips generating default pod stages
+// (notably pod-ready, which would auto-set all pods to Running before
+// the kit controller has a chance to start the actual containers).
+// It also patches the kwok-controller component to mount the logsDir
+// so that kubectl logs can read container logs from inside the container.
+func writeKwokConfig(path, logsDir string) error {
+	config := fmt.Sprintf(`apiVersion: config.kwok.x-k8s.io/v1alpha1
+kind: KwokctlConfiguration
+componentsPatches:
+- name: kwok-controller
+  extraVolumes:
+  - name: kit-logs
+    hostPath: %s
+    mountPath: %s
+    pathType: DirectoryOrCreate
+---
+apiVersion: config.kwok.x-k8s.io/v1alpha1
 kind: KwokConfiguration
 metadata:
   name: kwok
 options:
   enableCRDs:
     - Logs
-`
+---
+apiVersion: kwok.x-k8s.io/v1alpha1
+kind: Stage
+metadata:
+  name: pod-delete
+spec:
+  resourceRef:
+    apiGroup: v1
+    kind: Pod
+  selector:
+    matchExpressions:
+    - jq:
+        key: .metadata.deletionTimestamp
+        operator: Exists
+  next:
+    delete: true
+    finalizers:
+      empty: true
+`, logsDir, logsDir)
 	return os.WriteFile(path, []byte(config), 0o644)
 }
 
@@ -364,6 +437,61 @@ func installLogsCRD(ctx context.Context, cfg *rest.Config) error {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+func fixKwokPodmanSELinux(clusterName, logsDir string, log *slog.Logger) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		log.Warn("could not determine home dir for SELinux fix", "error", err)
+		return
+	}
+	clusterDir := filepath.Join(home, ".kwok", "clusters", clusterName)
+
+	for _, dir := range []string{clusterDir, logsDir} {
+		if out, err := exec.Command("chcon", "-R", "-t", "container_file_t", dir).CombinedOutput(); err != nil {
+			log.Warn("chcon failed, containers may not start", "error", err, "path", dir, "output", string(out))
+			return
+		}
+	}
+	log.Info("relabeled dirs for SELinux", "kwokDir", clusterDir, "logsDir", logsDir)
+
+	prefix := "kwok-" + clusterName + "-"
+	for _, component := range []string{"etcd", "kube-apiserver", "kube-controller-manager", "kube-scheduler", "kwok-controller"} {
+		name := prefix + component
+		_ = exec.Command("podman", "restart", name).Run()
+	}
+	log.Info("restarted kwok containers after SELinux fix")
+}
+
+func waitForAPIServer(ctx context.Context, kubeconfigPath string, log *slog.Logger) error {
+	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	if err != nil {
+		return err
+	}
+	clientset, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return err
+	}
+
+	deadline := time.After(2 * time.Minute)
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-deadline:
+			return fmt.Errorf("timed out waiting for API server")
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			_, err := clientset.Discovery().ServerVersion()
+			if err == nil {
+				log.Info("API server is ready")
+				return nil
+			}
+			log.Debug("waiting for API server", "error", err)
+		}
+	}
+}
 
 func run(ctx context.Context, log *slog.Logger, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
