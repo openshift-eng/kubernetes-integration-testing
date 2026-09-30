@@ -13,6 +13,12 @@ service Daemon {
 message CreateClusterRequest {
   string name = 1;
   string provider = 2;
+  string image = 3;
+  string pull_secret = 4;
+  string feature_set = 5;
+  repeated string includes = 6;
+  int32 workers = 7;
+  string runtime = 8;
 }
 
 enum ClusterState {
@@ -21,11 +27,14 @@ enum ClusterState {
   CREATED = 2;
   DELETING = 3;
   DELETED = 4;
+  DEPLOYING = 5;
+  DEPLOYED = 6;
 }
 
 message ClusterStatus {
   ClusterState state = 1;
   string kubeconfig = 2;
+  string message = 3;
 }
 
 message DestroyClusterRequest {
