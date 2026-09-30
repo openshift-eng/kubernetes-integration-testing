@@ -68,6 +68,7 @@ func Run(ctx context.Context, s store.Store, factories map[string]ProviderFactor
 
 	srv := &server{
 		registry: registry,
+		store:    s,
 		log:      slog.New(handler).With("module", "grpc"),
 	}
 	grpcServer := grpc.NewServer()
