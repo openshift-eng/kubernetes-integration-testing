@@ -439,6 +439,9 @@ func installLogsCRD(ctx context.Context, cfg *rest.Config) error {
 func boolPtr(b bool) *bool { return &b }
 
 func fixKwokPodmanSELinux(clusterName, logsDir string, log *slog.Logger) {
+	if runtime.GOOS != "linux" {
+		return
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		log.Warn("could not determine home dir for SELinux fix", "error", err)
@@ -500,6 +503,9 @@ func run(ctx context.Context, log *slog.Logger, name string, args ...string) err
 		log.Info(string(out))
 	}
 	if err != nil {
+		if len(out) > 0 {
+			return fmt.Errorf("%s failed: %w\n%s", name, err, strings.TrimSpace(string(out)))
+		}
 		return fmt.Errorf("%s failed: %w", name, err)
 	}
 	return nil
