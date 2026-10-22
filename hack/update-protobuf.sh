@@ -9,7 +9,7 @@ if [ "${IS_CONTAINER}" != "" ] || [ "${OPENSHIFT_CI}" != "" ]; then
     protoc \
         --go_out=. --go_opt=paths=source_relative \
         --go-grpc_out=. --go-grpc_opt=paths=source_relative \
-        "${PROTO_DIR}/mco.proto"
+        "${PROTO_DIR}/kit.proto"
 else
     podman run --rm \
         --env IS_CONTAINER=TRUE \
