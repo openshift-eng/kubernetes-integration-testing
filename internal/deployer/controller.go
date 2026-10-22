@@ -21,6 +21,8 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -28,7 +30,6 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 type SecretProvisioner struct {
@@ -40,7 +41,7 @@ type SecretProvisioner struct {
 }
 
 func NewSecretProvisioner(kubeconfig string, log *slog.Logger) (*SecretProvisioner, error) {
-	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	cfg, err := kube.BuildConfig(kubeconfig)
 	if err != nil {
 		return nil, fmt.Errorf("building kubeconfig: %w", err)
 	}

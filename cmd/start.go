@@ -31,11 +31,11 @@ var startCmd = &cobra.Command{
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 			factories := map[string]daemon.ProviderFactory{
-				"kwok": func(log *slog.Logger) cluster.Provider {
-					return kwok.NewProvider(appStore, log.With("module", "kwok"))
+				"kwok": func(ctx context.Context, log *slog.Logger) cluster.Provider {
+					return kwok.NewProvider(ctx, appStore, log.With("module", "kwok"))
 				},
-				"kind": func(log *slog.Logger) cluster.Provider {
-					return kind.NewProvider(appStore, log.With("module", "kind"))
+				"kind": func(ctx context.Context, log *slog.Logger) cluster.Provider {
+					return kind.NewProvider(ctx, appStore, log.With("module", "kind"))
 				},
 			}
 			return daemon.Run(ctx, appStore, factories, true)

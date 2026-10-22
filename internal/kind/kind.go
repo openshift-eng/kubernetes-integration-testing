@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/cluster"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/store"
@@ -30,10 +31,10 @@ type provider struct {
 	clusters map[string]*kindCluster
 }
 
-func NewProvider(s store.Store, log *slog.Logger) cluster.Provider {
+func NewProvider(ctx context.Context, s store.Store, log *slog.Logger) cluster.Provider {
 	registerBinary(s, defaultVersion)
 	p := &provider{store: s, log: log, clusters: make(map[string]*kindCluster)}
-	p.recover()
+	p.recover(ctx)
 	return p
 }
 
@@ -59,7 +60,7 @@ func (p *provider) kindBin(version string) (string, error) {
 	return p.store.Get(binID(version))
 }
 
-func (p *provider) recover() {
+func (p *provider) recover(ctx context.Context) {
 	if !p.store.Has(binID(defaultVersion)) {
 		return
 	}
@@ -69,7 +70,9 @@ func (p *provider) recover() {
 		return
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
 	out, err := exec.CommandContext(ctx, bin, "get", "clusters").Output()
 	if err != nil {
 		p.log.Warn("could not list existing kind clusters", "error", err)
@@ -154,10 +157,16 @@ func (p *provider) Destroy(ctx context.Context, name string) error {
 		p.mu.Unlock()
 		return fmt.Errorf("cluster %q not found", name)
 	}
-	delete(p.clusters, name)
 	p.mu.Unlock()
 
-	return c.Teardown(ctx)
+	if err := c.Teardown(ctx); err != nil {
+		return err
+	}
+
+	p.mu.Lock()
+	delete(p.clusters, name)
+	p.mu.Unlock()
+	return nil
 }
 
 func prefixed(name string) string {
