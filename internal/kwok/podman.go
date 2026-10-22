@@ -2,6 +2,7 @@ package kwok
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,10 +13,11 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 type podmanRunner struct {
@@ -23,7 +25,7 @@ type podmanRunner struct {
 	clientset     kubernetes.Interface
 	logsDir       string
 	volumesDir    string
-	authFile      string
+	pullSecret    *PullSecretProvider
 	network       string
 	apiServerHost string
 	apiServerPort string
@@ -41,7 +43,7 @@ type podmanPod struct {
 
 type podmanRunnerOpts struct {
 	Kubeconfig    string
-	AuthFile      string
+	PullSecret    *PullSecretProvider
 	LogsDir       string
 	VolumesDir    string
 	Network       string
@@ -49,8 +51,8 @@ type podmanRunnerOpts struct {
 	APIServerPort string
 }
 
-func newPodmanRunner(opts podmanRunnerOpts, changes chan<- ContainerStateChange, log *slog.Logger) (*podmanRunner, error) {
-	cfg, err := clientcmd.BuildConfigFromFlags("", opts.Kubeconfig)
+func newPodmanRunner(ctx context.Context, opts podmanRunnerOpts, changes chan<- ContainerStateChange, log *slog.Logger) (*podmanRunner, error) {
+	cfg, err := kube.BuildConfig(opts.Kubeconfig)
 	if err != nil {
 		return nil, fmt.Errorf("building kubeconfig: %w", err)
 	}
@@ -59,12 +61,12 @@ func newPodmanRunner(opts podmanRunnerOpts, changes chan<- ContainerStateChange,
 		return nil, fmt.Errorf("creating clientset: %w", err)
 	}
 
-	return &podmanRunner{
+	r := &podmanRunner{
 		kubeconfig:    opts.Kubeconfig,
 		clientset:     clientset,
 		logsDir:       opts.LogsDir,
 		volumesDir:    opts.VolumesDir,
-		authFile:      opts.AuthFile,
+		pullSecret:    opts.PullSecret,
 		network:       opts.Network,
 		apiServerHost: opts.APIServerHost,
 		apiServerPort: opts.APIServerPort,
@@ -72,7 +74,35 @@ func newPodmanRunner(opts podmanRunnerOpts, changes chan<- ContainerStateChange,
 		log:           log,
 		pods:          make(map[string]podmanPod),
 		running:       make(map[string]struct{}),
-	}, nil
+	}
+	r.recoverPods(ctx)
+	return r, nil
+}
+
+func (r *podmanRunner) recoverPods(ctx context.Context) {
+	out, err := exec.CommandContext(ctx, "podman", "pod", "ps", "--filter", "network="+r.network, "--format", "json").Output()
+	if err != nil || len(out) == 0 {
+		return
+	}
+	var pods []struct {
+		Id     string            `json:"Id"`
+		Labels map[string]string `json:"Labels"`
+	}
+	if err := json.Unmarshal(out, &pods); err != nil {
+		return
+	}
+	for _, p := range pods {
+		uid := p.Labels["kit.pod-uid"]
+		if uid == "" {
+			continue
+		}
+		var aliases []string
+		if raw := p.Labels["kit.aliases"]; raw != "" {
+			aliases = strings.Split(raw, ",")
+		}
+		r.pods[uid] = podmanPod{id: p.Id, aliases: aliases}
+		r.log.Info("recovered podman pod", "uid", uid, "podID", p.Id)
+	}
 }
 
 func (r *podmanRunner) RunPod(ctx context.Context, pod *corev1.Pod) error {
@@ -173,12 +203,15 @@ func (r *podmanRunner) ensurePod(ctx context.Context, pod *corev1.Pod) (string, 
 	}
 
 	name := "kit-" + uid[:12]
-	args := []string{"pod", "create", "--name", name, "--network", r.network}
+	args := []string{"pod", "create", "--name", name, "--network", r.network,
+		"--label", "kit.pod-uid=" + uid,
+		"--label", "kit.aliases=" + strings.Join(aliases, ","),
+	}
 	for _, alias := range aliases {
 		args = append(args, "--network-alias", alias)
 	}
 
-	out, err := exec.Command("podman", args...).Output()
+	out, err := exec.CommandContext(ctx, "podman", args...).Output()
 	if err != nil {
 		return "", fmt.Errorf("creating podman pod: %w", err)
 	}
@@ -314,26 +347,32 @@ func (r *podmanRunner) startContainer(ctx context.Context, pod *corev1.Pod, podI
 		args = append(args, "-v", localPath+":"+mountPath+":z")
 	}
 
-	if r.authFile != "" {
-		args = append(args, "--authfile", r.authFile)
-	}
+	var out []byte
+	err = r.pullSecret.WithAuthFile(func(authFile string) error {
+		runArgs := args[:len(args):len(args)]
+		if authFile != "" {
+			runArgs = append(runArgs, "--authfile", authFile)
+		}
+		if len(container.Command) > 0 {
+			runArgs = append(runArgs, "--entrypoint", container.Command[0])
+		}
+		runArgs = append(runArgs, container.Image)
+		if len(container.Command) > 1 {
+			runArgs = append(runArgs, container.Command[1:]...)
+		}
+		if len(container.Args) > 0 {
+			runArgs = append(runArgs, container.Args...)
+		}
 
-	if len(container.Command) > 0 {
-		args = append(args, "--entrypoint", container.Command[0])
-	}
-
-	args = append(args, container.Image)
-
-	if len(container.Command) > 1 {
-		args = append(args, container.Command[1:]...)
-	}
-	if len(container.Args) > 0 {
-		args = append(args, container.Args...)
-	}
-
-	out, err := exec.CommandContext(ctx, "podman", args...).CombinedOutput()
+		var execErr error
+		out, execErr = exec.CommandContext(ctx, "podman", runArgs...).CombinedOutput()
+		if execErr != nil {
+			return fmt.Errorf("starting container %s: %s: %w", container.Name, string(out), execErr)
+		}
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("starting container %s: %s: %w", container.Name, string(out), err)
+		return err
 	}
 
 	containerID := strings.TrimSpace(string(out))

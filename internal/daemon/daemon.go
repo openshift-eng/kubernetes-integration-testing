@@ -13,7 +13,7 @@ import (
 	"google.golang.org/grpc"
 )
 
-type ProviderFactory func(log *slog.Logger) cluster.Provider
+type ProviderFactory func(ctx context.Context, log *slog.Logger) cluster.Provider
 
 func Run(ctx context.Context, s store.Store, factories map[string]ProviderFactory, foreground bool) error {
 	logFile, err := os.OpenFile(s.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -37,7 +37,7 @@ func Run(ctx context.Context, s store.Store, factories map[string]ProviderFactor
 
 	providers := make(map[string]cluster.Provider, len(factories))
 	for name, factory := range factories {
-		providers[name] = factory(slog.New(handler))
+		providers[name] = factory(ctx, slog.New(handler))
 	}
 	registry := cluster.NewRegistry("kwok", providers)
 
