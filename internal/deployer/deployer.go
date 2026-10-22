@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/image"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"golang.org/x/sync/errgroup"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -40,7 +41,6 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 const (
@@ -102,7 +102,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts Opts, statusFn func(string))
 	resources := filterByIncludes(filtered, includes)
 	d.log.Info("manifest breakdown", "crds", len(crds), "namespaces", len(namespaces), "resources", len(resources))
 
-	cfg, err := clientcmd.BuildConfigFromFlags("", opts.Kubeconfig)
+	cfg, err := kube.BuildConfig(opts.Kubeconfig)
 	if err != nil {
 		return fmt.Errorf("building kubeconfig: %w", err)
 	}
@@ -655,7 +655,7 @@ func releaseVersion(files map[string]string, log *slog.Logger) string {
 }
 
 func apiServerURL(kubeconfigPath string) string {
-	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	cfg, err := kube.BuildConfig(kubeconfigPath)
 	if err != nil {
 		return ""
 	}
