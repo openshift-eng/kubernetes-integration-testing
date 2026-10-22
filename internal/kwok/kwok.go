@@ -2,12 +2,14 @@ package kwok
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -51,11 +53,12 @@ type provider struct {
 	log      *slog.Logger
 	mu       sync.Mutex
 	clusters map[string]*kwokCluster
+	ports    *portPool
 }
 
 func NewProvider(ctx context.Context, s store.Store, log *slog.Logger) cluster.Provider {
 	registerBinaries(s, defaultVersion)
-	p := &provider{store: s, log: log, clusters: make(map[string]*kwokCluster)}
+	p := &provider{store: s, log: log, clusters: make(map[string]*kwokCluster), ports: newPortPool()}
 	p.recover(ctx)
 	return p
 }
@@ -159,7 +162,6 @@ func (p *provider) Create(ctx context.Context, opts cluster.CreateOpts) (cluster
 	if err != nil {
 		return nil, err
 	}
-	kubeconfigPath := filepath.Join(dir, "kubeconfig")
 
 	logsDir := filepath.Join(dir, "logs")
 	if err := os.MkdirAll(logsDir, 0o755); err != nil {
@@ -171,51 +173,15 @@ func (p *provider) Create(ctx context.Context, opts cluster.CreateOpts) (cluster
 		return nil, fmt.Errorf("writing kwok config: %w", err)
 	}
 
-	toolName := prefixed(opts.Name)
-	args := []string{"create", "cluster", "--name", toolName, "--runtime", "podman", "--config", kwokCfgPath}
-	if opts.Version != "" {
-		args = append(args, "--kube-version", "v"+strings.TrimPrefix(opts.Version, "v"))
-	}
-
-	if err := run(ctx, p.log, bin, args...); err != nil {
+	c, err := p.createCluster(ctx, bin, opts, dir, logsDir, kwokCfgPath)
+	if err != nil {
 		return nil, err
 	}
 
-	cleanup := func() {
-		_ = run(ctx, p.log, bin, "delete", "cluster", "--name", toolName)
-		_ = p.store.RemoveClusterDir(opts.Name)
-	}
-
-	// TODO: kwokctl doesn't mount PKI volumes with :z, so SELinux blocks
-	// access from the containers on Fedora/RHEL. Remove this workaround
-	// once https://github.com/kubernetes-sigs/kwok/issues/XXX is fixed.
-	fixKwokPodmanSELinux(toolName, logsDir, p.log)
-
-	if err := ensureKubeConfig(ctx, bin, toolName, kubeconfigPath); err != nil {
-		cleanup()
-		return nil, fmt.Errorf("getting kubeconfig: %w", err)
-	}
-
-	if err := waitForAPIServer(ctx, kubeconfigPath, p.log); err != nil {
-		cleanup()
-		return nil, fmt.Errorf("waiting for API server: %w", err)
-	}
-
-	if err := setupCluster(ctx, kubeconfigPath, opts.Workers); err != nil {
-		p.log.Warn("cluster setup", "error", err)
-	}
-
-	c := &kwokCluster{name: opts.Name, kubeconfigPath: kubeconfigPath, bin: bin, store: p.store, log: p.log}
-	if opts.PullSecret != "" {
-		if err := c.pullSecret.SetFromFile(opts.PullSecret); err != nil {
-			cleanup()
-			return nil, fmt.Errorf("loading pull secret: %w", err)
-		}
-	}
 	runner, changes, err := p.newRunner(ctx, c)
 	if err != nil {
-		cleanup()
-		return nil, fmt.Errorf("creating podman runner: %w", err)
+		teardownErr := c.Teardown(ctx)
+		return nil, errors.Join(fmt.Errorf("creating podman runner: %w", err), teardownErr)
 	}
 	c.runner = runner
 	c.cancelCtrl = p.startController(c, runner, changes)
@@ -223,6 +189,63 @@ func (p *provider) Create(ctx context.Context, opts cluster.CreateOpts) (cluster
 	p.mu.Lock()
 	p.clusters[opts.Name] = c
 	p.mu.Unlock()
+
+	return c, nil
+}
+
+func (p *provider) createCluster(ctx context.Context, bin string, opts cluster.CreateOpts, dir, logsDir, kwokCfgPath string) (*kwokCluster, error) {
+	apiPort, err := p.ports.Get()
+	if err != nil {
+		return nil, fmt.Errorf("allocating API server port: %w", err)
+	}
+
+	c := &kwokCluster{
+		name:           opts.Name,
+		kubeconfigPath: filepath.Join(dir, "kubeconfig"),
+		bin:            bin,
+		apiPort:        apiPort,
+		ports:          p.ports,
+		store:          p.store,
+		log:            p.log,
+	}
+
+	toolName := prefixed(opts.Name)
+	args := []string{"create", "cluster", "--name", toolName, "--runtime", "podman", "--config", kwokCfgPath,
+		"--kube-apiserver-port", strconv.Itoa(apiPort)}
+	if opts.Version != "" {
+		args = append(args, "--kube-version", "v"+strings.TrimPrefix(opts.Version, "v"))
+	}
+
+	if err := run(ctx, p.log, bin, args...); err != nil {
+		p.ports.Release(apiPort)
+		return nil, err
+	}
+
+	// TODO: kwokctl doesn't mount PKI volumes with :z, so SELinux blocks
+	// access from the containers on Fedora/RHEL. Remove this workaround
+	// once https://github.com/kubernetes-sigs/kwok/issues/XXX is fixed.
+	fixKwokPodmanSELinux(toolName, logsDir, p.log)
+
+	if err := ensureKubeConfig(ctx, bin, toolName, c.kubeconfigPath); err != nil {
+		teardownErr := c.Teardown(ctx)
+		return nil, errors.Join(fmt.Errorf("getting kubeconfig: %w", err), teardownErr)
+	}
+
+	if err := waitForAPIServer(ctx, c.kubeconfigPath, p.log); err != nil {
+		teardownErr := c.Teardown(ctx)
+		return nil, errors.Join(fmt.Errorf("waiting for API server: %w", err), teardownErr)
+	}
+
+	if err := setupCluster(ctx, c.kubeconfigPath, opts.Workers); err != nil {
+		p.log.Warn("cluster setup", "error", err)
+	}
+
+	if opts.PullSecret != "" {
+		if err := c.pullSecret.SetFromFile(opts.PullSecret); err != nil {
+			teardownErr := c.Teardown(ctx)
+			return nil, errors.Join(fmt.Errorf("loading pull secret: %w", err), teardownErr)
+		}
+	}
 
 	return c, nil
 }
@@ -282,6 +305,8 @@ type kwokCluster struct {
 	name           string
 	kubeconfigPath string
 	bin            string
+	apiPort        int
+	ports          *portPool
 	store          store.Store
 	log            *slog.Logger
 	cancelCtrl     context.CancelFunc
@@ -299,6 +324,9 @@ func (c *kwokCluster) Teardown(ctx context.Context) error {
 	}
 	if c.runner != nil {
 		c.runner.StopAll()
+	}
+	if c.ports != nil {
+		c.ports.Release(c.apiPort)
 	}
 	if err := run(ctx, c.log, c.bin, "delete", "cluster", "--name", prefixed(c.name)); err != nil {
 		return err
