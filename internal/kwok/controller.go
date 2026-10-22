@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -15,7 +17,6 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 var logsGVR = schema.GroupVersionResource{
@@ -52,7 +53,7 @@ func newController(kubeconfig string, runner PodRunner, changes <-chan Container
 }
 
 func (c *controller) run(ctx context.Context) error {
-	cfg, err := clientcmd.BuildConfigFromFlags("", c.kubeconfig)
+	cfg, err := kube.BuildConfig(c.kubeconfig)
 	if err != nil {
 		return fmt.Errorf("building kubeconfig: %w", err)
 	}
@@ -107,7 +108,6 @@ func (c *controller) run(ctx context.Context) error {
 	factory.WaitForCacheSync(ctx.Done())
 
 	<-ctx.Done()
-	c.runner.StopAll()
 	return nil
 }
 
