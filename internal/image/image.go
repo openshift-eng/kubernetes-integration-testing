@@ -45,19 +45,13 @@ func NewRegistry(cacheDir string, keychain authn.Keychain, log *slog.Logger) *Re
 	}
 }
 
-func KeychainFromFile(path string) (authn.Keychain, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading pull secret: %w", err)
-	}
-
+func KeychainFromData(data []byte) (authn.Keychain, error) {
 	var cfg struct {
 		Auths map[string]authn.AuthConfig `json:"auths"`
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing pull secret: %w", err)
 	}
-
 	return &staticKeychain{auths: cfg.Auths}, nil
 }
 

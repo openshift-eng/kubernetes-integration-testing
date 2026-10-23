@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/store"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/store"
 	"github.com/spf13/cobra"
 )
 

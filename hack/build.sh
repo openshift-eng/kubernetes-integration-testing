@@ -2,8 +2,6 @@
 set -ex
 
 GO_PKG="github.com/openshift-eng/kubernetes-integration-testing"
-BINARY="${BINARY:-kit}"
-OUTPUT="${OUTPUT:-bin/${BINARY}}"
 MODE="${MODE:-release}"
 
 GIT_COMMIT="${SOURCE_GIT_COMMIT:-$(git rev-parse --verify 'HEAD^{commit}')}"
@@ -24,4 +22,15 @@ dev)
     ;;
 esac
 
-GO_COMPLIANCE_POLICY="exempt_all" go build ${GOFLAGS} -gcflags "${GCFLAGS}" -ldflags "${LDFLAGS}" -o "${OUTPUT}" .
+TARGETS="${TARGETS:-kit kit-controller}"
+
+for target in ${TARGETS}; do
+    case "${target}" in
+    kit)
+        GO_COMPLIANCE_POLICY="exempt_all" go build ${GOFLAGS} -gcflags "${GCFLAGS}" -ldflags "${LDFLAGS}" -o "bin/kit" ./cmd/kit
+        ;;
+    kit-controller)
+        GO_COMPLIANCE_POLICY="exempt_all" go build ${GOFLAGS} -gcflags "${GCFLAGS}" -ldflags "${LDFLAGS}" -o "bin/kit-controller" ./cmd/controller
+        ;;
+    esac
+done

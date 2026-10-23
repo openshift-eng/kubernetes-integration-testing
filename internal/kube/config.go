@@ -8,15 +8,55 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// BuildConfig creates a rest.Config from a kubeconfig file with TLS
-// certificate data inlined from the referenced files. client-go's TLS
-// transport cache keys on file paths, so recreating a cluster at the
-// same path (new CA, same file name) silently reuses a stale transport.
-// Inlining the data makes the cache key depend on actual content.
+func FlattenKubeconfig(path string) error {
+	config, err := clientcmd.LoadFromFile(path)
+	if err != nil {
+		return fmt.Errorf("loading kubeconfig: %w", err)
+	}
+
+	for _, cluster := range config.Clusters {
+		if err := inlineFile(&cluster.CertificateAuthority, &cluster.CertificateAuthorityData); err != nil {
+			return err
+		}
+	}
+	for _, authInfo := range config.AuthInfos {
+		if err := inlineFile(&authInfo.ClientCertificate, &authInfo.ClientCertificateData); err != nil {
+			return err
+		}
+		if err := inlineFile(&authInfo.ClientKey, &authInfo.ClientKeyData); err != nil {
+			return err
+		}
+	}
+
+	return clientcmd.WriteToFile(*config, path)
+}
+
+func inlineFile(path *string, data *[]byte) error {
+	if *path == "" || len(*data) > 0 {
+		return nil
+	}
+	d, err := os.ReadFile(*path)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", *path, err)
+	}
+	*data = d
+	*path = ""
+	return nil
+}
+
+var apiServerOverride string
+
+func SetAPIServerOverride(server string) {
+	apiServerOverride = server
+}
+
 func BuildConfig(kubeconfigPath string) (*rest.Config, error) {
 	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
 	if err != nil {
 		return nil, err
+	}
+	if apiServerOverride != "" {
+		cfg.Host = apiServerOverride
 	}
 	tls := &cfg.TLSClientConfig
 	for _, f := range []struct {
