@@ -1,7 +1,7 @@
 #!/bin/sh
 set -ex
 
-PROTO_DIR="api/proto"
+PROTO_DIR="api/grpc"
 PROTOC_GEN_GO_VERSION="${PROTOC_GEN_GO_VERSION:-$(grep 'google.golang.org/protobuf ' go.mod | awk '{print $2}')}"
 PROTOC_GEN_GO_GRPC_VERSION="${PROTOC_GEN_GO_GRPC_VERSION:-$(grep 'google.golang.org/grpc/cmd/protoc-gen-go-grpc ' go.mod | awk '{print $2}')}"
 

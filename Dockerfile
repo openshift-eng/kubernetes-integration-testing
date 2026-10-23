@@ -1,8 +1,10 @@
-FROM registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.26-openshift-5.0 AS builder
+FROM registry.access.redhat.com/ubi9/ubi:latest AS builder
+RUN dnf install -y golang && dnf clean all
 WORKDIR /go/src/github.com/openshift-eng/kubernetes-integration-testing
 COPY . .
-RUN hack/build.sh
+RUN TARGETS=kit-controller hack/build.sh
 
-FROM registry.ci.openshift.org/ocp/5.0:base-rhel9
-COPY --from=builder /go/src/github.com/openshift-eng/kubernetes-integration-testing/bin/kit /usr/bin/kit
-ENTRYPOINT ["/usr/bin/kit"]
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+RUN microdnf install -y podman-remote && microdnf clean all
+COPY --from=builder /go/src/github.com/openshift-eng/kubernetes-integration-testing/bin/kit-controller /usr/bin/kit-controller
+ENTRYPOINT ["/usr/bin/kit-controller"]

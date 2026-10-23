@@ -1,0 +1,4 @@
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+RUN microdnf install -y podman-remote && microdnf clean all
+COPY bin/kit-controller /usr/bin/kit-controller
+ENTRYPOINT ["/usr/bin/kit-controller"]

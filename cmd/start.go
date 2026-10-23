@@ -9,11 +9,11 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/cluster"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/daemon"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/kind"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/kwok"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/store"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/cluster"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/daemon"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/provider/kind"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/provider/kwok"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/store"
 	"github.com/spf13/cobra"
 )
 
