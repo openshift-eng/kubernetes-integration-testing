@@ -33,8 +33,8 @@ type ClusterConfig struct {
 	APIServerPort string `json:"apiServerPort,omitempty"`
 }
 
-func Store(ctx context.Context, kubeconfig string, cfg ClusterConfig, kc *v1alpha1.KitCluster, pullSecret []byte) error {
-	clientset, err := newClientset(kubeconfig)
+func Store(ctx context.Context, kc *kube.KubeConfig, cfg ClusterConfig, kitCluster *v1alpha1.KitCluster, pullSecret []byte) error {
+	clientset, err := newClientset(kc)
 	if err != nil {
 		return err
 	}
@@ -48,7 +48,7 @@ func Store(ctx context.Context, kubeconfig string, cfg ClusterConfig, kc *v1alph
 	if err != nil {
 		return fmt.Errorf("marshaling cluster config: %w", err)
 	}
-	manifestData, err := json.Marshal(kc)
+	manifestData, err := json.Marshal(kitCluster)
 	if err != nil {
 		return fmt.Errorf("marshaling KitCluster manifest: %w", err)
 	}
@@ -78,8 +78,8 @@ func Store(ctx context.Context, kubeconfig string, cfg ClusterConfig, kc *v1alph
 	return nil
 }
 
-func Load(ctx context.Context, kubeconfig string) (*ClusterConfig, *v1alpha1.KitCluster, []byte, error) {
-	clientset, err := newClientset(kubeconfig)
+func Load(ctx context.Context, kubeConfig *kube.KubeConfig) (*ClusterConfig, *v1alpha1.KitCluster, []byte, error) {
+	clientset, err := newClientset(kubeConfig)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -110,8 +110,8 @@ func Load(ctx context.Context, kubeconfig string) (*ClusterConfig, *v1alpha1.Kit
 	return &cfg, &kc, pullSecret, nil
 }
 
-func newClientset(kubeconfig string) (*kubernetes.Clientset, error) {
-	cfg, err := kube.BuildConfig(kubeconfig)
+func newClientset(kc *kube.KubeConfig) (*kubernetes.Clientset, error) {
+	cfg, err := kc.RestConfig()
 	if err != nil {
 		return nil, fmt.Errorf("building kubeconfig: %w", err)
 	}

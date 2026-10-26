@@ -9,29 +9,52 @@ import (
 	"syscall"
 
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/bootstrap"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/deployer"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/pod"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/reconciler"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/image"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/podman"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/pullsecret"
 )
 
+type controllerConfig struct {
+	KubeConfig     *kube.KubeConfig
+	CacheDir       string
+	CollectionsDir string
+	PodmanSocket   string
+}
+
+func loadConfig() (controllerConfig, error) {
+	kubeconfigPath := os.Getenv("KIT_KUBECONFIG")
+	if kubeconfigPath == "" {
+		return controllerConfig{}, fmt.Errorf("KIT_KUBECONFIG is required")
+	}
+	kubeConfig, err := kube.New(kubeconfigPath, os.Getenv("KIT_API_SERVER"))
+	if err != nil {
+		return controllerConfig{}, fmt.Errorf("loading kubeconfig: %w", err)
+	}
+	return controllerConfig{
+		KubeConfig:     kubeConfig,
+		CacheDir:       os.Getenv("KIT_CACHE_DIR"),
+		CollectionsDir: os.Getenv("KIT_COLLECTIONS_DIR"),
+		PodmanSocket:   os.Getenv("KIT_PODMAN_SOCKET"),
+	}, nil
+}
+
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	kubeconfig := requireEnv(log, "KIT_KUBECONFIG")
-	cacheDir := os.Getenv("KIT_CACHE_DIR")
-
-	if server := os.Getenv("KIT_API_SERVER"); server != "" {
-		kube.SetAPIServerOverride(server)
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Error("loading config", "error", err)
+		os.Exit(1)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	cfg, kc, pullSecretData, err := bootstrap.Load(ctx, kubeconfig)
+	clusterCfg, kitCluster, pullSecretData, err := bootstrap.Load(ctx, cfg.KubeConfig)
 	if err != nil {
 		log.Error("loading bootstrap config", "error", err)
 		os.Exit(1)
@@ -46,58 +69,58 @@ func main() {
 		log.Error("creating keychain", "error", err)
 		os.Exit(1)
 	}
-	registry := image.NewRegistry(cacheDir, keychain, log)
+	registry := image.NewRegistry(cfg.CacheDir, keychain, log)
 
-	cancel, err := reconciler.Start(ctx, log, kc, kubeconfig, cacheDir, registry)
+	cancel, err := reconciler.Start(ctx, log, kitCluster, cfg.KubeConfig, cfg.CacheDir, cfg.CollectionsDir, registry)
 	if err != nil {
 		log.Error("starting controller manager", "error", err)
 		os.Exit(1)
 	}
 	defer cancel()
 
-	if kc.Spec.Provider == "kwok" {
-		if err := runPodController(ctx, log, kubeconfig, cfg, &ps); err != nil {
+	if kitCluster.Spec.Provider == "kwok" {
+		if err := runPodController(ctx, log, cfg, clusterCfg, &ps); err != nil {
 			log.Error("starting pod controller", "error", err)
 			os.Exit(1)
 		}
 	}
 
-	log.Info("controller started", "cluster", kc.Name, "provider", kc.Spec.Provider)
+	log.Info("controller started", "cluster", kitCluster.Name, "provider", kitCluster.Spec.Provider)
 	<-ctx.Done()
 	log.Info("shutting down")
 }
 
-func newPodmanClient() podman.Client {
-	if sock := os.Getenv("KIT_PODMAN_SOCKET"); sock != "" {
-		return podman.NewRemoteClient(sock)
+func runPodController(ctx context.Context, log *slog.Logger, cfg controllerConfig, clusterCfg *bootstrap.ClusterConfig, ps *pullsecret.PullSecret) error {
+	var podmanClient podman.Client
+	if cfg.PodmanSocket != "" {
+		podmanClient = podman.NewRemoteClient(cfg.PodmanSocket)
+	} else {
+		podmanClient = podman.NewLocalClient()
 	}
-	return podman.NewLocalClient()
-}
 
-func runPodController(ctx context.Context, log *slog.Logger, kubeconfig string, cfg *bootstrap.ClusterConfig, ps *pullsecret.PullSecret) error {
 	changes := make(chan pod.ContainerStateChange, 100)
 	runner, err := pod.NewPodmanRunner(ctx, pod.PodmanRunnerOpts{
-		Client:        newPodmanClient(),
-		Kubeconfig:    kubeconfig,
+		Client:        podmanClient,
+		KubeConfig:    cfg.KubeConfig,
 		PullSecret:    ps,
-		LogsDir:       cfg.LogsDir,
-		VolumesDir:    cfg.VolumesDir,
-		Network:       cfg.Network,
-		APIServerHost: cfg.APIServerHost,
-		APIServerPort: cfg.APIServerPort,
+		LogsDir:       clusterCfg.LogsDir,
+		VolumesDir:    clusterCfg.VolumesDir,
+		Network:       clusterCfg.Network,
+		APIServerHost: clusterCfg.APIServerHost,
+		APIServerPort: clusterCfg.APIServerPort,
 	}, changes, log)
 	if err != nil {
 		return err
 	}
 
-	ctrl := pod.NewController(kubeconfig, runner, changes, log)
+	ctrl := pod.NewController(cfg.KubeConfig, runner, changes, log)
 	go func() {
 		if err := ctrl.Run(ctx); err != nil && ctx.Err() == nil {
 			log.Error("pod controller stopped unexpectedly", "error", err)
 		}
 	}()
 
-	secretProv, err := deployer.NewSecretProvisioner(kubeconfig, log)
+	secretProv, err := deployer.NewSecretProvisioner(cfg.KubeConfig, log)
 	if err != nil {
 		log.Warn("failed to start secret provisioner", "error", err)
 	} else {
@@ -109,13 +132,4 @@ func runPodController(ctx context.Context, log *slog.Logger, kubeconfig string, 
 	}
 
 	return nil
-}
-
-func requireEnv(log *slog.Logger, key string) string {
-	v := os.Getenv(key)
-	if v == "" {
-		log.Error(fmt.Sprintf("%s is required", key))
-		os.Exit(1)
-	}
-	return v
 }

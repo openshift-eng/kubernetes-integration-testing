@@ -37,7 +37,7 @@ var startCmd = &cobra.Command{
 					return kind.NewProvider(ctx, appStore, log.With("module", "kind"))
 				},
 			}
-			return daemon.Start(ctx, appPaths, appStore.ImageCacheDir(), factories)
+			return daemon.Start(ctx, appPaths, appStore, factories)
 		}
 		return runBackground()
 	},

@@ -14,6 +14,7 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/podman"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/pullsecret"
 
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -21,7 +22,7 @@ import (
 
 type podmanRunner struct {
 	client        podman.Client
-	kubeconfig    string
+	kubeConfig    *kube.KubeConfig
 	clientset     kubernetes.Interface
 	logsDir       string
 	volumesDir    string
@@ -43,7 +44,7 @@ type podmanPod struct {
 
 type PodmanRunnerOpts struct {
 	Client        podman.Client
-	Kubeconfig    string
+	KubeConfig    *kube.KubeConfig
 	PullSecret    *pullsecret.PullSecret
 	LogsDir       string
 	VolumesDir    string
@@ -53,7 +54,7 @@ type PodmanRunnerOpts struct {
 }
 
 func NewPodmanRunner(ctx context.Context, opts PodmanRunnerOpts, changes chan<- ContainerStateChange, log *slog.Logger) (PodRunner, error) {
-	cfg, err := kube.BuildConfig(opts.Kubeconfig)
+	cfg, err := opts.KubeConfig.RestConfig()
 	if err != nil {
 		return nil, fmt.Errorf("building kubeconfig: %w", err)
 	}
@@ -64,7 +65,7 @@ func NewPodmanRunner(ctx context.Context, opts PodmanRunnerOpts, changes chan<- 
 
 	r := &podmanRunner{
 		client:        opts.Client,
-		kubeconfig:    opts.Kubeconfig,
+		kubeConfig:    opts.KubeConfig,
 		clientset:     clientset,
 		logsDir:       opts.LogsDir,
 		volumesDir:    opts.VolumesDir,
@@ -276,7 +277,7 @@ func (r *podmanRunner) startContainer(ctx context.Context, pod *corev1.Pod, podI
 		r.log.Warn("failed to materialize some volumes", "pod", pod.Name, "namespace", pod.Namespace, "error", err)
 	}
 
-	saToken, err := materializeSAToken(ctx, r.clientset, r.kubeconfig, r.volumesDir, pod)
+	saToken, err := materializeSAToken(ctx, r.clientset, r.kubeConfig, r.volumesDir, pod)
 	if err != nil {
 		return fmt.Errorf("materializing SA token: %w", err)
 	}

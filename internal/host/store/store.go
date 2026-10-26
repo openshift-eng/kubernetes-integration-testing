@@ -22,6 +22,7 @@ type Store interface {
 	ClusterDir(name string) (string, error)
 	RemoveClusterDir(name string) error
 	ImageCacheDir() string
+	CollectionsDir() string
 }
 
 type store struct {
@@ -49,6 +50,7 @@ func newStore(fs afero.Fs, root string) (Store, error) {
 		root,
 		filepath.Join(root, "cache"),
 		filepath.Join(root, "clusters"),
+		filepath.Join(root, "collections"),
 		filepath.Join(root, "images"),
 	}
 	for _, d := range dirs {
@@ -69,6 +71,10 @@ func (s *store) Fs() afero.Fs {
 
 func (s *store) ImageCacheDir() string {
 	return filepath.Join(s.root, "images")
+}
+
+func (s *store) CollectionsDir() string {
+	return filepath.Join(s.root, "collections")
 }
 
 func (s *store) Register(id string, fetch FetchFunc) {

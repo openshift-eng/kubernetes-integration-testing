@@ -6,29 +6,51 @@ import (
 
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/clientcmd/api"
 )
 
-func FlattenKubeconfig(path string) error {
+type KubeConfig struct {
+	raw            api.Config
+	serverOverride string
+}
+
+func New(path, serverOverride string) (*KubeConfig, error) {
 	config, err := clientcmd.LoadFromFile(path)
 	if err != nil {
-		return fmt.Errorf("loading kubeconfig: %w", err)
+		return nil, fmt.Errorf("loading kubeconfig: %w", err)
 	}
 
 	for _, cluster := range config.Clusters {
 		if err := inlineFile(&cluster.CertificateAuthority, &cluster.CertificateAuthorityData); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	for _, authInfo := range config.AuthInfos {
 		if err := inlineFile(&authInfo.ClientCertificate, &authInfo.ClientCertificateData); err != nil {
-			return err
+			return nil, err
 		}
 		if err := inlineFile(&authInfo.ClientKey, &authInfo.ClientKeyData); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	return clientcmd.WriteToFile(*config, path)
+	return &KubeConfig{raw: *config, serverOverride: serverOverride}, nil
+}
+
+func (kc *KubeConfig) RestConfig() (*rest.Config, error) {
+	clientConfig := clientcmd.NewDefaultClientConfig(kc.raw, &clientcmd.ConfigOverrides{})
+	cfg, err := clientConfig.ClientConfig()
+	if err != nil {
+		return nil, err
+	}
+	if kc.serverOverride != "" {
+		cfg.Host = kc.serverOverride
+	}
+	return cfg, nil
+}
+
+func (kc *KubeConfig) WriteFlattened(path string) error {
+	return clientcmd.WriteToFile(kc.raw, path)
 }
 
 func inlineFile(path *string, data *[]byte) error {
@@ -42,39 +64,4 @@ func inlineFile(path *string, data *[]byte) error {
 	*data = d
 	*path = ""
 	return nil
-}
-
-var apiServerOverride string
-
-func SetAPIServerOverride(server string) {
-	apiServerOverride = server
-}
-
-func BuildConfig(kubeconfigPath string) (*rest.Config, error) {
-	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
-	if err != nil {
-		return nil, err
-	}
-	if apiServerOverride != "" {
-		cfg.Host = apiServerOverride
-	}
-	tls := &cfg.TLSClientConfig
-	for _, f := range []struct {
-		path *string
-		data *[]byte
-	}{
-		{&tls.CAFile, &tls.CAData},
-		{&tls.CertFile, &tls.CertData},
-		{&tls.KeyFile, &tls.KeyData},
-	} {
-		if *f.path != "" && len(*f.data) == 0 {
-			d, err := os.ReadFile(*f.path)
-			if err != nil {
-				return nil, fmt.Errorf("reading %s: %w", *f.path, err)
-			}
-			*f.data = d
-			*f.path = ""
-		}
-	}
-	return cfg, nil
 }

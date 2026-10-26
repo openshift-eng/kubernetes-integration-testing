@@ -95,10 +95,13 @@ users:
 	return kc, pki
 }
 
-func TestBuildConfigInlinesTLSData(t *testing.T) {
-	kc, pki := writeKubeconfig(t)
+func TestRestConfigInlinesTLSData(t *testing.T) {
+	kcPath, pki := writeKubeconfig(t)
 
-	cfg, err := BuildConfig(kc)
+	kc, err := New(kcPath, "")
+	require.NoError(t, err)
+
+	cfg, err := kc.RestConfig()
 	require.NoError(t, err)
 
 	caOnDisk, _ := os.ReadFile(filepath.Join(pki, "ca.crt"))
@@ -110,10 +113,13 @@ func TestBuildConfigInlinesTLSData(t *testing.T) {
 	assert.Equal(t, keyOnDisk, cfg.KeyData, "KeyData should match key file on disk")
 }
 
-func TestBuildConfigClearsFilePaths(t *testing.T) {
-	kc, _ := writeKubeconfig(t)
+func TestRestConfigClearsFilePaths(t *testing.T) {
+	kcPath, _ := writeKubeconfig(t)
 
-	cfg, err := BuildConfig(kc)
+	kc, err := New(kcPath, "")
+	require.NoError(t, err)
+
+	cfg, err := kc.RestConfig()
 	require.NoError(t, err)
 
 	assert.Empty(t, cfg.CAFile)
@@ -121,8 +127,8 @@ func TestBuildConfigClearsFilePaths(t *testing.T) {
 	assert.Empty(t, cfg.KeyFile)
 }
 
-func TestBuildConfigPreservesExistingData(t *testing.T) {
-	kc, pki := writeKubeconfig(t)
+func TestRestConfigPreservesExistingData(t *testing.T) {
+	kcPath, pki := writeKubeconfig(t)
 
 	caOnDisk, err := os.ReadFile(filepath.Join(pki, "ca.crt"))
 	require.NoError(t, err)
@@ -146,16 +152,19 @@ users:
     client-certificate: ` + filepath.Join(pki, "admin.crt") + `
     client-key: ` + filepath.Join(pki, "admin.key") + `
 `
-	require.NoError(t, os.WriteFile(kc, []byte(content), 0o600))
+	require.NoError(t, os.WriteFile(kcPath, []byte(content), 0o600))
 
-	cfg, err := BuildConfig(kc)
+	kc, err := New(kcPath, "")
+	require.NoError(t, err)
+
+	cfg, err := kc.RestConfig()
 	require.NoError(t, err)
 
 	assert.Equal(t, caOnDisk, cfg.CAData, "inline CAData should be preserved")
 }
 
-func TestBuildConfigMissingFile(t *testing.T) {
-	kc := filepath.Join(t.TempDir(), "kubeconfig")
+func TestRestConfigMissingFile(t *testing.T) {
+	kcPath := filepath.Join(t.TempDir(), "kubeconfig")
 	content := `apiVersion: v1
 clusters:
 - cluster:
@@ -173,21 +182,73 @@ users:
 - name: test
   user: {}
 `
-	require.NoError(t, os.WriteFile(kc, []byte(content), 0o600))
+	require.NoError(t, os.WriteFile(kcPath, []byte(content), 0o600))
 
-	_, err := BuildConfig(kc)
+	_, err := New(kcPath, "")
 	assert.Error(t, err)
 }
 
-func TestBuildConfigDifferentCertsDifferentData(t *testing.T) {
-	kc1, _ := writeKubeconfig(t)
-	kc2, _ := writeKubeconfig(t)
+func TestRestConfigDifferentCertsDifferentData(t *testing.T) {
+	kc1Path, _ := writeKubeconfig(t)
+	kc2Path, _ := writeKubeconfig(t)
 
-	cfg1, err := BuildConfig(kc1)
+	kc1, err := New(kc1Path, "")
 	require.NoError(t, err)
-	cfg2, err := BuildConfig(kc2)
+	kc2, err := New(kc2Path, "")
+	require.NoError(t, err)
+
+	cfg1, err := kc1.RestConfig()
+	require.NoError(t, err)
+	cfg2, err := kc2.RestConfig()
 	require.NoError(t, err)
 
 	assert.NotEqual(t, cfg1.CAData, cfg2.CAData,
 		"independently generated CAs should produce different CAData")
+}
+
+func TestRestConfigAppliesServerOverride(t *testing.T) {
+	kcPath, _ := writeKubeconfig(t)
+
+	kc, err := New(kcPath, "https://10.0.0.1:6443")
+	require.NoError(t, err)
+
+	cfg, err := kc.RestConfig()
+	require.NoError(t, err)
+
+	assert.Equal(t, "https://10.0.0.1:6443", cfg.Host)
+}
+
+func TestRestConfigNoOverrideKeepsOriginal(t *testing.T) {
+	kcPath, _ := writeKubeconfig(t)
+
+	kc, err := New(kcPath, "")
+	require.NoError(t, err)
+
+	cfg, err := kc.RestConfig()
+	require.NoError(t, err)
+
+	assert.Equal(t, "https://127.0.0.1:6443", cfg.Host)
+}
+
+func TestWriteFlattenedInlinesData(t *testing.T) {
+	kcPath, _ := writeKubeconfig(t)
+
+	kc, err := New(kcPath, "")
+	require.NoError(t, err)
+
+	outPath := filepath.Join(t.TempDir(), "flattened")
+	require.NoError(t, kc.WriteFlattened(outPath))
+
+	reloaded, err := New(outPath, "")
+	require.NoError(t, err)
+
+	cfg, err := reloaded.RestConfig()
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, cfg.CAData)
+	assert.NotEmpty(t, cfg.CertData)
+	assert.NotEmpty(t, cfg.KeyData)
+	assert.Empty(t, cfg.CAFile)
+	assert.Empty(t, cfg.CertFile)
+	assert.Empty(t, cfg.KeyFile)
 }

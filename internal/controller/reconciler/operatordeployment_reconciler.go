@@ -9,6 +9,7 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/bootstrap"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/deployer"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/image"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/pullsecret"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -16,10 +17,11 @@ import (
 )
 
 type operatorDeploymentReconciler struct {
-	client     client.Client
-	kubeconfig string
-	cacheDir   string
-	log        *slog.Logger
+	client         client.Client
+	kubeConfig     *kube.KubeConfig
+	cacheDir       string
+	collectionsDir string
+	log            *slog.Logger
 }
 
 func (r *operatorDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -71,7 +73,7 @@ func (r *operatorDeploymentReconciler) deploy(ctx context.Context, od *v1alpha1.
 		return fmt.Errorf("KitCluster %q has no image configured", kc.Name)
 	}
 
-	_, _, pullSecretData, err := bootstrap.Load(ctx, r.kubeconfig)
+	_, _, pullSecretData, err := bootstrap.Load(ctx, r.kubeConfig)
 	if err != nil {
 		return fmt.Errorf("loading pull secret: %w", err)
 	}
@@ -89,7 +91,7 @@ func (r *operatorDeploymentReconciler) deploy(ctx context.Context, od *v1alpha1.
 	d := deployer.New(registry, r.log)
 
 	return d.Deploy(ctx, deployer.Opts{
-		Kubeconfig: r.kubeconfig,
+		KubeConfig: r.kubeConfig,
 		Image:      kc.Spec.Image,
 		FeatureSet: kc.Spec.FeatureSet,
 		Includes:   []string{od.Spec.Include},
