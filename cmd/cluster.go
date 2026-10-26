@@ -12,7 +12,6 @@ import (
 	pb "github.com/openshift-eng/kubernetes-integration-testing/api/grpc"
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/daemon"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/store"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -104,7 +103,7 @@ var clusterDestroyCmd = &cobra.Command{
 }
 
 func ensureDaemon() error {
-	f, err := os.OpenFile(appStore.LockPath(), os.O_CREATE|os.O_RDONLY, 0o644)
+	f, err := os.OpenFile(appPaths.Lock(), os.O_CREATE|os.O_RDONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("opening lock file: %w", err)
 	}
@@ -115,7 +114,7 @@ func ensureDaemon() error {
 	}
 	defer func() { _ = unix.Flock(int(f.Fd()), unix.LOCK_UN) }()
 
-	if _, running := store.IsRunning(appStore.PidPath(), appStore.SocketPath()); running {
+	if _, running := daemon.IsRunning(appFs, appPaths.Pid(), appPaths.Socket()); running {
 		return nil
 	}
 
@@ -124,7 +123,7 @@ func ensureDaemon() error {
 		return fmt.Errorf("could not start daemon: %w", err)
 	}
 
-	sock := appStore.SocketPath()
+	sock := appPaths.Socket()
 	for range 600 {
 		if _, err := os.Stat(sock); err == nil {
 			return nil
@@ -138,7 +137,7 @@ func daemonClient() (pb.DaemonClient, *grpc.ClientConn, error) {
 	if err := ensureDaemon(); err != nil {
 		return nil, nil, err
 	}
-	return daemon.NewClient(appStore)
+	return daemon.NewClient(appPaths.Socket())
 }
 
 func grpcError(err error) error {

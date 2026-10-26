@@ -10,14 +10,12 @@ import (
 	pb "github.com/openshift-eng/kubernetes-integration-testing/api/grpc"
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/cluster"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/store"
 )
 
 type server struct {
 	pb.UnimplementedDaemonServer
 	clusterManager *cluster.ClusterManager
-	store    store.Store
-	log      *slog.Logger
+	log            *slog.Logger
 }
 
 func (s *server) CreateCluster(ctx context.Context, req *pb.CreateClusterRequest) (*pb.CreateClusterResponse, error) {

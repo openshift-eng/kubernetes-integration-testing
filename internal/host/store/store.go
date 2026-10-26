@@ -7,9 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
-	"syscall"
 
 	"github.com/spf13/afero"
 )
@@ -24,10 +22,6 @@ type Store interface {
 	ClusterDir(name string) (string, error)
 	RemoveClusterDir(name string) error
 	ImageCacheDir() string
-	LockPath() string
-	PidPath() string
-	SocketPath() string
-	LogPath() string
 }
 
 type store struct {
@@ -77,22 +71,6 @@ func (s *store) ImageCacheDir() string {
 	return filepath.Join(s.root, "images")
 }
 
-func (s *store) LockPath() string {
-	return filepath.Join(s.root, "kit.lock")
-}
-
-func (s *store) PidPath() string {
-	return filepath.Join(s.root, "pid")
-}
-
-func (s *store) SocketPath() string {
-	return filepath.Join(s.root, "kit.sock")
-}
-
-func (s *store) LogPath() string {
-	return filepath.Join(s.root, "daemon.log")
-}
-
 func (s *store) Register(id string, fetch FetchFunc) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -140,64 +118,6 @@ func (s *store) Get(id string) (string, error) {
 		return "", fmt.Errorf("fetching %q: %w", id, err)
 	}
 	return path, nil
-}
-
-func WritePid(fs afero.Fs, path string, pid int) error {
-	return afero.WriteFile(fs, path, []byte(strconv.Itoa(pid)), 0o644)
-}
-
-func ReadPid(fs afero.Fs, path string) (int, error) {
-	data, err := afero.ReadFile(fs, path)
-	if err != nil {
-		return 0, err
-	}
-	return strconv.Atoi(string(data))
-}
-
-//nolint:errcheck
-func IsRunning(pidPath, sockPath string) (int, bool) {
-	pid, err := ReadPid(afero.NewOsFs(), pidPath)
-	if err != nil {
-		return 0, false
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return 0, false
-	}
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		Cleanup(pidPath, sockPath)
-		return 0, false
-	}
-	exists, _ := afero.Exists(afero.NewOsFs(), sockPath)
-	if !exists {
-		Cleanup(pidPath, sockPath)
-		return 0, false
-	}
-	return pid, true
-}
-
-func Stop(pidPath, sockPath string) error {
-	pid, running := IsRunning(pidPath, sockPath)
-	if !running {
-		return fmt.Errorf("not running")
-	}
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return fmt.Errorf("finding process %d: %w", pid, err)
-	}
-	return proc.Signal(syscall.SIGTERM)
-}
-
-//nolint:errcheck
-func Cleanup(pidPath, sockPath string) {
-	osFs := afero.NewOsFs()
-	if pid, err := ReadPid(osFs, pidPath); err == nil {
-		if proc, err := os.FindProcess(pid); err == nil {
-			proc.Signal(syscall.SIGTERM)
-		}
-	}
-	osFs.Remove(pidPath)
-	osFs.Remove(sockPath)
 }
 
 func DownloadBinary(url, dest string) (err error) {

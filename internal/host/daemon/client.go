@@ -10,17 +10,14 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	pb "github.com/openshift-eng/kubernetes-integration-testing/api/grpc"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/store"
 )
 
-func NewClient(s store.Store) (pb.DaemonClient, *grpc.ClientConn, error) {
-	sock := s.SocketPath()
-
+func NewClient(sockPath string) (pb.DaemonClient, *grpc.ClientConn, error) {
 	conn, err := grpc.NewClient(
 		"passthrough:///unix",
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithContextDialer(func(_ context.Context, _ string) (net.Conn, error) {
-			return net.DialTimeout("unix", sock, 3*time.Second)
+			return net.DialTimeout("unix", sockPath, 3*time.Second)
 		}),
 	)
 	if err != nil {

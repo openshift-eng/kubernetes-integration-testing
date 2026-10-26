@@ -16,14 +16,11 @@ func newTestStore(t *testing.T) Store {
 	return s
 }
 
-func TestPaths(t *testing.T) {
+func TestImageCacheDir(t *testing.T) {
 	s := newTestStore(t)
 
-	if got := s.PidPath(); got != "/data/pid" {
-		t.Errorf("PidPath() = %q, want /data/pid", got)
-	}
-	if got := s.SocketPath(); got != "/data/kit.sock" {
-		t.Errorf("SocketPath() = %q, want /data/kit.sock", got)
+	if got := s.ImageCacheDir(); got != "/data/images" {
+		t.Errorf("ImageCacheDir() = %q, want /data/images", got)
 	}
 }
 
@@ -106,22 +103,5 @@ func TestDirsCreated(t *testing.T) {
 		if !exists {
 			t.Errorf("directory %q should exist", dir)
 		}
-	}
-}
-
-func TestWriteAndReadPid(t *testing.T) {
-	fs := afero.NewMemMapFs()
-	path := "/data/pid"
-
-	if err := WritePid(fs, path, 12345); err != nil {
-		t.Fatal(err)
-	}
-
-	pid, err := ReadPid(fs, path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pid != 12345 {
-		t.Errorf("ReadPid() = %d, want 12345", pid)
 	}
 }

@@ -7,7 +7,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/release"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/release"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

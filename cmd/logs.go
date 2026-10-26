@@ -17,7 +17,7 @@ var logsCmd = &cobra.Command{
 	Use:   "logs",
 	Short: "Show daemon logs",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		path := appStore.LogPath()
+		path := appPaths.Log()
 
 		f, err := os.Open(path)
 		if err != nil {
