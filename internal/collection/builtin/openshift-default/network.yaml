@@ -1,0 +1,10 @@
+apiVersion: config.openshift.io/v1
+kind: Network
+metadata:
+  name: cluster
+spec:
+  serviceNetwork:
+  {{- range .ServiceNetworks }}
+    - "{{ . }}"
+  {{- end }}
+  networkType: "{{ .NetworkType }}"
