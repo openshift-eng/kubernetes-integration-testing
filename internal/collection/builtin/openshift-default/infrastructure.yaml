@@ -1,0 +1,10 @@
+apiVersion: config.openshift.io/v1
+kind: Infrastructure
+metadata:
+  name: cluster
+spec: {}
+status:
+  platform: "{{ .Platform }}"
+  platformStatus:
+    type: "{{ .Platform }}"
+  apiServerInternalURI: "{{ .APIServerURL }}"
