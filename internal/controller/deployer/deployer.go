@@ -17,7 +17,7 @@ import (
 
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/image"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/release"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/release"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"

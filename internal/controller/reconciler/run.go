@@ -9,7 +9,7 @@ import (
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/image"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/release"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/release"
 
 	apiextclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"

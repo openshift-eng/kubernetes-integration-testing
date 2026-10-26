@@ -7,10 +7,11 @@ import (
 	"net"
 	"os"
 
+	"github.com/spf13/afero"
+
 	pb "github.com/openshift-eng/kubernetes-integration-testing/api/grpc"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/cluster"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/podman"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/store"
 	"google.golang.org/grpc"
 )
 
@@ -18,8 +19,62 @@ const defaultControllerImage = "registry.ci.openshift.org/ci/kubernetes-integrat
 
 type ProviderFactory func(ctx context.Context, log *slog.Logger) cluster.Provider
 
-func Run(ctx context.Context, s store.Store, factories map[string]ProviderFactory, foreground bool) error {
-	logFile, err := os.OpenFile(s.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+type Daemon struct {
+	paths   Paths
+	fs      afero.Fs
+	manager *cluster.ClusterManager
+	log     *slog.Logger
+}
+
+func New(paths Paths, fs afero.Fs, manager *cluster.ClusterManager, log *slog.Logger) *Daemon {
+	return &Daemon{paths: paths, fs: fs, manager: manager, log: log}
+}
+
+func (d *Daemon) Run(ctx context.Context) error {
+	pidPath := d.paths.Pid()
+	sockPath := d.paths.Socket()
+
+	if err := WritePid(d.fs, pidPath, os.Getpid()); err != nil {
+		return err
+	}
+	defer func() {
+		if err := d.fs.Remove(pidPath); err != nil {
+			d.log.Warn("removing pid file", "error", err)
+		}
+	}()
+
+	if err := d.fs.Remove(sockPath); err != nil && !os.IsNotExist(err) {
+		d.log.Warn("removing stale socket", "error", err)
+	}
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := d.fs.Remove(sockPath); err != nil {
+			d.log.Warn("removing socket", "error", err)
+		}
+	}()
+
+	srv := &server{
+		clusterManager: d.manager,
+		log:            d.log.With("module", "grpc"),
+	}
+	grpcServer := grpc.NewServer()
+	pb.RegisterDaemonServer(grpcServer, srv)
+
+	go func() {
+		<-ctx.Done()
+		d.log.Info("shutting down")
+		grpcServer.GracefulStop()
+	}()
+
+	d.log.Info("started", "pid", os.Getpid(), "socket", sockPath)
+	return grpcServer.Serve(lis)
+}
+
+func Start(ctx context.Context, paths Paths, imageCacheDir string, factories map[string]ProviderFactory) error {
+	logFile, err := os.OpenFile(paths.Log(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
@@ -29,10 +84,7 @@ func Run(ctx context.Context, s store.Store, factories map[string]ProviderFactor
 		}
 	}()
 
-	var w io.Writer = logFile
-	if foreground {
-		w = io.MultiWriter(logFile, os.Stderr)
-	}
+	w := io.MultiWriter(logFile, os.Stderr)
 	handler := slog.NewTextHandler(w, nil)
 	slog.SetDefault(slog.New(handler))
 
@@ -50,51 +102,12 @@ func Run(ctx context.Context, s store.Store, factories map[string]ProviderFactor
 	launcher := cluster.NewPodmanControllerLauncher(
 		podman.NewLocalClient(),
 		controllerImage,
-		s.ImageCacheDir(),
+		imageCacheDir,
 		log.With("module", "launcher"),
 	)
 
-	clusterManager := cluster.NewClusterManager(ctx, log, "kwok", providers, launcher)
+	manager := cluster.NewClusterManager(ctx, log, "kwok", providers, launcher)
 
-	pidPath := s.PidPath()
-	sockPath := s.SocketPath()
-
-	if err := store.WritePid(s.Fs(), pidPath, os.Getpid()); err != nil {
-		return err
-	}
-	defer func() {
-		if err := s.Fs().Remove(pidPath); err != nil {
-			log.Warn("removing pid file", "error", err)
-		}
-	}()
-
-	if err := s.Fs().Remove(sockPath); err != nil && !os.IsNotExist(err) {
-		log.Warn("removing stale socket", "error", err)
-	}
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := s.Fs().Remove(sockPath); err != nil {
-			log.Warn("removing socket", "error", err)
-		}
-	}()
-
-	srv := &server{
-		clusterManager: clusterManager,
-		store:          s,
-		log:            slog.New(handler).With("module", "grpc"),
-	}
-	grpcServer := grpc.NewServer()
-	pb.RegisterDaemonServer(grpcServer, srv)
-
-	go func() {
-		<-ctx.Done()
-		log.Info("shutting down")
-		grpcServer.GracefulStop()
-	}()
-
-	log.Info("started", "pid", os.Getpid(), "socket", sockPath)
-	return grpcServer.Serve(lis)
+	d := New(paths, afero.NewOsFs(), manager, log)
+	return d.Run(ctx)
 }

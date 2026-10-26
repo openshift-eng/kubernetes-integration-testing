@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/release"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/release"
 
 	"golang.org/x/sync/errgroup"
 
