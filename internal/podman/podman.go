@@ -67,9 +67,16 @@ func NewLocalClient() Client {
 
 func NewRemoteClient(socketPath string) Client {
 	return &client{
-		binary: "podman",
+		binary: lookupBinary(),
 		args:   []string{"--url", "unix://" + socketPath},
 	}
+}
+
+func lookupBinary() string {
+	if _, err := exec.LookPath("podman"); err == nil {
+		return "podman"
+	}
+	return "podman-remote"
 }
 
 func (c *client) cmd(ctx context.Context, args ...string) *exec.Cmd {
