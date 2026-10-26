@@ -455,6 +455,11 @@ func installLogsCRD(ctx context.Context, cfg *rest.Config) error {
 func boolPtr(b bool) *bool { return &b }
 
 func fixKwokPodmanSELinux(clusterName, logsDir string, log *slog.Logger) {
+	out, err := exec.Command("getenforce").Output()
+	if err != nil || strings.TrimSpace(string(out)) == "Disabled" {
+		return
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		log.Warn("could not determine home dir for SELinux fix", "error", err)
@@ -473,7 +478,10 @@ func fixKwokPodmanSELinux(clusterName, logsDir string, log *slog.Logger) {
 	prefix := "kwok-" + clusterName + "-"
 	for _, component := range []string{"etcd", "kube-apiserver", "kube-controller-manager", "kube-scheduler", "kwok-controller"} {
 		name := prefix + component
-		_ = exec.Command("podman", "restart", name).Run()
+		if out, err := exec.Command("podman", "restart", name).CombinedOutput(); err != nil {
+			log.Error("podman restart failed after SELinux relabel", "container", name, "error", err, "output", string(out))
+			return
+		}
 	}
 	log.Info("restarted kwok containers after SELinux fix")
 }
