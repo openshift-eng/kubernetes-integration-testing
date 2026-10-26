@@ -26,7 +26,7 @@ var logsGVR = schema.GroupVersionResource{
 }
 
 type controller struct {
-	kubeconfig string
+	kubeConfig *kube.KubeConfig
 	runner     PodRunner
 	changes    <-chan ContainerStateChange
 	log        *slog.Logger
@@ -41,9 +41,9 @@ type controller struct {
 	claimed   map[string]bool
 }
 
-func NewController(kubeconfig string, runner PodRunner, changes <-chan ContainerStateChange, log *slog.Logger) *controller {
+func NewController(kubeConfig *kube.KubeConfig, runner PodRunner, changes <-chan ContainerStateChange, log *slog.Logger) *controller {
 	return &controller{
-		kubeconfig: kubeconfig,
+		kubeConfig: kubeConfig,
 		runner:     runner,
 		changes:    changes,
 		log:        log,
@@ -53,7 +53,7 @@ func NewController(kubeconfig string, runner PodRunner, changes <-chan Container
 }
 
 func (c *controller) Run(ctx context.Context) error {
-	cfg, err := kube.BuildConfig(c.kubeconfig)
+	cfg, err := c.kubeConfig.RestConfig()
 	if err != nil {
 		return fmt.Errorf("building kubeconfig: %w", err)
 	}

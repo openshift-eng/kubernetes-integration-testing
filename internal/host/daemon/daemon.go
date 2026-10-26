@@ -11,6 +11,7 @@ import (
 
 	pb "github.com/openshift-eng/kubernetes-integration-testing/api/grpc"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/cluster"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/store"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/podman"
 	"google.golang.org/grpc"
 )
@@ -73,7 +74,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return grpcServer.Serve(lis)
 }
 
-func Start(ctx context.Context, paths Paths, imageCacheDir string, factories map[string]ProviderFactory) error {
+func Start(ctx context.Context, paths Paths, appStore store.Store, factories map[string]ProviderFactory) error {
 	logFile, err := os.OpenFile(paths.Log(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
@@ -102,7 +103,8 @@ func Start(ctx context.Context, paths Paths, imageCacheDir string, factories map
 	launcher := cluster.NewPodmanControllerLauncher(
 		podman.NewLocalClient(),
 		controllerImage,
-		imageCacheDir,
+		appStore.ImageCacheDir(),
+		appStore.CollectionsDir(),
 		log.With("module", "launcher"),
 	)
 

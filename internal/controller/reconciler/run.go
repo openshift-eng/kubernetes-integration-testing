@@ -20,10 +20,10 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
-func Start(ctx context.Context, log *slog.Logger, kc *v1alpha1.KitCluster, kubeconfig, cacheDir string, registry *image.Registry) (context.CancelFunc, error) {
+func Start(ctx context.Context, log *slog.Logger, kitCluster *v1alpha1.KitCluster, kubeConfig *kube.KubeConfig, cacheDir, collectionsDir string, registry *image.Registry) (context.CancelFunc, error) {
 	ctrl.SetLogger(logr.FromSlogHandler(log.Handler()))
 
-	cfg, err := kube.BuildConfig(kubeconfig)
+	cfg, err := kubeConfig.RestConfig()
 	if err != nil {
 		return nil, fmt.Errorf("building kubeconfig: %w", err)
 	}
@@ -47,10 +47,10 @@ func Start(ctx context.Context, log *slog.Logger, kc *v1alpha1.KitCluster, kubec
 	if err != nil {
 		return nil, fmt.Errorf("creating client: %w", err)
 	}
-	if err := cl.Create(ctx, kc); err != nil && !apierrors.IsAlreadyExists(err) {
+	if err := cl.Create(ctx, kitCluster); err != nil && !apierrors.IsAlreadyExists(err) {
 		return nil, fmt.Errorf("creating KitCluster CR: %w", err)
 	}
-	log.Info("ensured KitCluster CR", "name", kc.Name)
+	log.Info("ensured KitCluster CR", "name", kitCluster.Name)
 
 	extClient, err := apiextclient.NewForConfig(cfg)
 	if err != nil {
@@ -68,17 +68,18 @@ func Start(ctx context.Context, log *slog.Logger, kc *v1alpha1.KitCluster, kubec
 		apiServerURL: cfg.Host,
 		log:          log,
 	}
-	if err := kcReconciler.SetupWithManager(mgr, kc.Name); err != nil {
+	if err := kcReconciler.SetupWithManager(mgr, kitCluster.Name); err != nil {
 		return nil, fmt.Errorf("setting up KitCluster controller: %w", err)
 	}
 
 	odReconciler := &operatorDeploymentReconciler{
-		client:     mgr.GetClient(),
-		kubeconfig: kubeconfig,
-		cacheDir:   cacheDir,
-		log:        log,
+		client:         mgr.GetClient(),
+		kubeConfig:     kubeConfig,
+		cacheDir:       cacheDir,
+		collectionsDir: collectionsDir,
+		log:            log,
 	}
-	if err := odReconciler.SetupWithManager(mgr, kc.Name); err != nil {
+	if err := odReconciler.SetupWithManager(mgr, kitCluster.Name); err != nil {
 		return nil, fmt.Errorf("setting up OperatorDeployment controller: %w", err)
 	}
 

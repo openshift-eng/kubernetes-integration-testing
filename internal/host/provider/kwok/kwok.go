@@ -302,9 +302,13 @@ func setupCluster(ctx context.Context, kubeconfigPath string, workers int) error
 		workers = 1
 	}
 
-	cfg, err := kube.BuildConfig(kubeconfigPath)
+	kc, err := kube.New(kubeconfigPath, "")
 	if err != nil {
-		return fmt.Errorf("building kubeconfig: %w", err)
+		return fmt.Errorf("loading kubeconfig: %w", err)
+	}
+	cfg, err := kc.RestConfig()
+	if err != nil {
+		return fmt.Errorf("building rest config: %w", err)
 	}
 
 	clientset, err := kubernetes.NewForConfig(cfg)
@@ -475,7 +479,11 @@ func fixKwokPodmanSELinux(clusterName, logsDir string, log *slog.Logger) {
 }
 
 func waitForAPIServer(ctx context.Context, kubeconfigPath string, log *slog.Logger) error {
-	cfg, err := kube.BuildConfig(kubeconfigPath)
+	kc, err := kube.New(kubeconfigPath, "")
+	if err != nil {
+		return err
+	}
+	cfg, err := kc.RestConfig()
 	if err != nil {
 		return err
 	}

@@ -11,21 +11,26 @@ import (
 )
 
 type PodmanControllerLauncher struct {
-	client   podman.Client
-	image    string
-	cacheDir string
-	log      *slog.Logger
+	client         podman.Client
+	image          string
+	cacheDir       string
+	collectionsDir string
+	log            *slog.Logger
 }
 
-func NewPodmanControllerLauncher(client podman.Client, image, cacheDir string, log *slog.Logger) *PodmanControllerLauncher {
-	return &PodmanControllerLauncher{client: client, image: image, cacheDir: cacheDir, log: log}
+func NewPodmanControllerLauncher(client podman.Client, image, cacheDir, collectionsDir string, log *slog.Logger) *PodmanControllerLauncher {
+	return &PodmanControllerLauncher{client: client, image: image, cacheDir: cacheDir, collectionsDir: collectionsDir, log: log}
 }
 
 func (l *PodmanControllerLauncher) Launch(ctx context.Context, name string, c Cluster) (func(), error) {
 	containerName := "kit-controller-" + name
 	cfg := c.ControllerConfig()
 
-	if err := kube.FlattenKubeconfig(c.KubeConfig()); err != nil {
+	kc, err := kube.New(c.KubeConfig(), "")
+	if err != nil {
+		return nil, fmt.Errorf("loading kubeconfig: %w", err)
+	}
+	if err := kc.WriteFlattened(c.KubeConfig()); err != nil {
 		return nil, fmt.Errorf("flattening kubeconfig: %w", err)
 	}
 
@@ -39,6 +44,10 @@ func (l *PodmanControllerLauncher) Launch(ctx context.Context, name string, c Cl
 	if l.cacheDir != "" {
 		env["KIT_CACHE_DIR"] = l.cacheDir
 		mounts = append(mounts, podman.Mount{Source: l.cacheDir, Target: l.cacheDir, Options: "z"})
+	}
+	if l.collectionsDir != "" {
+		env["KIT_COLLECTIONS_DIR"] = l.collectionsDir
+		mounts = append(mounts, podman.Mount{Source: l.collectionsDir, Target: l.collectionsDir, Options: "ro,z"})
 	}
 	for _, dir := range []string{cfg.LogsDir, cfg.VolumesDir} {
 		if dir == "" {
@@ -60,7 +69,7 @@ func (l *PodmanControllerLauncher) Launch(ctx context.Context, name string, c Cl
 
 	l.log.Info("launching controller container", "name", containerName, "image", l.image, "network", cfg.Network)
 
-	_, err := l.client.Run(ctx, podman.RunOpts{
+	_, err = l.client.Run(ctx, podman.RunOpts{
 		Name:    containerName,
 		Image:   l.image,
 		Network: cfg.Network,

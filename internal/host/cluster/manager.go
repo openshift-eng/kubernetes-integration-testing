@@ -10,13 +10,13 @@ import (
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/bootstrap"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/pullsecret"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/tools/clientcmd"
 )
 
 type managedCluster struct {
@@ -88,8 +88,14 @@ func (cm *ClusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 		return nil, err
 	}
 
+	clusterKC, err := kube.New(c.KubeConfig(), "")
+	if err != nil {
+		destroyErr := p.Destroy(ctx, kc.Name)
+		return nil, errors.Join(fmt.Errorf("loading cluster kubeconfig: %w", err), destroyErr)
+	}
+
 	ccfg := c.ControllerConfig()
-	if err := bootstrap.Store(ctx, c.KubeConfig(), bootstrap.ClusterConfig{
+	if err := bootstrap.Store(ctx, clusterKC, bootstrap.ClusterConfig{
 		Network:       ccfg.Network,
 		LogsDir:       ccfg.LogsDir,
 		VolumesDir:    ccfg.VolumesDir,
@@ -106,7 +112,7 @@ func (cm *ClusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 		return nil, errors.Join(fmt.Errorf("launching controller: %w", err), destroyErr)
 	}
 
-	if err := cm.waitForController(ctx, c.KubeConfig(), kc.Name); err != nil {
+	if err := cm.waitForController(ctx, clusterKC, kc.Name); err != nil {
 		stop()
 		destroyErr := p.Destroy(ctx, kc.Name)
 		return nil, errors.Join(fmt.Errorf("waiting for controller readiness: %w", err), destroyErr)
@@ -153,8 +159,8 @@ var kitClusterGVR = schema.GroupVersionResource{
 	Resource: "kitclusters",
 }
 
-func (cm *ClusterManager) waitForController(ctx context.Context, kubeconfig, crName string) error {
-	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+func (cm *ClusterManager) waitForController(ctx context.Context, kc *kube.KubeConfig, crName string) error {
+	cfg, err := kc.RestConfig()
 	if err != nil {
 		return fmt.Errorf("building kubeconfig: %w", err)
 	}

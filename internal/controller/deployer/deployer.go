@@ -19,6 +19,7 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/release"
 
+
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,7 +32,7 @@ import (
 )
 
 type Opts struct {
-	Kubeconfig string
+	KubeConfig *kube.KubeConfig
 	Image      string
 	FeatureSet string
 	Includes   []string
@@ -66,7 +67,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts Opts, statusFn func(string))
 	}
 	d.log.Info("manifest breakdown", "namespaces", len(namespaces), "resources", len(resources))
 
-	cfg, err := kube.BuildConfig(opts.Kubeconfig)
+	cfg, err := opts.KubeConfig.RestConfig()
 	if err != nil {
 		return fmt.Errorf("building kubeconfig: %w", err)
 	}
@@ -200,7 +201,7 @@ func (d *Deployer) ensureBootstrapResources(ctx context.Context, cfg *rest.Confi
 				"platformStatus": map[string]interface{}{
 					"type": "None",
 				},
-				"apiServerInternalURI": apiServerURL(opts.Kubeconfig),
+				"apiServerInternalURI": apiServerURL(opts.KubeConfig),
 			},
 		}}},
 		{configRes("dnses"), &unstructured.Unstructured{Object: map[string]interface{}{
@@ -244,7 +245,7 @@ func (d *Deployer) ensureBootstrapResources(ctx context.Context, cfg *rest.Confi
 	if err != nil {
 		return fmt.Errorf("getting Infrastructure for status update: %w", err)
 	}
-	apiURL := apiServerURL(opts.Kubeconfig)
+	apiURL := apiServerURL(opts.KubeConfig)
 	d.log.Info("setting Infrastructure status", "apiServerInternalURL", apiURL)
 	infra.Object["status"] = map[string]interface{}{
 		"platform": "None",
@@ -472,8 +473,8 @@ func base64Encode(data []byte) string {
 	return base64.StdEncoding.EncodeToString(data)
 }
 
-func apiServerURL(kubeconfigPath string) string {
-	cfg, err := kube.BuildConfig(kubeconfigPath)
+func apiServerURL(kc *kube.KubeConfig) string {
+	cfg, err := kc.RestConfig()
 	if err != nil {
 		return ""
 	}
