@@ -78,7 +78,7 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 			return (&kitClusterReconciler{
 				client:       mgr.GetClient(),
 				crdManager:   crdMgr,
-				rel:          rel,
+				release:      rel,
 				apiServerURL: clients.REST.Host,
 				log:          log,
 			}).SetupWithManager(mgr, clusterName)
@@ -95,7 +95,9 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 		{"ResourceCollection", func() error {
 			return (&collectionReconciler{
 				client:         mgr.GetClient(),
-				kubeConfig:     kubeConfig,
+				dynClient:      clients.Dynamic,
+				discovery:      clients.Discovery,
+				release:        rel,
 				collectionsDir: collectionsDir,
 				log:            log,
 			}).SetupWithManager(ctx, mgr, clusterName)
