@@ -53,8 +53,9 @@ func (r *collectionConfigReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, nil
 	}
 
+	base := cc.DeepCopy()
 	cc.Status.Available = available
-	if err := r.client.Status().Update(ctx, &cc); err != nil {
+	if err := r.client.Status().Patch(ctx, &cc, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, err
 	}
 

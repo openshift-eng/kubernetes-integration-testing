@@ -61,7 +61,13 @@ func (r *kitClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	kc.Status.APIServerURL = r.apiServerURL
+	if kc.Status.APIServerURL != r.apiServerURL {
+		base := kc.DeepCopy()
+		kc.Status.APIServerURL = r.apiServerURL
+		if err := r.client.Status().Patch(ctx, &kc, client.MergeFrom(base)); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 
 	if kc.Spec.Image != "" {
 		result, err := r.phaseImagePull(ctx, &kc)
@@ -96,18 +102,20 @@ func (r *kitClusterReconciler) phaseImagePull(ctx context.Context, kc *v1alpha1.
 
 	if cond == nil || cond.Reason != reasonPulling || cond.ObservedGeneration != kc.Generation {
 		r.log.Info("pulling release image", "name", kc.Name, "image", kc.Spec.Image)
+		base := kc.DeepCopy()
 		r.setCondition(kc, v1alpha1.ConditionImagePulled, metav1.ConditionFalse, reasonPulling, fmt.Sprintf("Pulling image %s", kc.Spec.Image))
 		r.setCondition(kc, v1alpha1.ConditionReady, metav1.ConditionFalse, reasonReconciling, "Pulling release image")
-		if err := r.client.Status().Update(ctx, kc); err != nil {
+		if err := r.client.Status().Patch(ctx, kc, client.MergeFrom(base)); err != nil {
 			return &ctrl.Result{}, err
 		}
 		return &ctrl.Result{RequeueAfter: time.Millisecond}, nil
 	}
 
 	if err := r.rel.Load(kc.Spec.Image); err != nil {
+		base := kc.DeepCopy()
 		r.setCondition(kc, v1alpha1.ConditionImagePulled, metav1.ConditionFalse, reasonPullFailed, err.Error())
 		r.setCondition(kc, v1alpha1.ConditionReady, metav1.ConditionFalse, reasonReconcileFailed, fmt.Sprintf("Failed to pull image: %s", err))
-		if statusErr := r.client.Status().Update(ctx, kc); statusErr != nil {
+		if statusErr := r.client.Status().Patch(ctx, kc, client.MergeFrom(base)); statusErr != nil {
 			r.log.Error("updating status after pull failure", "name", kc.Name, "error", statusErr)
 		}
 		// Returning the error triggers controller-runtime's exponential backoff for retries.
@@ -116,9 +124,10 @@ func (r *kitClusterReconciler) phaseImagePull(ctx context.Context, kc *v1alpha1.
 
 	r.log.Info("release image ready", "name", kc.Name, "image", kc.Spec.Image)
 
+	base := kc.DeepCopy()
 	r.setCondition(kc, v1alpha1.ConditionImagePulled, metav1.ConditionTrue, reasonPulled, "")
 	r.setCondition(kc, v1alpha1.ConditionReady, metav1.ConditionFalse, reasonReconciling, "Image pulled, syncing CRDs")
-	if err := r.client.Status().Update(ctx, kc); err != nil {
+	if err := r.client.Status().Patch(ctx, kc, client.MergeFrom(base)); err != nil {
 		return &ctrl.Result{}, err
 	}
 
@@ -142,9 +151,10 @@ func (r *kitClusterReconciler) phaseCRDSync(ctx context.Context, kc *v1alpha1.Ki
 	crds, _ := release.SplitCRDs(all)
 
 	if err := r.crdManager.Sync(ctx, crds, kc.Spec.FeatureSet); err != nil {
+		base := kc.DeepCopy()
 		r.setCondition(kc, v1alpha1.ConditionCRDsInstalled, metav1.ConditionFalse, reasonCRDsSyncFailed, err.Error())
 		r.setCondition(kc, v1alpha1.ConditionReady, metav1.ConditionFalse, reasonReconcileFailed, fmt.Sprintf("Failed to sync CRDs: %s", err))
-		if statusErr := r.client.Status().Update(ctx, kc); statusErr != nil {
+		if statusErr := r.client.Status().Patch(ctx, kc, client.MergeFrom(base)); statusErr != nil {
 			r.log.Error("updating status after CRD sync failure", "name", kc.Name, "error", statusErr)
 		}
 		// Returning the error triggers controller-runtime's exponential backoff for retries.
@@ -153,9 +163,10 @@ func (r *kitClusterReconciler) phaseCRDSync(ctx context.Context, kc *v1alpha1.Ki
 
 	r.log.Info("CRDs synced", "name", kc.Name)
 
+	base := kc.DeepCopy()
 	r.setCondition(kc, v1alpha1.ConditionCRDsInstalled, metav1.ConditionTrue, reasonCRDsInstalled, "")
 	r.setCondition(kc, v1alpha1.ConditionReady, metav1.ConditionFalse, reasonReconciling, "CRDs installed")
-	if err := r.client.Status().Update(ctx, kc); err != nil {
+	if err := r.client.Status().Patch(ctx, kc, client.MergeFrom(base)); err != nil {
 		return &ctrl.Result{}, err
 	}
 
@@ -183,9 +194,10 @@ func (r *kitClusterReconciler) phaseCollections(ctx context.Context, kc *v1alpha
 
 	if len(missing) > 0 {
 		msg := fmt.Sprintf("collections not found: %s", strings.Join(missing, ", "))
+		base := kc.DeepCopy()
 		r.setCondition(kc, v1alpha1.ConditionCollectionsApplied, metav1.ConditionFalse, reasonCollectionsNotFound, msg)
 		r.setCondition(kc, v1alpha1.ConditionReady, metav1.ConditionFalse, reasonReconcileFailed, msg)
-		if err := r.client.Status().Update(ctx, kc); err != nil {
+		if err := r.client.Status().Patch(ctx, kc, client.MergeFrom(base)); err != nil {
 			return &ctrl.Result{}, err
 		}
 		return &ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -193,17 +205,19 @@ func (r *kitClusterReconciler) phaseCollections(ctx context.Context, kc *v1alpha
 
 	if len(pending) > 0 {
 		msg := fmt.Sprintf("waiting for collections: %s", strings.Join(pending, ", "))
+		base := kc.DeepCopy()
 		r.setCondition(kc, v1alpha1.ConditionCollectionsApplied, metav1.ConditionFalse, reasonCollectionsPending, msg)
 		r.setCondition(kc, v1alpha1.ConditionReady, metav1.ConditionFalse, reasonReconciling, msg)
-		if err := r.client.Status().Update(ctx, kc); err != nil {
+		if err := r.client.Status().Patch(ctx, kc, client.MergeFrom(base)); err != nil {
 			return &ctrl.Result{}, err
 		}
 		return &ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
+	base := kc.DeepCopy()
 	r.setCondition(kc, v1alpha1.ConditionCollectionsApplied, metav1.ConditionTrue, reasonCollectionsApplied, "")
 	r.setCondition(kc, v1alpha1.ConditionReady, metav1.ConditionFalse, reasonReconciling, "Collections applied")
-	if err := r.client.Status().Update(ctx, kc); err != nil {
+	if err := r.client.Status().Patch(ctx, kc, client.MergeFrom(base)); err != nil {
 		return &ctrl.Result{}, err
 	}
 
@@ -211,8 +225,9 @@ func (r *kitClusterReconciler) phaseCollections(ctx context.Context, kc *v1alpha
 }
 
 func (r *kitClusterReconciler) phaseReady(ctx context.Context, kc *v1alpha1.KitCluster) (ctrl.Result, error) {
+	base := kc.DeepCopy()
 	r.setCondition(kc, v1alpha1.ConditionReady, metav1.ConditionTrue, reasonReady, "")
-	if err := r.client.Status().Update(ctx, kc); err != nil {
+	if err := r.client.Status().Patch(ctx, kc, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, err
 	}
 

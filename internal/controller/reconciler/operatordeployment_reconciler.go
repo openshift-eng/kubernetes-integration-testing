@@ -34,24 +34,27 @@ func (r *operatorDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, nil
 	}
 
+	base := od.DeepCopy()
 	od.Status.Phase = v1alpha1.OperatorDeploymentDeploying
 	od.Status.Message = ""
-	if err := r.client.Status().Update(ctx, &od); err != nil {
+	if err := r.client.Status().Patch(ctx, &od, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	if err := r.deploy(ctx, &od); err != nil {
+		base := od.DeepCopy()
 		od.Status.Phase = v1alpha1.OperatorDeploymentFailed
 		od.Status.Message = err.Error()
-		if uerr := r.client.Status().Update(ctx, &od); uerr != nil {
+		if uerr := r.client.Status().Patch(ctx, &od, client.MergeFrom(base)); uerr != nil {
 			r.log.Error("updating failed status", "name", od.Name, "error", uerr)
 		}
 		return ctrl.Result{}, err
 	}
 
+	base = od.DeepCopy()
 	od.Status.Phase = v1alpha1.OperatorDeploymentReady
 	od.Status.Message = ""
-	if err := r.client.Status().Update(ctx, &od); err != nil {
+	if err := r.client.Status().Patch(ctx, &od, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, err
 	}
 

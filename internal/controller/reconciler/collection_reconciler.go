@@ -63,9 +63,10 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	renderResult, err := r.render(ctx, &rc)
 	if err != nil {
+		base := rc.DeepCopy()
 		rc.Status.Phase = v1alpha1.ResourceCollectionFailed
 		rc.Status.Message = err.Error()
-		if uerr := r.client.Status().Update(ctx, &rc); uerr != nil {
+		if uerr := r.client.Status().Patch(ctx, &rc, client.MergeFrom(base)); uerr != nil {
 			r.log.Error("updating failed status", "name", rc.Name, "error", uerr)
 		}
 		return ctrl.Result{}, err
@@ -80,9 +81,10 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	r.log.Info("applying resource collection", "name", rc.Name, "oldHash", currentHash, "newHash", renderResult.Hash)
 	if err := r.apply(ctx, &rc, renderResult); err != nil {
+		base := rc.DeepCopy()
 		rc.Status.Phase = v1alpha1.ResourceCollectionFailed
 		rc.Status.Message = err.Error()
-		if uerr := r.client.Status().Update(ctx, &rc); uerr != nil {
+		if uerr := r.client.Status().Patch(ctx, &rc, client.MergeFrom(base)); uerr != nil {
 			r.log.Error("updating failed status", "name", rc.Name, "error", uerr)
 		}
 		return ctrl.Result{}, err
@@ -98,10 +100,11 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
+	base := rc.DeepCopy()
 	rc.Status.Phase = v1alpha1.ResourceCollectionApplied
 	rc.Status.Message = ""
 	rc.Status.ObservedGeneration = rc.Generation
-	if err := r.client.Status().Update(ctx, &rc); err != nil {
+	if err := r.client.Status().Patch(ctx, &rc, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, err
 	}
 
