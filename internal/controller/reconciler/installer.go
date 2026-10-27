@@ -28,6 +28,12 @@ type ManifestInstaller struct {
 	log       *slog.Logger
 }
 
+const (
+	kindCRD        = "CustomResourceDefinition"
+	kindVAP        = "ValidatingAdmissionPolicy"
+	kindVAPBinding = "ValidatingAdmissionPolicyBinding"
+)
+
 func NewManifestInstaller(crdClient CRDClient, dynClient dynamic.Interface, disc discovery.DiscoveryInterface, log *slog.Logger) *ManifestInstaller {
 	return &ManifestInstaller{crdClient: crdClient, dynClient: dynClient, disc: disc, log: log}
 }
@@ -62,11 +68,14 @@ func (i *ManifestInstaller) Install(ctx context.Context, fsys fs.FS) error {
 		all = append(all, manifest{name: entry.Name(), raw: raw, kind: meta.Kind})
 	}
 
+	// CRDs must be established before CRs can reference them, and VAPs need their paramRef CRs to exist.
+	// Within the same tier, sort by filename for determinism.
 	sort.Slice(all, func(a, b int) bool {
+		ta, tb := tierOrder(all[a].kind), tierOrder(all[b].kind)
+		if ta != tb {
+			return ta < tb
+		}
 		return all[a].name < all[b].name
-	})
-	sort.SliceStable(all, func(a, b int) bool {
-		return tierOrder(all[a].kind) < tierOrder(all[b].kind)
 	})
 
 	var crdNames []string
@@ -83,7 +92,7 @@ func (i *ManifestInstaller) Install(ctx context.Context, fsys fs.FS) error {
 		lastTier = tier
 
 		switch m.kind {
-		case "CustomResourceDefinition":
+		case kindCRD:
 			name, err := i.applyCRD(ctx, m.raw, m.name)
 			if err != nil {
 				return err
@@ -107,9 +116,9 @@ func (i *ManifestInstaller) Install(ctx context.Context, fsys fs.FS) error {
 
 func tierOrder(kind string) int {
 	switch kind {
-	case "CustomResourceDefinition":
+	case kindCRD:
 		return 0
-	case "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding":
+	case kindVAP, kindVAPBinding:
 		return 2
 	default:
 		return 1
