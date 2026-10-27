@@ -36,19 +36,12 @@ type InlineTemplate struct {
 	Content string `json:"content"`
 }
 
-type ResourceCollectionPhase string
-
 const (
-	ResourceCollectionPending ResourceCollectionPhase = "Pending"
-	ResourceCollectionApplied ResourceCollectionPhase = "Applied"
-	ResourceCollectionFailed  ResourceCollectionPhase = "Failed"
+	ConditionCollectionApplied = "Applied"
 )
 
 type ResourceCollectionStatus struct {
-	Phase              ResourceCollectionPhase `json:"phase,omitempty"`
-	Message            string                  `json:"message,omitempty"`
-	ObservedGeneration int64                   `json:"observedGeneration,omitempty"`
-	Conditions         []metav1.Condition      `json:"conditions,omitempty"`
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true

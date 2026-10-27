@@ -15,6 +15,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
@@ -63,30 +64,21 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	renderResult, err := r.render(ctx, &rc)
 	if err != nil {
-		base := rc.DeepCopy()
-		rc.Status.Phase = v1alpha1.ResourceCollectionFailed
-		rc.Status.Message = err.Error()
-		if uerr := r.client.Status().Patch(ctx, &rc, client.MergeFrom(base)); uerr != nil {
-			r.log.Error("updating failed status", "name", rc.Name, "error", uerr)
-		}
+		r.setCollectionCondition(&rc, metav1.ConditionFalse, "RenderFailed", err.Error())
 		return ctrl.Result{}, err
 	}
 
 	currentHash := rc.GetAnnotations()[collection.ContentHashAnnotation]
-	if rc.Status.Phase == v1alpha1.ResourceCollectionApplied &&
-		rc.Status.ObservedGeneration == rc.Generation &&
+	appliedCond := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+	if appliedCond != nil && appliedCond.Status == metav1.ConditionTrue &&
+		appliedCond.ObservedGeneration == rc.Generation &&
 		currentHash == renderResult.Hash {
 		return ctrl.Result{}, nil
 	}
 
 	r.log.Info("applying resource collection", "name", rc.Name, "oldHash", currentHash, "newHash", renderResult.Hash)
 	if err := r.apply(ctx, &rc, renderResult); err != nil {
-		base := rc.DeepCopy()
-		rc.Status.Phase = v1alpha1.ResourceCollectionFailed
-		rc.Status.Message = err.Error()
-		if uerr := r.client.Status().Patch(ctx, &rc, client.MergeFrom(base)); uerr != nil {
-			r.log.Error("updating failed status", "name", rc.Name, "error", uerr)
-		}
+		r.setCollectionCondition(&rc, metav1.ConditionFalse, "ApplyFailed", err.Error())
 		return ctrl.Result{}, err
 	}
 
@@ -100,16 +92,24 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	base := rc.DeepCopy()
-	rc.Status.Phase = v1alpha1.ResourceCollectionApplied
-	rc.Status.Message = ""
-	rc.Status.ObservedGeneration = rc.Generation
-	if err := r.client.Status().Patch(ctx, &rc, client.MergeFrom(base)); err != nil {
-		return ctrl.Result{}, err
-	}
+	r.setCollectionCondition(&rc, metav1.ConditionTrue, "Applied", "")
 
 	r.log.Info("applied resource collection", "name", rc.Name)
 	return ctrl.Result{}, nil
+}
+
+func (r *collectionReconciler) setCollectionCondition(rc *v1alpha1.ResourceCollection, status metav1.ConditionStatus, reason, message string) {
+	base := rc.DeepCopy()
+	meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionCollectionApplied,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: rc.Generation,
+	})
+	if err := r.client.Status().Patch(context.Background(), rc, client.MergeFrom(base)); err != nil {
+		r.log.Error("patching collection status", "name", rc.Name, "error", err)
+	}
 }
 
 func (r *collectionReconciler) render(ctx context.Context, rc *v1alpha1.ResourceCollection) (*collection.RenderResult, error) {
