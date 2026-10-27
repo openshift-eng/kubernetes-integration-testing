@@ -187,7 +187,8 @@ func (r *kitClusterReconciler) phaseCollections(ctx context.Context, kc *v1alpha
 			missing = append(missing, name)
 			continue
 		}
-		if rc.Status.Phase != v1alpha1.ResourceCollectionApplied {
+		rcCond := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+		if rcCond == nil || rcCond.Status != metav1.ConditionTrue {
 			pending = append(pending, name)
 		}
 	}
