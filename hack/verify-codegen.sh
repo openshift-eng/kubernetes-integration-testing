@@ -2,7 +2,7 @@
 set -e
 
 API_DIR="api/k8s/v1alpha1"
-CRD_DIR="api/crds"
+CRD_DIR="api/manifests"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 

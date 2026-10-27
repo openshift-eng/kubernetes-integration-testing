@@ -43,15 +43,15 @@ data:
 		t.Errorf("Name() = %q, want my-profile", coll.Name())
 	}
 
-	objects, err := coll.Render(RenderContext{})
+	result, err := coll.Render(RenderContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(objects) != 1 {
-		t.Fatalf("got %d objects, want 1", len(objects))
+	if len(result.Objects) != 1 {
+		t.Fatalf("got %d objects, want 1", len(result.Objects))
 	}
-	if objects[0].GetKind() != "ConfigMap" || objects[0].GetName() != "test" {
-		t.Errorf("got %s/%s, want ConfigMap/test", objects[0].GetKind(), objects[0].GetName())
+	if result.Objects[0].GetKind() != "ConfigMap" || result.Objects[0].GetName() != "test" {
+		t.Errorf("got %s/%s, want ConfigMap/test", result.Objects[0].GetKind(), result.Objects[0].GetName())
 	}
 }
 
@@ -71,12 +71,12 @@ data:
 		t.Fatal(err)
 	}
 
-	objects, err := coll.Render(RenderContext{})
+	result, err := coll.Render(RenderContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(objects) != 1 {
-		t.Errorf("got %d objects, want 1 (user override should replace builtin)", len(objects))
+	if len(result.Objects) != 1 {
+		t.Errorf("got %d objects, want 1 (user override should replace builtin)", len(result.Objects))
 	}
 }
 
@@ -86,7 +86,7 @@ func TestRenderBuiltinObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	objects, err := coll.Render(RenderContext{
+	result, err := coll.Render(RenderContext{
 		FeatureSet:      "TechPreviewNoUpgrade",
 		APIServerURL:    "https://127.0.0.1:6443",
 		Platform:        "None",
@@ -97,13 +97,13 @@ func TestRenderBuiltinObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(objects) != 8 {
-		t.Fatalf("got %d objects, want 8", len(objects))
+	if len(result.Objects) != 8 {
+		t.Fatalf("got %d objects, want 8", len(result.Objects))
 	}
 
 	expected := []string{"APIServer", "ClusterVersion", "DNS", "FeatureGate", "Image", "Infrastructure", "Network", "Proxy"}
 	found := make(map[string]bool)
-	for _, obj := range objects {
+	for _, obj := range result.Objects {
 		found[obj.GetKind()] = true
 	}
 	for _, kind := range expected {
@@ -127,12 +127,12 @@ func TestRenderTemplateValues(t *testing.T) {
 		NetworkType:     "OpenShiftSDN",
 	}
 
-	objects, err := coll.Render(ctx)
+	result, err := coll.Render(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	for _, obj := range objects {
+	for _, obj := range result.Objects {
 		switch obj.GetKind() {
 		case "FeatureGate":
 			got, _, _ := unstructured.NestedString(obj.Object, "spec", "featureSet")
@@ -182,20 +182,102 @@ data:
 		t.Fatal(err)
 	}
 
-	objects, err := coll.Render(RenderContext{Platform: "GCP", NetworkType: "Calico"})
+	result, err := coll.Render(RenderContext{Platform: "GCP", NetworkType: "Calico"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if len(objects) != 1 {
-		t.Fatalf("got %d objects, want 1", len(objects))
+	if len(result.Objects) != 1 {
+		t.Fatalf("got %d objects, want 1", len(result.Objects))
 	}
-	data, _, _ := unstructured.NestedStringMap(objects[0].Object, "data")
+	data, _, _ := unstructured.NestedStringMap(result.Objects[0].Object, "data")
 	if data["platform"] != "GCP" {
 		t.Errorf("platform = %q, want GCP", data["platform"])
 	}
 	if data["networkType"] != "Calico" {
 		t.Errorf("networkType = %q, want Calico", data["networkType"])
+	}
+}
+
+func TestRenderValues(t *testing.T) {
+	userFS := fstest.MapFS{
+		"with-values/resource.yaml": &fstest.MapFile{Data: []byte(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: config
+data:
+  env: "{{ .Values.env }}"
+  region: "{{ .Values.region }}"
+`)},
+	}
+
+	coll, err := Load("with-values", userFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := coll.Render(RenderContext{
+		Values: map[string]string{"env": "staging", "region": "us-east-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(result.Objects) != 1 {
+		t.Fatalf("got %d objects, want 1", len(result.Objects))
+	}
+	data, _, _ := unstructured.NestedStringMap(result.Objects[0].Object, "data")
+	if data["env"] != "staging" {
+		t.Errorf("env = %q, want staging", data["env"])
+	}
+	if data["region"] != "us-east-1" {
+		t.Errorf("region = %q, want us-east-1", data["region"])
+	}
+}
+
+func TestLoadInline(t *testing.T) {
+	coll, err := LoadInline("test-inline", []string{
+		`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: from-inline
+data:
+  key: "{{ .Values.myKey }}"`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if coll.Name() != "test-inline" {
+		t.Errorf("Name() = %q, want test-inline", coll.Name())
+	}
+
+	result, err := coll.Render(RenderContext{
+		Values: map[string]string{"myKey": "hello"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(result.Objects) != 1 {
+		t.Fatalf("got %d objects, want 1", len(result.Objects))
+	}
+	data, _, _ := unstructured.NestedStringMap(result.Objects[0].Object, "data")
+	if data["key"] != "hello" {
+		t.Errorf("key = %q, want hello", data["key"])
+	}
+}
+
+func TestLoadInlineEmpty(t *testing.T) {
+	_, err := LoadInline("empty", []string{})
+	if err == nil {
+		t.Fatal("expected error for empty inline collection")
+	}
+}
+
+func TestLoadInlineBadTemplate(t *testing.T) {
+	_, err := LoadInline("bad", []string{`{{ .Unclosed`})
+	if err == nil {
+		t.Fatal("expected error for bad inline template")
 	}
 }
 
@@ -222,5 +304,60 @@ metadata:
 	_, err := Load("bad", userFS)
 	if err == nil {
 		t.Fatal("expected error for bad template syntax")
+	}
+}
+
+func TestRenderHashDeterministic(t *testing.T) {
+	coll, err := Load("openshift-default", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := RenderContext{
+		FeatureSet:   "Default",
+		APIServerURL: "https://127.0.0.1:6443",
+		Platform:     "None",
+		NetworkType:  "OVNKubernetes",
+	}
+	r1, err := coll.Render(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, err := coll.Render(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r1.Hash != r2.Hash {
+		t.Errorf("same input produced different hashes: %s vs %s", r1.Hash, r2.Hash)
+	}
+	if r1.Hash == "" {
+		t.Error("hash should not be empty")
+	}
+}
+
+func TestRenderHashChangesWithValues(t *testing.T) {
+	userFS := fstest.MapFS{
+		"val/resource.yaml": &fstest.MapFile{Data: []byte(`apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test
+data:
+  env: "{{ .Values.env }}"
+`)},
+	}
+	coll, err := Load("val", userFS)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r1, err := coll.Render(RenderContext{Values: map[string]string{"env": "dev"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, err := coll.Render(RenderContext{Values: map[string]string{"env": "prod"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r1.Hash == r2.Hash {
+		t.Error("different values should produce different hashes")
 	}
 }

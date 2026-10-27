@@ -1,0 +1,25 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kitcluster-collections-exist
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: kit.openshift.io/v1alpha1
+    kind: CollectionConfig
+  matchConstraints:
+    matchPolicy: Equivalent
+    namespaceSelector: {}
+    objectSelector: {}
+    resourceRules:
+      - apiGroups: ["kit.openshift.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["kitclusters"]
+        scope: "*"
+  validations:
+    - expression: >-
+        !has(object.spec.collections) ||
+        (has(params.status) && has(params.status.available) &&
+         object.spec.collections.all(name, name in params.status.available))
+      message: "all referenced collections must exist as ResourceCollection objects"

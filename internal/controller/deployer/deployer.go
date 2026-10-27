@@ -75,7 +75,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts Opts, statusFn func(string))
 	cfg.Burst = 100
 
 	version := rel.Version()
-	if err := d.ensureBootstrapResources(ctx, cfg, opts, version, all, statusFn); err != nil {
+	if err := d.patchBootstrapStatus(ctx, cfg, opts, version, all, statusFn); err != nil {
 		return err
 	}
 
@@ -151,8 +151,8 @@ func (d *Deployer) deployResources(ctx context.Context, cfg *rest.Config, resour
 	return nil
 }
 
-func (d *Deployer) ensureBootstrapResources(ctx context.Context, cfg *rest.Config, opts Opts, version string, allManifests []release.Manifest, statusFn func(string)) error {
-	statusFn("Creating bootstrap resources")
+func (d *Deployer) patchBootstrapStatus(ctx context.Context, cfg *rest.Config, opts Opts, version string, allManifests []release.Manifest, statusFn func(string)) error {
+	statusFn("Patching bootstrap resource status")
 
 	dynClient, err := dynamic.NewForConfig(cfg)
 	if err != nil {
@@ -163,90 +163,12 @@ func (d *Deployer) ensureBootstrapResources(ctx context.Context, cfg *rest.Confi
 		return schema.GroupVersionResource{Group: "config.openshift.io", Version: "v1", Resource: resource}
 	}
 
-	// TODO(pabrodri): these bootstrap resources may become user-provided in the future.
-	bootstrapResources := []struct {
-		gvr schema.GroupVersionResource
-		obj *unstructured.Unstructured
-	}{
-		{configRes("featuregates"), &unstructured.Unstructured{Object: map[string]interface{}{
-			"apiVersion": "config.openshift.io/v1",
-			"kind":       "FeatureGate",
-			"metadata":   map[string]interface{}{"name": "cluster"},
-			"spec": map[string]interface{}{
-				"featureSet": opts.FeatureSet,
-			},
-		}}},
-		{configRes("clusterversions"), &unstructured.Unstructured{Object: map[string]interface{}{
-			"apiVersion": "config.openshift.io/v1",
-			"kind":       "ClusterVersion",
-			"metadata":   map[string]interface{}{"name": "version"},
-			"spec": map[string]interface{}{
-				"clusterID": "",
-				"channel":   "",
-			},
-		}}},
-		{configRes("images"), &unstructured.Unstructured{Object: map[string]interface{}{
-			"apiVersion": "config.openshift.io/v1",
-			"kind":       "Image",
-			"metadata":   map[string]interface{}{"name": "cluster"},
-			"spec":       map[string]interface{}{},
-		}}},
-		{configRes("infrastructures"), &unstructured.Unstructured{Object: map[string]interface{}{
-			"apiVersion": "config.openshift.io/v1",
-			"kind":       "Infrastructure",
-			"metadata":   map[string]interface{}{"name": "cluster"},
-			"spec":       map[string]interface{}{},
-			"status": map[string]interface{}{
-				"platform": "None",
-				"platformStatus": map[string]interface{}{
-					"type": "None",
-				},
-				"apiServerInternalURI": apiServerURL(opts.KubeConfig),
-			},
-		}}},
-		{configRes("dnses"), &unstructured.Unstructured{Object: map[string]interface{}{
-			"apiVersion": "config.openshift.io/v1",
-			"kind":       "DNS",
-			"metadata":   map[string]interface{}{"name": "cluster"},
-			"spec":       map[string]interface{}{},
-		}}},
-		{configRes("proxies"), &unstructured.Unstructured{Object: map[string]interface{}{
-			"apiVersion": "config.openshift.io/v1",
-			"kind":       "Proxy",
-			"metadata":   map[string]interface{}{"name": "cluster"},
-			"spec":       map[string]interface{}{},
-		}}},
-		{configRes("apiservers"), &unstructured.Unstructured{Object: map[string]interface{}{
-			"apiVersion": "config.openshift.io/v1",
-			"kind":       "APIServer",
-			"metadata":   map[string]interface{}{"name": "cluster"},
-			"spec":       map[string]interface{}{},
-		}}},
-		{configRes("networks"), &unstructured.Unstructured{Object: map[string]interface{}{
-			"apiVersion": "config.openshift.io/v1",
-			"kind":       "Network",
-			"metadata":   map[string]interface{}{"name": "cluster"},
-			"spec": map[string]interface{}{
-				"serviceNetwork": []interface{}{"10.96.0.0/16"},
-				"networkType":    "OVNKubernetes",
-			},
-		}}},
-	}
-
-	for _, r := range bootstrapResources {
-		if err := applyOne(ctx, dynClient.Resource(r.gvr), r.obj); err != nil {
-			return fmt.Errorf("creating %s %s: %w", r.obj.GetKind(), r.obj.GetName(), err)
-		}
-		d.log.Info("ensured bootstrap resource", "kind", r.obj.GetKind(), "name", r.obj.GetName())
-	}
-
 	infraRes := configRes("infrastructures")
 	infra, err := dynClient.Resource(infraRes).Get(ctx, "cluster", metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("getting Infrastructure for status update: %w", err)
 	}
 	apiURL := apiServerURL(opts.KubeConfig)
-	d.log.Info("setting Infrastructure status", "apiServerInternalURL", apiURL)
 	infra.Object["status"] = map[string]interface{}{
 		"platform": "None",
 		"platformStatus": map[string]interface{}{

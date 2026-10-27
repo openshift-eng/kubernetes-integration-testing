@@ -40,6 +40,11 @@ spec:
             type: object
           spec:
             properties:
+              collections:
+                items:
+                  type: string
+                minItems: 1
+                type: array
               featureSet:
                 enum:
                 - Default
@@ -49,22 +54,6 @@ spec:
                 type: string
                 x-kubernetes-validations:
                 - message: image is immutable
-                  rule: self == oldSelf
-              kind:
-                type: object
-                x-kubernetes-validations:
-                - message: kind config is immutable
-                  rule: self == oldSelf
-              kwok:
-                properties:
-                  runtime:
-                    enum:
-                    - podman
-                    - process
-                    type: string
-                type: object
-                x-kubernetes-validations:
-                - message: kwok config is immutable
                   rule: self == oldSelf
               provider:
                 enum:
@@ -140,8 +129,6 @@ spec:
                   - type
                   type: object
                 type: array
-              phase:
-                type: string
             type: object
         required:
         - spec
