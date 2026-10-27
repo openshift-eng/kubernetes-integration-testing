@@ -11,12 +11,15 @@ import (
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
+	collcel "github.com/openshift-eng/kubernetes-integration-testing/internal/collection/cel"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/dynutil"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/release"
 
 	"github.com/fsnotify/fsnotify"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/restmapper"
@@ -32,7 +35,9 @@ const collectionFinalizer = "kit.openshift.io/collection-protection"
 
 type collectionReconciler struct {
 	client         client.Client
-	kubeConfig     *kube.KubeConfig
+	dynClient      dynamic.Interface
+	discovery      discovery.DiscoveryInterface
+	release        *release.ReleaseManifests
 	collectionsDir string
 	log            *slog.Logger
 }
@@ -62,7 +67,16 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	renderResult, err := r.render(ctx, &rc)
+	var kcList v1alpha1.KitClusterList
+	if err := r.client.List(ctx, &kcList); err != nil {
+		return ctrl.Result{}, fmt.Errorf("listing KitCluster: %w", err)
+	}
+	if len(kcList.Items) == 0 {
+		return ctrl.Result{}, fmt.Errorf("no KitCluster found")
+	}
+	kc := kcList.Items[0]
+
+	renderResult, err := r.render(&rc, &kc)
 	if err != nil {
 		r.setCollectionCondition(&rc, metav1.ConditionFalse, "RenderFailed", err.Error())
 		return ctrl.Result{}, err
@@ -77,9 +91,16 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	r.log.Info("applying resource collection", "name", rc.Name, "oldHash", currentHash, "newHash", renderResult.Hash)
-	if err := r.apply(ctx, &rc, renderResult); err != nil {
+	if err := r.apply(ctx, renderResult); err != nil {
 		r.setCollectionCondition(&rc, metav1.ConditionFalse, "ApplyFailed", err.Error())
 		return ctrl.Result{}, err
+	}
+
+	if len(rc.Spec.StatusPatches) > 0 {
+		if err := r.applyStatusPatches(ctx, &rc, &kc, renderResult); err != nil {
+			r.setCollectionCondition(&rc, metav1.ConditionFalse, "StatusPatchFailed", err.Error())
+			return ctrl.Result{}, err
+		}
 	}
 
 	annotations := rc.GetAnnotations()
@@ -112,20 +133,11 @@ func (r *collectionReconciler) setCollectionCondition(rc *v1alpha1.ResourceColle
 	}
 }
 
-func (r *collectionReconciler) render(ctx context.Context, rc *v1alpha1.ResourceCollection) (*collection.RenderResult, error) {
+func (r *collectionReconciler) render(rc *v1alpha1.ResourceCollection, kc *v1alpha1.KitCluster) (*collection.RenderResult, error) {
 	coll, err := r.loadCollection(rc)
 	if err != nil {
 		return nil, err
 	}
-
-	var kcList v1alpha1.KitClusterList
-	if err := r.client.List(ctx, &kcList); err != nil {
-		return nil, fmt.Errorf("listing KitCluster: %w", err)
-	}
-	if len(kcList.Items) == 0 {
-		return nil, fmt.Errorf("no KitCluster found")
-	}
-	kc := kcList.Items[0]
 
 	// TODO: Platform and NetworkType should come from KitCluster spec.
 	renderCtx := collection.RenderContext{
@@ -139,30 +151,84 @@ func (r *collectionReconciler) render(ctx context.Context, rc *v1alpha1.Resource
 	return coll.Render(renderCtx)
 }
 
-func (r *collectionReconciler) apply(ctx context.Context, rc *v1alpha1.ResourceCollection, result *collection.RenderResult) error {
-	cfg, err := r.kubeConfig.RestConfig()
+func (r *collectionReconciler) newMapper() (meta.RESTMapper, error) {
+	groupResources, err := restmapper.GetAPIGroupResources(r.discovery)
 	if err != nil {
-		return fmt.Errorf("building rest config: %w", err)
+		return nil, fmt.Errorf("discovering API resources: %w", err)
+	}
+	return restmapper.NewDiscoveryRESTMapper(groupResources), nil
+}
+
+func (r *collectionReconciler) apply(ctx context.Context, result *collection.RenderResult) error {
+	mapper, err := r.newMapper()
+	if err != nil {
+		return err
+	}
+	for _, obj := range result.Objects {
+		applied, err := dynutil.ApplyWithMapper(ctx, r.dynClient, mapper, obj)
+		if err != nil {
+			return fmt.Errorf("applying %s %s: %w", obj.GetKind(), obj.GetName(), err)
+		}
+		r.log.Info("applied collection resource", "kind", applied.GetKind(), "name", applied.GetName())
+	}
+	return nil
+}
+
+func (r *collectionReconciler) applyStatusPatches(ctx context.Context, rc *v1alpha1.ResourceCollection, kc *v1alpha1.KitCluster, rendered *collection.RenderResult) error {
+	var releaseObjs []map[string]interface{}
+	if r.release != nil {
+		manifests, err := r.release.All()
+		if err != nil {
+			return fmt.Errorf("loading release manifests: %w", err)
+		}
+		releaseObjs = make([]map[string]interface{}, len(manifests))
+		for i, m := range manifests {
+			releaseObjs[i] = m.Obj.Object
+		}
 	}
 
-	dynClient, err := dynamic.NewForConfig(cfg)
-	if err != nil {
-		return fmt.Errorf("creating dynamic client: %w", err)
+	patches := make([]collcel.StatusPatchInput, len(rc.Spec.StatusPatches))
+	for i, sp := range rc.Spec.StatusPatches {
+		patches[i] = collcel.StatusPatchInput{Kind: sp.Kind, Name: sp.Name, Status: sp.Status}
 	}
 
-	disc, err := discovery.NewDiscoveryClientForConfig(cfg)
+	results, err := collcel.EvalStatusPatches(collcel.Context{
+		Platform:     "None",
+		APIServerURL: kc.Status.APIServerURL,
+		FeatureSet:   kc.Spec.FeatureSet,
+		Version:      r.release.Version(),
+		Values:       rc.Spec.Values,
+		Release:      releaseObjs,
+	}, patches)
 	if err != nil {
-		return fmt.Errorf("creating discovery client: %w", err)
+		return err
 	}
 
-	groupResources, err := restmapper.GetAPIGroupResources(disc)
+	mapper, err := r.newMapper()
 	if err != nil {
-		return fmt.Errorf("discovering API resources: %w", err)
+		return err
 	}
-	mapper := restmapper.NewDiscoveryRESTMapper(groupResources)
 
-	applier := collection.NewApplier(dynClient, mapper, r.log)
-	return applier.ApplyRendered(ctx, result)
+	for _, sr := range results {
+		target := findRenderedObject(rendered, sr.Kind, sr.Name)
+		if target == nil {
+			return fmt.Errorf("status patch target %s/%s not found in rendered objects", sr.Kind, sr.Name)
+		}
+		if err := dynutil.UpdateStatus(ctx, r.dynClient, mapper, target, sr.Status); err != nil {
+			return fmt.Errorf("status patch %s/%s: %w", sr.Kind, sr.Name, err)
+		}
+		r.log.Info("applied status patch", "kind", sr.Kind, "name", sr.Name)
+	}
+	return nil
+}
+
+func findRenderedObject(result *collection.RenderResult, kind, name string) *unstructured.Unstructured {
+	for _, obj := range result.Objects {
+		if obj.GetKind() == kind && obj.GetName() == name {
+			return obj
+		}
+	}
+	return nil
 }
 
 func (r *collectionReconciler) loadCollection(rc *v1alpha1.ResourceCollection) (*collection.Collection, error) {

@@ -31,6 +31,25 @@ func ApplyWithMapper(ctx context.Context, client dynamic.Interface, mapper meta.
 	return Apply(ctx, res, obj)
 }
 
+func UpdateStatus(ctx context.Context, dynClient dynamic.Interface, mapper meta.RESTMapper, obj *unstructured.Unstructured, status map[string]interface{}) error {
+	res, err := ResourceClient(dynClient, mapper, obj)
+	if err != nil {
+		return fmt.Errorf("resolving resource for %s/%s: %w", obj.GetKind(), obj.GetName(), err)
+	}
+
+	existing, err := res.Get(ctx, obj.GetName(), metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("getting %s/%s: %w", obj.GetKind(), obj.GetName(), err)
+	}
+
+	if err := unstructured.SetNestedField(existing.Object, status, "status"); err != nil {
+		return fmt.Errorf("setting status on %s/%s: %w", obj.GetKind(), obj.GetName(), err)
+	}
+
+	_, err = res.UpdateStatus(ctx, existing, metav1.UpdateOptions{})
+	return err
+}
+
 func ResourceClient(client dynamic.Interface, mapper meta.RESTMapper, obj *unstructured.Unstructured) (dynamic.ResourceInterface, error) {
 	gvk := obj.GroupVersionKind()
 	mapping, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version)

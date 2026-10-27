@@ -37,7 +37,7 @@ const (
 type kitClusterReconciler struct {
 	client       client.Client
 	crdManager   *CRDManager
-	rel          *release.ReleaseManifests
+	release      *release.ReleaseManifests
 	apiServerURL string
 	log          *slog.Logger
 }
@@ -111,7 +111,7 @@ func (r *kitClusterReconciler) phaseImagePull(ctx context.Context, kc *v1alpha1.
 		return &ctrl.Result{RequeueAfter: time.Millisecond}, nil
 	}
 
-	if err := r.rel.Load(kc.Spec.Image); err != nil {
+	if err := r.release.Load(kc.Spec.Image); err != nil {
 		base := kc.DeepCopy()
 		r.setCondition(kc, v1alpha1.ConditionImagePulled, metav1.ConditionFalse, reasonPullFailed, err.Error())
 		r.setCondition(kc, v1alpha1.ConditionReady, metav1.ConditionFalse, reasonReconcileFailed, fmt.Sprintf("Failed to pull image: %s", err))
@@ -144,7 +144,7 @@ func (r *kitClusterReconciler) phaseCRDSync(ctx context.Context, kc *v1alpha1.Ki
 
 	r.log.Info("syncing CRDs", "name", kc.Name)
 
-	all, err := r.rel.All()
+	all, err := r.release.All()
 	if err != nil {
 		return &ctrl.Result{}, fmt.Errorf("parsing manifests: %w", err)
 	}

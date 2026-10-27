@@ -59,6 +59,34 @@ spec:
                   Source is the name of a builtin or filesystem-provided collection.
                   Mutually exclusive with Inline.
                 type: string
+              statusPatches:
+                description: |-
+                  StatusPatches are evaluated post-apply to set status on rendered objects.
+                  Each entry targets one object by kind+name and provides a CEL expression
+                  or a static map (with CEL in values) that produces the status to write.
+                items:
+                  description: |-
+                    StatusPatch declares a status to apply to a rendered object after it has been
+                    created. The Status field can be either a CEL expression string that evaluates
+                    to a map, or a YAML map whose leaf values are CEL expressions.
+                  properties:
+                    kind:
+                      description: Kind of the target object.
+                      type: string
+                    name:
+                      description: Name of the target object.
+                      type: string
+                    status:
+                      description: |-
+                        Status is the status to set. It can be a CEL expression (string) that
+                        returns a map, or a structured map with CEL expressions in leaf values.
+                      x-kubernetes-preserve-unknown-fields: true
+                  required:
+                  - kind
+                  - name
+                  - status
+                  type: object
+                type: array
               values:
                 additionalProperties:
                   type: string
