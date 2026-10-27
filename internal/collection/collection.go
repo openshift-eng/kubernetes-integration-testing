@@ -2,7 +2,10 @@ package collection
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -14,8 +17,15 @@ import (
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
+const ContentHashAnnotation = "kit.openshift.io/content-hash"
+
 //go:embed builtin
 var builtinFS embed.FS
+
+type RenderResult struct {
+	Objects []*unstructured.Unstructured
+	Hash    string
+}
 
 type RenderContext struct {
 	FeatureSet      string
@@ -23,6 +33,7 @@ type RenderContext struct {
 	Platform        string
 	ServiceNetworks []string
 	NetworkType     string
+	Values          map[string]string
 }
 
 type Collection struct {
@@ -32,6 +43,21 @@ type Collection struct {
 
 func (c *Collection) Name() string {
 	return c.name
+}
+
+// BuiltinNames returns the names of all embedded builtin collections.
+func BuiltinNames() []string {
+	entries, err := fs.ReadDir(builtinFS, "builtin")
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	return names
 }
 
 // Load resolves a collection by name. If userFS is non-nil and contains a
@@ -50,6 +76,23 @@ func Load(name string, userFS fs.FS) (*Collection, error) {
 		return nil, fmt.Errorf("collection %q not found: %w", name, err)
 	}
 	return loadFromFS(name, sub)
+}
+
+// LoadInline creates a collection from inline template content.
+func LoadInline(name string, contents []string) (*Collection, error) {
+	templates := make(map[string]*template.Template)
+	for i, content := range contents {
+		key := fmt.Sprintf("inline-%d", i)
+		tmpl, err := template.New(key).Parse(content)
+		if err != nil {
+			return nil, fmt.Errorf("parsing inline template %d: %w", i, err)
+		}
+		templates[key] = tmpl
+	}
+	if len(templates) == 0 {
+		return nil, fmt.Errorf("collection %q has no templates", name)
+	}
+	return &Collection{name: name, templates: templates}, nil
 }
 
 func loadFromFS(name string, fsys fs.FS) (*Collection, error) {
@@ -91,13 +134,14 @@ func loadFromFS(name string, fsys fs.FS) (*Collection, error) {
 	return &Collection{name: name, templates: templates}, nil
 }
 
-func (c *Collection) Render(ctx RenderContext) ([]*unstructured.Unstructured, error) {
+func (c *Collection) Render(ctx RenderContext) (*RenderResult, error) {
 	names := make([]string, 0, len(c.templates))
 	for name := range c.templates {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 
+	h := sha256.New()
 	var objects []*unstructured.Unstructured
 	for _, name := range names {
 		tmpl := c.templates[name]
@@ -110,9 +154,16 @@ func (c *Collection) Render(ctx RenderContext) ([]*unstructured.Unstructured, er
 		if err != nil {
 			return nil, fmt.Errorf("parsing rendered %s: %w", name, err)
 		}
+		for _, obj := range objs {
+			b, _ := json.Marshal(obj.Object)
+			h.Write(b)
+		}
 		objects = append(objects, objs...)
 	}
-	return objects, nil
+	return &RenderResult{
+		Objects: objects,
+		Hash:    hex.EncodeToString(h.Sum(nil)),
+	}, nil
 }
 
 func parseYAML(data []byte) ([]*unstructured.Unstructured, error) {

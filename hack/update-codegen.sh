@@ -2,7 +2,7 @@
 set -ex
 
 API_DIR="api/k8s/v1alpha1"
-CRD_OUTPUT="api/crds"
+CRD_OUTPUT="api/manifests"
 
 if [ "${IS_CONTAINER}" != "" ] || [ "${OPENSHIFT_CI}" != "" ]; then
     go tool controller-gen \

@@ -12,21 +12,23 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/dynutil"
 )
 
+// TODO: once CEL-based status patches live in the ResourceCollection spec,
+// StatusPatcher and the Applier itself can be removed — the reconciler will
+// apply objects directly and evaluate CEL expressions for status patches.
 type StatusPatcher interface {
 	Matches(obj *unstructured.Unstructured) bool
 	Patch(ctx context.Context, client dynamic.Interface, applied *unstructured.Unstructured) error
 }
 
 type Applier struct {
-	coll     *Collection
 	client   dynamic.Interface
 	mapper   meta.RESTMapper
 	patchers []StatusPatcher
 	log      *slog.Logger
 }
 
-func NewApplier(coll *Collection, client dynamic.Interface, mapper meta.RESTMapper, log *slog.Logger) *Applier {
-	return &Applier{coll: coll, client: client, mapper: mapper, log: log}
+func NewApplier(client dynamic.Interface, mapper meta.RESTMapper, log *slog.Logger) *Applier {
+	return &Applier{client: client, mapper: mapper, log: log}
 }
 
 func (a *Applier) WithStatusPatcher(p StatusPatcher) *Applier {
@@ -34,13 +36,8 @@ func (a *Applier) WithStatusPatcher(p StatusPatcher) *Applier {
 	return a
 }
 
-func (a *Applier) Apply(ctx context.Context, renderCtx RenderContext) error {
-	objects, err := a.coll.Render(renderCtx)
-	if err != nil {
-		return fmt.Errorf("rendering collection %q: %w", a.coll.Name(), err)
-	}
-
-	for _, obj := range objects {
+func (a *Applier) ApplyRendered(ctx context.Context, result *RenderResult) error {
+	for _, obj := range result.Objects {
 		applied, err := dynutil.ApplyWithMapper(ctx, a.client, a.mapper, obj)
 		if err != nil {
 			return fmt.Errorf("applying %s %s: %w", obj.GetKind(), obj.GetName(), err)

@@ -19,6 +19,10 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&KitClusterList{},
 		&OperatorDeployment{},
 		&OperatorDeploymentList{},
+		&ResourceCollection{},
+		&ResourceCollectionList{},
+		&CollectionConfig{},
+		&CollectionConfigList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 	return nil

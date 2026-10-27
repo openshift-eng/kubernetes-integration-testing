@@ -30,9 +30,19 @@ func Start(ctx context.Context, log *slog.Logger, kitCluster *v1alpha1.KitCluste
 	cfg.QPS = 50
 	cfg.Burst = 100
 
-	if err := installCRDs(ctx, log, cfg); err != nil {
-		return nil, fmt.Errorf("installing CRDs: %w", err)
+	if err := installManifests(ctx, log, cfg); err != nil {
+		return nil, fmt.Errorf("installing manifests: %w", err)
 	}
+
+	cl, err := client.New(cfg, client.Options{Scheme: scheme})
+	if err != nil {
+		return nil, fmt.Errorf("creating client: %w", err)
+	}
+
+	if err := cl.Create(ctx, kitCluster); err != nil && !apierrors.IsAlreadyExists(err) {
+		return nil, fmt.Errorf("creating KitCluster CR: %w", err)
+	}
+	log.Info("ensured KitCluster CR", "name", kitCluster.Name)
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:     scheme,
@@ -42,15 +52,6 @@ func Start(ctx context.Context, log *slog.Logger, kitCluster *v1alpha1.KitCluste
 	if err != nil {
 		return nil, fmt.Errorf("creating controller manager: %w", err)
 	}
-
-	cl, err := client.New(cfg, client.Options{Scheme: scheme})
-	if err != nil {
-		return nil, fmt.Errorf("creating client: %w", err)
-	}
-	if err := cl.Create(ctx, kitCluster); err != nil && !apierrors.IsAlreadyExists(err) {
-		return nil, fmt.Errorf("creating KitCluster CR: %w", err)
-	}
-	log.Info("ensured KitCluster CR", "name", kitCluster.Name)
 
 	extClient, err := apiextclient.NewForConfig(cfg)
 	if err != nil {
@@ -81,6 +82,24 @@ func Start(ctx context.Context, log *slog.Logger, kitCluster *v1alpha1.KitCluste
 	}
 	if err := odReconciler.SetupWithManager(mgr, kitCluster.Name); err != nil {
 		return nil, fmt.Errorf("setting up OperatorDeployment controller: %w", err)
+	}
+
+	rcReconciler := &collectionReconciler{
+		client:         mgr.GetClient(),
+		kubeConfig:     kubeConfig,
+		collectionsDir: collectionsDir,
+		log:            log,
+	}
+	if err := rcReconciler.SetupWithManager(ctx, mgr, kitCluster.Name); err != nil {
+		return nil, fmt.Errorf("setting up ResourceCollection controller: %w", err)
+	}
+
+	ccReconciler := &collectionConfigReconciler{
+		client: mgr.GetClient(),
+		log:    log,
+	}
+	if err := ccReconciler.SetupWithManager(mgr, kitCluster.Name); err != nil {
+		return nil, fmt.Errorf("setting up CollectionConfig controller: %w", err)
 	}
 
 	mgrCtx, cancel := context.WithCancel(ctx)
