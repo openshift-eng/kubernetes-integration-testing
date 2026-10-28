@@ -21,7 +21,6 @@ import (
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
-const ContentHashAnnotation = "kit.openshift.io/content-hash"
 
 //go:embed builtin
 var builtinFS embed.FS

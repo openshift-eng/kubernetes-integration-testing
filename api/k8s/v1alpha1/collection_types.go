@@ -67,7 +67,8 @@ const (
 )
 
 type ResourceCollectionStatus struct {
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	ContentHash string             `json:"contentHash,omitempty"`
+	Conditions  []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true

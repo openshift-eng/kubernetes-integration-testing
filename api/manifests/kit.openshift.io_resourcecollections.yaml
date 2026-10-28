@@ -155,6 +155,8 @@ spec:
                   - type
                   type: object
                 type: array
+              contentHash:
+                type: string
             type: object
         required:
         - spec
