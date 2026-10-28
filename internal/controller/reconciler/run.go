@@ -76,11 +76,12 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 	}{
 		{"KitCluster", func() error {
 			return (&kitClusterReconciler{
-				client:       mgr.GetClient(),
-				crdManager:   crdMgr,
-				release:      rel,
-				apiServerURL: clients.REST.Host,
-				log:          log,
+				client:               mgr.GetClient(),
+				crdManager:           crdMgr,
+				release:              rel,
+				apiServerURL:         clients.REST.Host,
+				apiServerExternalURL: kubeConfig.OriginalServerURL(),
+				log:                  log,
 			}).SetupWithManager(mgr, clusterName)
 		}},
 		{"ResourceCollection", func() error {

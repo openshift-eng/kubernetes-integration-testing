@@ -30,11 +30,12 @@ const (
 )
 
 type kitClusterReconciler struct {
-	client       client.Client
-	crdManager   *CRDManager
-	release      *release.ReleaseManifests
-	apiServerURL string
-	log          *slog.Logger
+	client               client.Client
+	crdManager           *CRDManager
+	release              *release.ReleaseManifests
+	apiServerURL         string
+	apiServerExternalURL string
+	log                  *slog.Logger
 }
 
 func (r *kitClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -56,9 +57,10 @@ func (r *kitClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	if kc.Status.APIServerURL != r.apiServerURL {
+	if kc.Status.APIServerURL != r.apiServerURL || kc.Status.APIServerExternalURL != r.apiServerExternalURL {
 		base := kc.DeepCopy()
 		kc.Status.APIServerURL = r.apiServerURL
+		kc.Status.APIServerExternalURL = r.apiServerExternalURL
 		if err := r.client.Status().Patch(ctx, &kc, client.MergeFrom(base)); err != nil {
 			return ctrl.Result{}, err
 		}

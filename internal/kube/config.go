@@ -49,6 +49,18 @@ func (kc *KubeConfig) RestConfig() (*rest.Config, error) {
 	return cfg, nil
 }
 
+func (kc *KubeConfig) OriginalServerURL() string {
+	ctx := kc.raw.Contexts[kc.raw.CurrentContext]
+	if ctx == nil {
+		return ""
+	}
+	cluster := kc.raw.Clusters[ctx.Cluster]
+	if cluster == nil {
+		return ""
+	}
+	return cluster.Server
+}
+
 func (kc *KubeConfig) WriteFlattened(path string) error {
 	return clientcmd.WriteToFile(kc.raw, path)
 }

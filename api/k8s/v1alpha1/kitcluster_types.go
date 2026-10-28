@@ -38,8 +38,9 @@ const (
 )
 
 type KitClusterStatus struct {
-	APIServerURL string             `json:"apiServerURL,omitempty"`
-	Conditions   []metav1.Condition `json:"conditions,omitempty"`
+	APIServerURL         string             `json:"apiServerURL,omitempty"`
+	APIServerExternalURL string             `json:"apiServerExternalURL,omitempty"`
+	Conditions           []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true

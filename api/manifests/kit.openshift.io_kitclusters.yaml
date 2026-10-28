@@ -66,6 +66,8 @@ spec:
             type: object
           status:
             properties:
+              apiServerExternalURL:
+                type: string
               apiServerURL:
                 type: string
               conditions:
