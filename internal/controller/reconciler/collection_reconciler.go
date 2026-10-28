@@ -198,13 +198,15 @@ func (r *collectionReconciler) applyStatusPatches(ctx context.Context, rc *v1alp
 	}
 
 	results, err := collcel.EvalStatusPatches(collcel.Context{
-		Platform:     "None",
-		APIServerURL: kc.Status.APIServerURL,
-		FeatureSet:   kc.Spec.FeatureSet,
-		Version:      r.release.Version(),
-		Image:        kc.Spec.Image,
-		Values:       rc.Spec.Values,
-		Release:      releaseObjs,
+		Cluster: collcel.ClusterContext{
+			Platform:     "None",
+			APIServerURL: kc.Status.APIServerURL,
+			FeatureSet:   kc.Spec.FeatureSet,
+			Version:      r.release.Version(),
+			Image:        kc.Spec.Image,
+		},
+		Values:  rc.Spec.Values,
+		Release: releaseObjs,
 	}, patches)
 	if err != nil {
 		return err

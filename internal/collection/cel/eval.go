@@ -12,13 +12,17 @@ import (
 )
 
 type Context struct {
+	Cluster ClusterContext
+	Values  map[string]string
+	Release []map[string]interface{}
+}
+
+type ClusterContext struct {
 	Platform     string
 	APIServerURL string
 	FeatureSet   string
 	Version      string
 	Image        string
-	Values       map[string]string
-	Release      []map[string]interface{}
 }
 
 type StatusResult struct {
@@ -53,14 +57,13 @@ func EvalStatusPatches(ctx Context, patches []StatusPatchInput) ([]StatusResult,
 
 func newEnv() (*cel.Env, error) {
 	return cel.NewEnv(
-		cel.Variable("platform", cel.StringType),
-		cel.Variable("apiServerURL", cel.StringType),
-		cel.Variable("featureSet", cel.StringType),
-		cel.Variable("version", cel.StringType),
-		cel.Variable("image", cel.StringType),
+		cel.Variable("cluster", cel.MapType(cel.StringType, cel.DynType)),
 		cel.Variable("values", cel.MapType(cel.StringType, cel.StringType)),
 		cel.Variable("release", cel.ListType(cel.DynType)),
 		celMergeFunc(),
+		celAnnotationFunc(),
+		celFindReleaseFunc(),
+		celFindReleaseByProfileFunc(),
 	)
 }
 
@@ -74,13 +77,15 @@ func activation(ctx Context) map[string]interface{} {
 		values[k] = v
 	}
 	return map[string]interface{}{
-		"platform":     ctx.Platform,
-		"apiServerURL": ctx.APIServerURL,
-		"featureSet":   ctx.FeatureSet,
-		"version":      ctx.Version,
-		"image":        ctx.Image,
-		"values":       values,
-		"release":      release,
+		"cluster": map[string]interface{}{
+			"platform":     ctx.Cluster.Platform,
+			"apiServerURL": ctx.Cluster.APIServerURL,
+			"featureSet":   ctx.Cluster.FeatureSet,
+			"version":      ctx.Cluster.Version,
+			"image":        ctx.Cluster.Image,
+		},
+		"values":  values,
+		"release": release,
 	}
 }
 
@@ -193,6 +198,118 @@ func celMergeFunc() cel.EnvOption {
 			}),
 		),
 	)
+}
+
+// annotation(obj, key) returns the annotation value or "" if missing.
+func celAnnotationFunc() cel.EnvOption {
+	return cel.Function("annotation",
+		cel.Overload("annotation_map_string",
+			[]*cel.Type{cel.MapType(cel.StringType, cel.DynType), cel.StringType},
+			cel.StringType,
+			cel.BinaryBinding(func(obj, key ref.Val) ref.Val {
+				m, err := refValToNative(obj)
+				if err != nil {
+					return types.String("")
+				}
+				metadata, _ := m["metadata"].(map[string]interface{})
+				if metadata == nil {
+					return types.String("")
+				}
+				annotations, _ := metadata["annotations"].(map[string]interface{})
+				if annotations == nil {
+					return types.String("")
+				}
+				v, _ := annotations[string(key.(types.String))].(string)
+				return types.String(v)
+			}),
+		),
+	)
+}
+
+// findRelease(release, kind, name) returns the first manifest matching kind+name.
+func celFindReleaseFunc() cel.EnvOption {
+	return cel.Function("findRelease",
+		cel.Overload("findRelease_list_string_string",
+			[]*cel.Type{cel.ListType(cel.DynType), cel.StringType, cel.StringType},
+			cel.DynType,
+			cel.FunctionBinding(func(args ...ref.Val) ref.Val {
+				kind := string(args[1].(types.String))
+				name := string(args[2].(types.String))
+				m := findInRelease(args[0], func(m map[string]interface{}, meta map[string]interface{}) bool {
+					return m["kind"] == kind && meta["name"] == name
+				})
+				if m == nil {
+					return types.NewErr("findRelease: %s/%s not found", kind, name)
+				}
+				return types.DefaultTypeAdapter.NativeToValue(m)
+			}),
+		),
+	)
+}
+
+// findReleaseByProfile(release, kind, name, featureSet, profile) returns the first
+// manifest matching kind+name with the given feature-set and profile annotations.
+func celFindReleaseByProfileFunc() cel.EnvOption {
+	return cel.Function("findReleaseByProfile",
+		cel.Overload("findReleaseByProfile_list_string_string_string_string",
+			[]*cel.Type{cel.ListType(cel.DynType), cel.StringType, cel.StringType, cel.StringType, cel.StringType},
+			cel.DynType,
+			cel.FunctionBinding(func(args ...ref.Val) ref.Val {
+				kind := string(args[1].(types.String))
+				name := string(args[2].(types.String))
+				featureSet := string(args[3].(types.String))
+				profile := string(args[4].(types.String))
+				profileKey := "include.release.openshift.io/" + profile
+
+				m := findInRelease(args[0], func(m map[string]interface{}, meta map[string]interface{}) bool {
+					if m["kind"] != kind || meta["name"] != name {
+						return false
+					}
+					annotations, _ := meta["annotations"].(map[string]interface{})
+					if annotations == nil {
+						return false
+					}
+					fs, _ := annotations["release.openshift.io/feature-set"].(string)
+					_, hasProfile := annotations[profileKey]
+					return fs == featureSet && hasProfile
+				})
+				if m == nil {
+					return types.NewErr("findReleaseByProfile: %s/%s not found for featureSet=%s profile=%s", kind, name, featureSet, profile)
+				}
+				return types.DefaultTypeAdapter.NativeToValue(m)
+			}),
+		),
+	)
+}
+
+func findInRelease(list ref.Val, match func(obj map[string]interface{}, metadata map[string]interface{}) bool) map[string]interface{} {
+	it := list.Value()
+	var items []interface{}
+	switch v := it.(type) {
+	case []interface{}:
+		items = v
+	case []ref.Val:
+		for _, rv := range v {
+			items = append(items, rv.Value())
+		}
+	default:
+		return nil
+	}
+
+	for _, item := range items {
+		m, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		metadata, _ := m["metadata"].(map[string]interface{})
+		if metadata == nil {
+			continue
+		}
+		if match(m, metadata) {
+			return m
+		}
+	}
+	return nil
 }
 
 func refValToNative(val ref.Val) (map[string]interface{}, error) {
