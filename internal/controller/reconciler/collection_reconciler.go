@@ -57,6 +57,7 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if err := r.client.Update(ctx, &rc); err != nil {
 			return ctrl.Result{}, err
 		}
+		return ctrl.Result{}, nil
 	}
 
 	referenced, err := r.isReferenced(ctx, rc.Name)
@@ -82,15 +83,16 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	currentHash := rc.GetAnnotations()[collection.ContentHashAnnotation]
-	appliedCond := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionApplied)
-	if appliedCond != nil && appliedCond.Status == metav1.ConditionTrue &&
-		appliedCond.ObservedGeneration == rc.Generation &&
-		currentHash == renderResult.Hash {
-		return ctrl.Result{}, nil
+	if rc.Status.ContentHash == renderResult.Hash &&
+		rc.Status.ContentHash != "" {
+		appliedCond := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+		if appliedCond != nil && appliedCond.Status == metav1.ConditionTrue &&
+			appliedCond.ObservedGeneration == rc.Generation {
+			return ctrl.Result{}, nil
+		}
 	}
 
-	r.log.Info("applying resource collection", "name", rc.Name, "oldHash", currentHash, "newHash", renderResult.Hash)
+	r.log.Info("applying resource collection", "name", rc.Name, "oldHash", rc.Status.ContentHash, "newHash", renderResult.Hash)
 	if err := r.apply(ctx, renderResult); err != nil {
 		r.setCollectionCondition(&rc, metav1.ConditionFalse, "ApplyFailed", err.Error())
 		return ctrl.Result{}, err
@@ -104,19 +106,14 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	base := rc.DeepCopy()
-	annotations := rc.GetAnnotations()
-	if annotations == nil {
-		annotations = make(map[string]string)
-	}
-	annotations[collection.ContentHashAnnotation] = renderResult.Hash
-	rc.SetAnnotations(annotations)
+	rc.Status.ContentHash = renderResult.Hash
 	meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
 		Type:               v1alpha1.ConditionCollectionApplied,
 		Status:             metav1.ConditionTrue,
 		Reason:             "Applied",
 		ObservedGeneration: rc.Generation,
 	})
-	if err := r.client.Patch(ctx, &rc, client.MergeFrom(base)); err != nil {
+	if err := r.client.Status().Patch(ctx, &rc, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, err
 	}
 
