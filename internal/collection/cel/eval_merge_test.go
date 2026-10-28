@@ -119,11 +119,11 @@ func TestMergeWithContextVariables(t *testing.T) {
 	patches := []collcel.StatusPatchInput{{
 		Kind:   "FeatureGate",
 		Name:   "cluster",
-		Status: rawJSON(`release.filter(m, m.kind == 'FeatureGate')[0].status.merge({"version": version})`),
+		Status: rawJSON(`release.filter(m, m.kind == 'FeatureGate')[0].status.merge({"version": cluster.version})`),
 	}}
 
 	results, err := collcel.EvalStatusPatches(collcel.Context{
-		Version: "4.18.0",
+		Cluster: collcel.ClusterContext{Version: "4.18.0"},
 		Release: []map[string]interface{}{
 			{
 				"kind": "FeatureGate",

@@ -4,40 +4,30 @@ metadata:
   name: openshift-default
 spec:
   source: openshift-default
+  values:
+    clusterProfile: self-managed-high-availability
   statusPatches:
     - kind: Infrastructure
       name: cluster
       status:
-        platform: platform
+        platform: cluster.platform
         platformStatus:
-          type: platform
-        apiServerInternalURI: apiServerURL
+          type: cluster.platform
+        apiServerInternalURI: cluster.apiServerURL
     - kind: ClusterVersion
       name: version
       status:
         desired:
-          image: image
-          version: version
+          image: cluster.image
+          version: cluster.version
         observedGeneration: "0"
         versionHash: "''"
         availableUpdates: "[]"
     - kind: FeatureGate
       name: cluster
       status: >
-        release.filter(m,
-          m.kind == 'FeatureGate'
-          && m.metadata.name == 'cluster'
-          && has(m.metadata.annotations)
-          && 'release.openshift.io/feature-set' in m.metadata.annotations
-          && m.metadata.annotations['release.openshift.io/feature-set'] == featureSet
-        )[0].status.merge({
-          'featureGates': release.filter(m,
-            m.kind == 'FeatureGate'
-            && m.metadata.name == 'cluster'
-            && has(m.metadata.annotations)
-            && 'release.openshift.io/feature-set' in m.metadata.annotations
-            && m.metadata.annotations['release.openshift.io/feature-set'] == featureSet
-          )[0].status.featureGates.map(g,
-            g.merge({'version': version})
-          )
-        })
+        findReleaseByProfile(release, 'FeatureGate', 'cluster', cluster.featureSet, values.clusterProfile)
+          .status.merge({
+            'featureGates': findReleaseByProfile(release, 'FeatureGate', 'cluster', cluster.featureSet, values.clusterProfile)
+              .status.featureGates.map(g, g.merge({'version': cluster.version}))
+          })

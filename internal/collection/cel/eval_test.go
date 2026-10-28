@@ -38,15 +38,17 @@ func rawJSON(v interface{}) apiextensionsv1.JSON {
 
 func TestEvalMapWithCELValues(t *testing.T) {
 	ctx := collcel.Context{
-		Platform:     "AWS",
-		APIServerURL: "https://api.test:6443",
+		Cluster: collcel.ClusterContext{
+			Platform:     "AWS",
+			APIServerURL: "https://api.test:6443",
+		},
 	}
 	patches := []collcel.StatusPatchInput{{
 		Kind: "Infrastructure",
 		Name: "cluster",
 		Status: rawJSON(map[string]interface{}{
-			"platform":            "platform",
-			"apiServerInternalURI": "apiServerURL",
+			"platform":            "cluster.platform",
+			"apiServerInternalURI": "cluster.apiServerURL",
 		}),
 	}}
 
@@ -66,7 +68,7 @@ func TestEvalMapWithCELValues(t *testing.T) {
 // In OCP FeatureGate is a singleton; here we duplicate it to test the query.
 func TestEvalCELExpressionReturnsMap(t *testing.T) {
 	ctx := collcel.Context{
-		Platform: "None",
+		Cluster: collcel.ClusterContext{Platform: "None", FeatureSet: "Default"},
 		Release: []map[string]interface{}{
 			{
 				"kind": "FeatureGate",
@@ -97,12 +99,11 @@ func TestEvalCELExpressionReturnsMap(t *testing.T) {
 				},
 			},
 		},
-		FeatureSet: "Default",
 	}
 
 	expr := `release.filter(m, m.kind == 'FeatureGate'
 		&& m.metadata.name == 'cluster'
-		&& m.metadata.annotations['release.openshift.io/feature-set'] == featureSet
+		&& m.metadata.annotations['release.openshift.io/feature-set'] == cluster.featureSet
 	)[0].status`
 
 	patches := []collcel.StatusPatchInput{{
@@ -126,16 +127,18 @@ func TestEvalCELExpressionReturnsMap(t *testing.T) {
 
 func TestEvalMapWithCELListAndIntValues(t *testing.T) {
 	ctx := collcel.Context{
-		Version: "4.18.0",
-		Image:   "registry.example.com/release:4.18",
+		Cluster: collcel.ClusterContext{
+			Version: "4.18.0",
+			Image:   "registry.example.com/release:4.18",
+		},
 	}
 	patches := []collcel.StatusPatchInput{{
 		Kind: "ClusterVersion",
 		Name: "version",
 		Status: rawJSON(map[string]interface{}{
 			"desired": map[string]interface{}{
-				"image":   "image",
-				"version": "version",
+				"image":   "cluster.image",
+				"version": "cluster.version",
 			},
 			"observedGeneration": "0",
 			"versionHash":        "''",
@@ -154,6 +157,193 @@ func TestEvalMapWithCELListAndIntValues(t *testing.T) {
 	require.True(t, ok, "desired should be a map, got %T", s["desired"])
 	assert.Equal(t, "registry.example.com/release:4.18", desired["image"])
 	assert.Equal(t, "4.18.0", desired["version"])
+}
+
+func TestAnnotationFunction(t *testing.T) {
+	ctx := collcel.Context{
+		Cluster: collcel.ClusterContext{FeatureSet: "TechPreview"},
+		Release: []map[string]interface{}{
+			{
+				"kind": "FeatureGate",
+				"metadata": map[string]interface{}{
+					"name": "cluster",
+					"annotations": map[string]interface{}{
+						"release.openshift.io/feature-set": "TechPreview",
+					},
+				},
+				"status": map[string]interface{}{"ready": true},
+			},
+			{
+				"kind": "Infrastructure",
+				"metadata": map[string]interface{}{
+					"name": "cluster",
+				},
+				"status": map[string]interface{}{"platform": "AWS"},
+			},
+		},
+	}
+
+	patches := []collcel.StatusPatchInput{{
+		Kind: "FeatureGate",
+		Name: "cluster",
+		Status: rawJSON(`release.filter(m,
+			m.kind == 'FeatureGate'
+			&& annotation(m, 'release.openshift.io/feature-set') == cluster.featureSet
+		)[0].status`),
+	}}
+
+	results, err := collcel.EvalStatusPatches(ctx, patches)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, true, results[0].Status["ready"])
+	assertNativeTypes(t, results[0].Status, "status")
+}
+
+func TestAnnotationMissing(t *testing.T) {
+	ctx := collcel.Context{
+		Release: []map[string]interface{}{
+			{
+				"kind":     "ConfigMap",
+				"metadata": map[string]interface{}{"name": "test"},
+			},
+		},
+	}
+
+	patches := []collcel.StatusPatchInput{{
+		Kind:   "ConfigMap",
+		Name:   "test",
+		Status: rawJSON(map[string]interface{}{"hasAnnotation": "annotation(release[0], 'missing-key') == ''"}),
+	}}
+
+	results, err := collcel.EvalStatusPatches(ctx, patches)
+	require.NoError(t, err)
+	assert.Equal(t, true, results[0].Status["hasAnnotation"])
+}
+
+func TestFindReleaseFunction(t *testing.T) {
+	ctx := collcel.Context{
+		Release: []map[string]interface{}{
+			{
+				"kind":     "Infrastructure",
+				"metadata": map[string]interface{}{"name": "cluster"},
+				"status":   map[string]interface{}{"platform": "AWS"},
+			},
+			{
+				"kind":     "ClusterVersion",
+				"metadata": map[string]interface{}{"name": "version"},
+				"status":   map[string]interface{}{"desired": map[string]interface{}{"version": "4.18"}},
+			},
+		},
+	}
+
+	patches := []collcel.StatusPatchInput{{
+		Kind:   "Infrastructure",
+		Name:   "cluster",
+		Status: rawJSON(`findRelease(release, 'Infrastructure', 'cluster').status`),
+	}}
+
+	results, err := collcel.EvalStatusPatches(ctx, patches)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "AWS", results[0].Status["platform"])
+	assertNativeTypes(t, results[0].Status, "status")
+}
+
+func TestFindReleaseNotFound(t *testing.T) {
+	ctx := collcel.Context{
+		Release: []map[string]interface{}{
+			{
+				"kind":     "ConfigMap",
+				"metadata": map[string]interface{}{"name": "test"},
+			},
+		},
+	}
+
+	patches := []collcel.StatusPatchInput{{
+		Kind:   "Missing",
+		Name:   "obj",
+		Status: rawJSON(`findRelease(release, 'Missing', 'obj').status`),
+	}}
+
+	_, err := collcel.EvalStatusPatches(ctx, patches)
+	assert.Error(t, err)
+}
+
+func TestFindReleaseByProfile(t *testing.T) {
+	ctx := collcel.Context{
+		Cluster: collcel.ClusterContext{FeatureSet: "Default"},
+		Values:  map[string]string{"clusterProfile": "self-managed-high-availability"},
+		Release: []map[string]interface{}{
+			{
+				"kind": "FeatureGate",
+				"metadata": map[string]interface{}{
+					"name": "cluster",
+					"annotations": map[string]interface{}{
+						"include.release.openshift.io/ibm-cloud-managed":              "false-except-for-the-config-operator",
+						"release.openshift.io/feature-set":                             "Default",
+					},
+				},
+				"status": map[string]interface{}{"featureGates": []interface{}{map[string]interface{}{"name": "gate-hyper"}}},
+			},
+			{
+				"kind": "FeatureGate",
+				"metadata": map[string]interface{}{
+					"name": "cluster",
+					"annotations": map[string]interface{}{
+						"include.release.openshift.io/self-managed-high-availability":  "false-except-for-the-config-operator",
+						"release.openshift.io/feature-set":                             "Default",
+					},
+				},
+				"status": map[string]interface{}{"featureGates": []interface{}{map[string]interface{}{"name": "gate-smha"}}},
+			},
+		},
+	}
+
+	patches := []collcel.StatusPatchInput{{
+		Kind:   "FeatureGate",
+		Name:   "cluster",
+		Status: rawJSON(`findReleaseByProfile(release, 'FeatureGate', 'cluster', cluster.featureSet, values.clusterProfile).status`),
+	}}
+
+	results, err := collcel.EvalStatusPatches(ctx, patches)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+
+	gates, ok := results[0].Status["featureGates"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, gates, 1)
+	gate := gates[0].(map[string]interface{})
+	assert.Equal(t, "gate-smha", gate["name"], "should select self-managed-high-availability, not hypershift")
+	assertNativeTypes(t, results[0].Status, "status")
+}
+
+func TestFindReleaseByProfileNotFound(t *testing.T) {
+	ctx := collcel.Context{
+		Cluster: collcel.ClusterContext{FeatureSet: "CustomNoUpgrade"},
+		Values:  map[string]string{"clusterProfile": "self-managed-high-availability"},
+		Release: []map[string]interface{}{
+			{
+				"kind": "FeatureGate",
+				"metadata": map[string]interface{}{
+					"name": "cluster",
+					"annotations": map[string]interface{}{
+						"include.release.openshift.io/self-managed-high-availability": "false-except-for-the-config-operator",
+						"release.openshift.io/feature-set":                            "Default",
+					},
+				},
+				"status": map[string]interface{}{},
+			},
+		},
+	}
+
+	patches := []collcel.StatusPatchInput{{
+		Kind:   "FeatureGate",
+		Name:   "cluster",
+		Status: rawJSON(`findReleaseByProfile(release, 'FeatureGate', 'cluster', cluster.featureSet, values.clusterProfile).status`),
+	}}
+
+	_, err := collcel.EvalStatusPatches(ctx, patches)
+	assert.Error(t, err, "should fail because no manifest matches CustomNoUpgrade")
 }
 
 func TestEvalLiteralStringNotCEL(t *testing.T) {
