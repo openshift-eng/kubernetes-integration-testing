@@ -103,17 +103,22 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 	}
 
+	base := rc.DeepCopy()
 	annotations := rc.GetAnnotations()
 	if annotations == nil {
 		annotations = make(map[string]string)
 	}
 	annotations[collection.ContentHashAnnotation] = renderResult.Hash
 	rc.SetAnnotations(annotations)
-	if err := r.client.Update(ctx, &rc); err != nil {
+	meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionCollectionApplied,
+		Status:             metav1.ConditionTrue,
+		Reason:             "Applied",
+		ObservedGeneration: rc.Generation,
+	})
+	if err := r.client.Patch(ctx, &rc, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, err
 	}
-
-	r.setCollectionCondition(&rc, metav1.ConditionTrue, "Applied", "")
 
 	r.log.Info("applied resource collection", "name", rc.Name)
 	return ctrl.Result{}, nil
@@ -197,6 +202,7 @@ func (r *collectionReconciler) applyStatusPatches(ctx context.Context, rc *v1alp
 		APIServerURL: kc.Status.APIServerURL,
 		FeatureSet:   kc.Spec.FeatureSet,
 		Version:      r.release.Version(),
+		Image:        kc.Spec.Image,
 		Values:       rc.Spec.Values,
 		Release:      releaseObjs,
 	}, patches)
@@ -290,7 +296,12 @@ func (r *collectionReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Ma
 		Watches(&v1alpha1.KitCluster{}, handler.EnqueueRequestsFromMapFunc(r.kitClusterToCollections))
 
 	for _, name := range collection.BuiltinNames() {
-		if err := r.ensureResourceCollection(ctx, name); err != nil {
+		fsys, err := collection.BuiltinFS(name)
+		if err != nil {
+			r.log.Warn("builtin collection FS not found", "name", name, "error", err)
+			continue
+		}
+		if err := r.ensureResourceCollection(ctx, name, fsys); err != nil {
 			r.log.Warn("failed to auto-create builtin ResourceCollection", "name", name, "error", err)
 		}
 	}
@@ -335,17 +346,24 @@ func (r *collectionReconciler) ensureCollectionsFromDisk(ctx context.Context) er
 		if !hasTemplates(filepath.Join(r.collectionsDir, entry.Name())) {
 			continue
 		}
-		if err := r.ensureResourceCollection(ctx, entry.Name()); err != nil {
+		fsys := os.DirFS(filepath.Join(r.collectionsDir, entry.Name()))
+		if err := r.ensureResourceCollection(ctx, entry.Name(), fsys); err != nil {
 			r.log.Warn("failed to auto-create ResourceCollection", "name", entry.Name(), "error", err)
 		}
 	}
 	return nil
 }
 
-func (r *collectionReconciler) ensureResourceCollection(ctx context.Context, name string) error {
+func (r *collectionReconciler) ensureResourceCollection(ctx context.Context, name string, fsys fs.FS) error {
+	spec := collection.LoadSpec(name, fsys)
+	if spec == nil {
+		spec = &v1alpha1.ResourceCollectionSpec{}
+	}
+	spec.Source = name
+
 	rc := &v1alpha1.ResourceCollection{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec:       v1alpha1.ResourceCollectionSpec{Source: name},
+		Spec:       *spec,
 	}
 	if err := r.client.Create(ctx, rc); err != nil {
 		if apierrors.IsAlreadyExists(err) {
@@ -353,7 +371,7 @@ func (r *collectionReconciler) ensureResourceCollection(ctx context.Context, nam
 		}
 		return err
 	}
-	r.log.Info("auto-created ResourceCollection from disk", "name", name)
+	r.log.Info("auto-created ResourceCollection", "name", name)
 	return nil
 }
 
@@ -423,7 +441,8 @@ func (r *collectionReconciler) handleFSEvent(ctx context.Context, ev fsnotify.Ev
 	if ev.Op&fsnotify.Create != 0 {
 		dir := filepath.Join(r.collectionsDir, name)
 		if hasTemplates(dir) {
-			if err := r.ensureResourceCollection(ctx, name); err != nil {
+			fsys := os.DirFS(dir)
+			if err := r.ensureResourceCollection(ctx, name, fsys); err != nil {
 				r.log.Warn("failed to auto-create ResourceCollection from fs event", "name", name, "error", err)
 			}
 		}

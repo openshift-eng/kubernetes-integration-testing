@@ -1,0 +1,43 @@
+apiVersion: kit.openshift.io/v1alpha1
+kind: ResourceCollection
+metadata:
+  name: openshift-default
+spec:
+  source: openshift-default
+  statusPatches:
+    - kind: Infrastructure
+      name: cluster
+      status:
+        platform: platform
+        platformStatus:
+          type: platform
+        apiServerInternalURI: apiServerURL
+    - kind: ClusterVersion
+      name: version
+      status:
+        desired:
+          image: image
+          version: version
+        observedGeneration: "0"
+        versionHash: "''"
+        availableUpdates: "[]"
+    - kind: FeatureGate
+      name: cluster
+      status: >
+        release.filter(m,
+          m.kind == 'FeatureGate'
+          && m.metadata.name == 'cluster'
+          && has(m.metadata.annotations)
+          && 'release.openshift.io/feature-set' in m.metadata.annotations
+          && m.metadata.annotations['release.openshift.io/feature-set'] == featureSet
+        )[0].status.merge({
+          'featureGates': release.filter(m,
+            m.kind == 'FeatureGate'
+            && m.metadata.name == 'cluster'
+            && has(m.metadata.annotations)
+            && 'release.openshift.io/feature-set' in m.metadata.annotations
+            && m.metadata.annotations['release.openshift.io/feature-set'] == featureSet
+          )[0].status.featureGates.map(g,
+            g.merge({'version': version})
+          )
+        })

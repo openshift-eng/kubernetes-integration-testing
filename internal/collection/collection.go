@@ -11,7 +11,11 @@ import (
 	"io/fs"
 	"path/filepath"
 	"sort"
+	"strings"
 	"text/template"
+
+	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
@@ -95,6 +99,50 @@ func LoadInline(name string, contents []string) (*Collection, error) {
 	return &Collection{name: name, templates: templates}, nil
 }
 
+// BuiltinFS returns the embedded filesystem for a builtin collection.
+func BuiltinFS(name string) (fs.FS, error) {
+	return fs.Sub(builtinFS, filepath.Join("builtin", name))
+}
+
+// LoadSpec scans fsys for a ResourceCollection CR whose metadata.name
+// matches the given name. Returns nil if not found.
+func LoadSpec(name string, fsys fs.FS) *v1alpha1.ResourceCollectionSpec {
+	return findSpec(name, fsys)
+}
+
+func findSpec(name string, fsys fs.FS) *v1alpha1.ResourceCollectionSpec {
+	entries, err := fs.ReadDir(fsys, ".")
+	if err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		data, err := fs.ReadFile(fsys, e.Name())
+		if err != nil {
+			continue
+		}
+		obj, _, err := kube.Decoder.Decode(data, nil, nil)
+		if err != nil {
+			continue
+		}
+		rc, ok := obj.(*v1alpha1.ResourceCollection)
+		if ok && rc.Name == name {
+			return &rc.Spec
+		}
+	}
+	return nil
+}
+
+func isKitResource(data []byte) bool {
+	obj, _, err := kube.Decoder.Decode(data, nil, nil)
+	if err != nil {
+		return false
+	}
+	return strings.HasPrefix(obj.GetObjectKind().GroupVersionKind().Group, "kit.openshift.io")
+}
+
 func loadFromFS(name string, fsys fs.FS) (*Collection, error) {
 	templates := make(map[string]*template.Template)
 
@@ -113,6 +161,10 @@ func loadFromFS(name string, fsys fs.FS) (*Collection, error) {
 		data, err := fs.ReadFile(fsys, path)
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", path, err)
+		}
+
+		if isKitResource(data) {
+			return nil
 		}
 
 		tmpl, err := template.New(path).Parse(string(data))
