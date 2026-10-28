@@ -4,6 +4,8 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -331,6 +333,41 @@ func TestRenderHashDeterministic(t *testing.T) {
 	}
 	if r1.Hash == "" {
 		t.Error("hash should not be empty")
+	}
+}
+
+func TestLoadSpecFromBuiltinFS(t *testing.T) {
+	fsys, err := BuiltinFS("openshift-default")
+	require.NoError(t, err)
+
+	spec := LoadSpec("openshift-default", fsys)
+	require.NotNil(t, spec, "LoadSpec should find the builtin collection.yaml")
+	assert.Equal(t, "openshift-default", spec.Source)
+	assert.Len(t, spec.StatusPatches, 3)
+	assert.Equal(t, "Infrastructure", spec.StatusPatches[0].Kind)
+	assert.Equal(t, "ClusterVersion", spec.StatusPatches[1].Kind)
+	assert.Equal(t, "FeatureGate", spec.StatusPatches[2].Kind)
+}
+
+func TestLoadSpecSkipsNonMatchingName(t *testing.T) {
+	fsys, err := BuiltinFS("openshift-default")
+	require.NoError(t, err)
+
+	spec := LoadSpec("wrong-name", fsys)
+	assert.Nil(t, spec)
+}
+
+func TestIsKitResourceFiltersCollectionYAML(t *testing.T) {
+	fsys, err := BuiltinFS("openshift-default")
+	require.NoError(t, err)
+
+	coll, err := loadFromFS("openshift-default", fsys)
+	require.NoError(t, err)
+
+	result, err := coll.Render(RenderContext{Platform: "None", NetworkType: "OVNKubernetes"})
+	require.NoError(t, err)
+	for _, obj := range result.Objects {
+		assert.NotEqual(t, "ResourceCollection", obj.GetKind(), "collection.yaml should be filtered out of templates")
 	}
 }
 

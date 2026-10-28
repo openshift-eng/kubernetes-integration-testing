@@ -16,6 +16,7 @@ type Context struct {
 	APIServerURL string
 	FeatureSet   string
 	Version      string
+	Image        string
 	Values       map[string]string
 	Release      []map[string]interface{}
 }
@@ -56,6 +57,7 @@ func newEnv() (*cel.Env, error) {
 		cel.Variable("apiServerURL", cel.StringType),
 		cel.Variable("featureSet", cel.StringType),
 		cel.Variable("version", cel.StringType),
+		cel.Variable("image", cel.StringType),
 		cel.Variable("values", cel.MapType(cel.StringType, cel.StringType)),
 		cel.Variable("release", cel.ListType(cel.DynType)),
 		celMergeFunc(),
@@ -76,6 +78,7 @@ func activation(ctx Context) map[string]interface{} {
 		"apiServerURL": ctx.APIServerURL,
 		"featureSet":   ctx.FeatureSet,
 		"version":      ctx.Version,
+		"image":        ctx.Image,
 		"values":       values,
 		"release":      release,
 	}
@@ -143,7 +146,7 @@ func evalValue(env *cel.Env, act map[string]interface{}, v interface{}) (interfa
 		if err != nil {
 			return val, nil
 		}
-		return out.Value(), nil
+		return unwrapRefVal(out), nil
 	case map[string]interface{}:
 		return evalMap(env, act, val)
 	default:
