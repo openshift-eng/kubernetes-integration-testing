@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
@@ -15,23 +14,19 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 )
 
 const (
 	protectionFinalizer = "kit.openshift.io/cluster-protection"
 
-	reasonReconciling          = "Reconciling"
-	reasonReconcileFailed      = "ReconcileFailed"
-	reasonReady                = "Ready"
-	reasonPulling              = "Pulling"
-	reasonPulled               = "Pulled"
-	reasonPullFailed           = "PullFailed"
-	reasonCRDsInstalled        = "Installed"
-	reasonCRDsSyncFailed       = "SyncFailed"
-	reasonCollectionsApplied   = "Applied"
-	reasonCollectionsPending   = "Pending"
-	reasonCollectionsNotFound  = "NotFound"
+	reasonReconciling     = "Reconciling"
+	reasonReconcileFailed = "ReconcileFailed"
+	reasonReady           = "Ready"
+	reasonPulling         = "Pulling"
+	reasonPulled          = "Pulled"
+	reasonPullFailed      = "PullFailed"
+	reasonCRDsInstalled   = "Installed"
+	reasonCRDsSyncFailed  = "SyncFailed"
 )
 
 type kitClusterReconciler struct {
@@ -76,13 +71,6 @@ func (r *kitClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 
 		result, err = r.phaseCRDSync(ctx, &kc)
-		if result != nil {
-			return *result, err
-		}
-	}
-
-	if len(kc.Spec.Collections) > 0 {
-		result, err := r.phaseCollections(ctx, &kc)
 		if result != nil {
 			return *result, err
 		}
@@ -173,58 +161,6 @@ func (r *kitClusterReconciler) phaseCRDSync(ctx context.Context, kc *v1alpha1.Ki
 	return &ctrl.Result{RequeueAfter: time.Millisecond}, nil
 }
 
-func (r *kitClusterReconciler) phaseCollections(ctx context.Context, kc *v1alpha1.KitCluster) (*ctrl.Result, error) {
-	cond := meta.FindStatusCondition(kc.Status.Conditions, v1alpha1.ConditionCollectionsApplied)
-	if cond != nil && cond.Status == metav1.ConditionTrue && cond.ObservedGeneration == kc.Generation {
-		return nil, nil
-	}
-
-	var pending []string
-	var missing []string
-	for _, name := range kc.Spec.Collections {
-		var rc v1alpha1.ResourceCollection
-		if err := r.client.Get(ctx, client.ObjectKey{Name: name}, &rc); err != nil {
-			missing = append(missing, name)
-			continue
-		}
-		rcCond := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionApplied)
-		if rcCond == nil || rcCond.Status != metav1.ConditionTrue {
-			pending = append(pending, name)
-		}
-	}
-
-	if len(missing) > 0 {
-		msg := fmt.Sprintf("collections not found: %s", strings.Join(missing, ", "))
-		base := kc.DeepCopy()
-		r.setCondition(kc, v1alpha1.ConditionCollectionsApplied, metav1.ConditionFalse, reasonCollectionsNotFound, msg)
-		r.setCondition(kc, v1alpha1.ConditionReady, metav1.ConditionFalse, reasonReconcileFailed, msg)
-		if err := r.client.Status().Patch(ctx, kc, client.MergeFrom(base)); err != nil {
-			return &ctrl.Result{}, err
-		}
-		return &ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-	}
-
-	if len(pending) > 0 {
-		msg := fmt.Sprintf("waiting for collections: %s", strings.Join(pending, ", "))
-		base := kc.DeepCopy()
-		r.setCondition(kc, v1alpha1.ConditionCollectionsApplied, metav1.ConditionFalse, reasonCollectionsPending, msg)
-		r.setCondition(kc, v1alpha1.ConditionReady, metav1.ConditionFalse, reasonReconciling, msg)
-		if err := r.client.Status().Patch(ctx, kc, client.MergeFrom(base)); err != nil {
-			return &ctrl.Result{}, err
-		}
-		return &ctrl.Result{RequeueAfter: 2 * time.Second}, nil
-	}
-
-	base := kc.DeepCopy()
-	r.setCondition(kc, v1alpha1.ConditionCollectionsApplied, metav1.ConditionTrue, reasonCollectionsApplied, "")
-	r.setCondition(kc, v1alpha1.ConditionReady, metav1.ConditionFalse, reasonReconciling, "Collections applied")
-	if err := r.client.Status().Patch(ctx, kc, client.MergeFrom(base)); err != nil {
-		return &ctrl.Result{}, err
-	}
-
-	return nil, nil
-}
-
 func (r *kitClusterReconciler) phaseReady(ctx context.Context, kc *v1alpha1.KitCluster) (ctrl.Result, error) {
 	base := kc.DeepCopy()
 	r.setCondition(kc, v1alpha1.ConditionReady, metav1.ConditionTrue, reasonReady, "")
@@ -250,25 +186,5 @@ func (r *kitClusterReconciler) SetupWithManager(mgr ctrl.Manager, clusterName st
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("kitcluster-"+clusterName).
 		For(&v1alpha1.KitCluster{}).
-		// Re-evaluate KitCluster readiness when a referenced collection changes phase.
-		Watches(&v1alpha1.ResourceCollection{}, handler.EnqueueRequestsFromMapFunc(r.collectionsToKitCluster)).
 		Complete(r)
-}
-
-// collectionsToKitCluster maps a ResourceCollection event to the KitClusters that reference it.
-func (r *kitClusterReconciler) collectionsToKitCluster(ctx context.Context, obj client.Object) []ctrl.Request {
-	var kcList v1alpha1.KitClusterList
-	if err := r.client.List(ctx, &kcList); err != nil {
-		return nil
-	}
-	var requests []ctrl.Request
-	for _, kc := range kcList.Items {
-		for _, ref := range kc.Spec.Collections {
-			if ref == obj.GetName() {
-				requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(&kc)})
-				break
-			}
-		}
-	}
-	return requests
 }

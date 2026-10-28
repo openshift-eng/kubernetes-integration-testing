@@ -29,16 +29,12 @@ type KitClusterSpec struct {
 
 	// +kubebuilder:validation:Minimum=0
 	Workers int `json:"workers,omitempty"`
-
-	// +kubebuilder:validation:MinItems=1
-	Collections []string `json:"collections,omitempty"`
 }
 
 const (
-	ConditionReady              = "Ready"
-	ConditionImagePulled        = "ImagePulled"
-	ConditionCRDsInstalled      = "CRDsInstalled"
-	ConditionCollectionsApplied = "CollectionsApplied"
+	ConditionReady         = "Ready"
+	ConditionImagePulled   = "ImagePulled"
+	ConditionCRDsInstalled = "CRDsInstalled"
 )
 
 type KitClusterStatus struct {
