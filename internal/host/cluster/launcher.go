@@ -69,7 +69,7 @@ func (l *PodmanControllerLauncher) Launch(ctx context.Context, name string, c Cl
 
 	l.log.Info("launching controller container", "name", containerName, "image", l.image, "network", cfg.Network)
 
-	_, err = l.client.Run(ctx, podman.RunOpts{
+	runOpts := podman.RunOpts{
 		Name:    containerName,
 		Image:   l.image,
 		Network: cfg.Network,
@@ -82,7 +82,12 @@ func (l *PodmanControllerLauncher) Launch(ctx context.Context, name string, c Cl
 		Detach:    true,
 		Replace:   true,
 		LogDriver: "journald",
-	})
+	}
+	if cfg.Provider == "kwok" {
+		runOpts.SecurityOpt = []string{"label=disable"}
+	}
+
+	_, err = l.client.Run(ctx, runOpts)
 	if err != nil {
 		return nil, fmt.Errorf("launching controller container %s: %w", containerName, err)
 	}
