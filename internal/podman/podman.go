@@ -40,7 +40,8 @@ type RunOpts struct {
 	Replace    bool
 	LogDriver  string
 	LogOpts    map[string]string
-	AuthFile   string
+	AuthFile    string
+	SecurityOpt []string
 }
 
 type PodCreateOpts struct {
@@ -84,6 +85,14 @@ func (c *client) cmd(ctx context.Context, args ...string) *exec.Cmd {
 	all = append(all, c.args...)
 	all = append(all, args...)
 	return exec.CommandContext(ctx, c.binary, all...)
+}
+
+func (c *client) run(ctx context.Context, args ...string) error {
+	out, err := c.cmd(ctx, args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("podman %s: %s: %w", args[0], strings.TrimSpace(string(out)), err)
+	}
+	return nil
 }
 
 func (c *client) cmdNoCtx(args ...string) *exec.Cmd {
@@ -132,6 +141,9 @@ func (c *client) Run(ctx context.Context, opts RunOpts) (string, error) {
 	if opts.AuthFile != "" {
 		args = append(args, "--authfile", opts.AuthFile)
 	}
+	for _, opt := range opts.SecurityOpt {
+		args = append(args, "--security-opt", opt)
+	}
 	if len(opts.Entrypoint) > 0 {
 		args = append(args, "--entrypoint", opts.Entrypoint[0])
 	}
@@ -154,7 +166,7 @@ func (c *client) Stop(ctx context.Context, name string, timeout int) error {
 		args = append(args, "-t", fmt.Sprintf("%d", timeout))
 	}
 	args = append(args, name)
-	return c.cmd(ctx, args...).Run()
+	return c.run(ctx, args...)
 }
 
 func (c *client) Remove(ctx context.Context, name string, force bool) error {
@@ -163,13 +175,13 @@ func (c *client) Remove(ctx context.Context, name string, force bool) error {
 		args = append(args, "-f")
 	}
 	args = append(args, name)
-	return c.cmd(ctx, args...).Run()
+	return c.run(ctx, args...)
 }
 
 func (c *client) Wait(ctx context.Context, name string) (int, error) {
-	out, err := c.cmdNoCtx("wait", name).Output()
+	out, err := c.cmdNoCtx("wait", name).CombinedOutput()
 	if err != nil {
-		return 1, fmt.Errorf("podman wait: %w", err)
+		return 1, fmt.Errorf("podman wait: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	var code int
 	_, _ = fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &code)
@@ -177,7 +189,7 @@ func (c *client) Wait(ctx context.Context, name string) (int, error) {
 }
 
 func (c *client) Restart(ctx context.Context, name string) error {
-	return c.cmd(ctx, "restart", name).Run()
+	return c.run(ctx, "restart", name)
 }
 
 func (c *client) PodCreate(ctx context.Context, opts PodCreateOpts) (string, error) {
@@ -195,9 +207,9 @@ func (c *client) PodCreate(ctx context.Context, opts PodCreateOpts) (string, err
 		args = append(args, "--network-alias", alias)
 	}
 
-	out, err := c.cmd(ctx, args...).Output()
+	out, err := c.cmd(ctx, args...).CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("podman pod create: %w", err)
+		return "", fmt.Errorf("podman pod create: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
@@ -208,7 +220,7 @@ func (c *client) PodStop(ctx context.Context, name string, timeout int) error {
 		args = append(args, "-t", fmt.Sprintf("%d", timeout))
 	}
 	args = append(args, name)
-	return c.cmd(ctx, args...).Run()
+	return c.run(ctx, args...)
 }
 
 func (c *client) PodRemove(ctx context.Context, name string, force bool) error {
@@ -217,7 +229,7 @@ func (c *client) PodRemove(ctx context.Context, name string, force bool) error {
 		args = append(args, "-f")
 	}
 	args = append(args, name)
-	return c.cmd(ctx, args...).Run()
+	return c.run(ctx, args...)
 }
 
 func (c *client) PodList(ctx context.Context, filters map[string]string) ([]PodInfo, error) {
@@ -226,9 +238,9 @@ func (c *client) PodList(ctx context.Context, filters map[string]string) ([]PodI
 		args = append(args, "--filter", k+"="+v)
 	}
 
-	out, err := c.cmd(ctx, args...).Output()
+	out, err := c.cmd(ctx, args...).CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("podman pod ps: %w", err)
+		return nil, fmt.Errorf("podman pod ps: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	if len(out) == 0 {
 		return nil, nil
