@@ -83,15 +83,6 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 				log:          log,
 			}).SetupWithManager(mgr, clusterName)
 		}},
-		{"OperatorDeployment", func() error {
-			return (&operatorDeploymentReconciler{
-				client:         mgr.GetClient(),
-				kubeConfig:     kubeConfig,
-				cacheDir:       cacheDir,
-				collectionsDir: collectionsDir,
-				log:            log,
-			}).SetupWithManager(mgr, clusterName)
-		}},
 		{"ResourceCollection", func() error {
 			return (&collectionReconciler{
 				client:         mgr.GetClient(),
@@ -102,10 +93,13 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 				log:            log,
 			}).SetupWithManager(ctx, mgr, clusterName)
 		}},
-		{"CollectionConfig", func() error {
-			return (&collectionConfigReconciler{
-				client: mgr.GetClient(),
-				log:    log,
+		{"DeploymentPlan", func() error {
+			return (&deploymentPlanReconciler{
+				client:    mgr.GetClient(),
+				dynClient: clients.Dynamic,
+				discovery: clients.Discovery,
+				release:   rel,
+				log:       log,
 			}).SetupWithManager(mgr, clusterName)
 		}},
 	}

@@ -40,11 +40,6 @@ spec:
             type: object
           spec:
             properties:
-              collections:
-                items:
-                  type: string
-                minItems: 1
-                type: array
               featureSet:
                 enum:
                 - Default

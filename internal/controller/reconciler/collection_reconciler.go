@@ -60,11 +60,11 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	referenced, err := r.isReferenced(ctx, rc.Name)
+	requested, err := r.isRequested(ctx, rc.Name)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !referenced {
+	if !requested {
 		return ctrl.Result{}, nil
 	}
 
@@ -257,12 +257,12 @@ func (r *collectionReconciler) handleDeletion(ctx context.Context, rc *v1alpha1.
 		return ctrl.Result{}, nil
 	}
 
-	referenced, err := r.isReferenced(ctx, rc.Name)
+	requested, err := r.isRequested(ctx, rc.Name)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if referenced {
-		r.log.Info("collection still referenced by KitCluster, blocking deletion", "name", rc.Name)
+	if requested {
+		r.log.Info("collection still requested by DeploymentPlan, blocking deletion", "name", rc.Name)
 		return ctrl.Result{}, nil
 	}
 
@@ -273,14 +273,17 @@ func (r *collectionReconciler) handleDeletion(ctx context.Context, rc *v1alpha1.
 	return ctrl.Result{}, nil
 }
 
-func (r *collectionReconciler) isReferenced(ctx context.Context, name string) (bool, error) {
-	var kcList v1alpha1.KitClusterList
-	if err := r.client.List(ctx, &kcList); err != nil {
-		return false, fmt.Errorf("listing KitCluster: %w", err)
+func (r *collectionReconciler) isRequested(ctx context.Context, name string) (bool, error) {
+	var planList v1alpha1.DeploymentPlanList
+	if err := r.client.List(ctx, &planList); err != nil {
+		return false, fmt.Errorf("listing DeploymentPlan: %w", err)
 	}
-	for _, kc := range kcList.Items {
-		for _, ref := range kc.Spec.Collections {
-			if ref == name {
+	for _, plan := range planList.Items {
+		for i, stepStatus := range plan.Status.Steps {
+			if stepStatus.Phase != v1alpha1.StepRequested {
+				continue
+			}
+			if i < len(plan.Spec.Steps) && plan.Spec.Steps[i].Collection != nil && plan.Spec.Steps[i].Collection.Source == name {
 				return true, nil
 			}
 		}
@@ -292,7 +295,7 @@ func (r *collectionReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Ma
 	builder := ctrl.NewControllerManagedBy(mgr).
 		Named("resourcecollection-"+clusterName).
 		For(&v1alpha1.ResourceCollection{}).
-		Watches(&v1alpha1.KitCluster{}, handler.EnqueueRequestsFromMapFunc(r.kitClusterToCollections))
+		Watches(&v1alpha1.DeploymentPlan{}, handler.EnqueueRequestsFromMapFunc(r.planToCollections))
 
 	for _, name := range collection.BuiltinNames() {
 		fsys, err := collection.BuiltinFS(name)
@@ -321,14 +324,19 @@ func (r *collectionReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Ma
 	return builder.Complete(r)
 }
 
-func (r *collectionReconciler) kitClusterToCollections(ctx context.Context, obj client.Object) []ctrl.Request {
-	kc, ok := obj.(*v1alpha1.KitCluster)
+func (r *collectionReconciler) planToCollections(ctx context.Context, obj client.Object) []ctrl.Request {
+	plan, ok := obj.(*v1alpha1.DeploymentPlan)
 	if !ok {
 		return nil
 	}
-	requests := make([]ctrl.Request, 0, len(kc.Spec.Collections))
-	for _, name := range kc.Spec.Collections {
-		requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKey{Name: name}})
+	var requests []ctrl.Request
+	for i, stepStatus := range plan.Status.Steps {
+		if stepStatus.Phase != v1alpha1.StepRequested {
+			continue
+		}
+		if i < len(plan.Spec.Steps) && plan.Spec.Steps[i].Collection != nil {
+			requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKey{Name: plan.Spec.Steps[i].Collection.Source}})
+		}
 	}
 	return requests
 }
