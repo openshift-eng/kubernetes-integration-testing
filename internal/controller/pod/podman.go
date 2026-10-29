@@ -14,16 +14,13 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/podman"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/pullsecret"
 
-
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
 )
 
 type podmanRunner struct {
-	client        podman.Client
-	kubeConfig    *kube.KubeConfig
-	clientset     kubernetes.Interface
+	podmanClient  podman.Client
+	clients       *kube.Clients
 	logsDir       string
 	volumesDir    string
 	pullSecret    *pullsecret.PullSecret
@@ -43,8 +40,8 @@ type podmanPod struct {
 }
 
 type PodmanRunnerOpts struct {
-	Client        podman.Client
-	KubeConfig    *kube.KubeConfig
+	PodmanClient  podman.Client
+	Clients       *kube.Clients
 	PullSecret    *pullsecret.PullSecret
 	LogsDir       string
 	VolumesDir    string
@@ -54,19 +51,9 @@ type PodmanRunnerOpts struct {
 }
 
 func NewPodmanRunner(ctx context.Context, opts PodmanRunnerOpts, changes chan<- ContainerStateChange, log *slog.Logger) (PodRunner, error) {
-	cfg, err := opts.KubeConfig.RestConfig()
-	if err != nil {
-		return nil, fmt.Errorf("building kubeconfig: %w", err)
-	}
-	clientset, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("creating clientset: %w", err)
-	}
-
 	r := &podmanRunner{
-		client:        opts.Client,
-		kubeConfig:    opts.KubeConfig,
-		clientset:     clientset,
+		podmanClient:  opts.PodmanClient,
+		clients:       opts.Clients,
 		logsDir:       opts.LogsDir,
 		volumesDir:    opts.VolumesDir,
 		pullSecret:    opts.PullSecret,
@@ -83,7 +70,7 @@ func NewPodmanRunner(ctx context.Context, opts PodmanRunnerOpts, changes chan<- 
 }
 
 func (r *podmanRunner) recoverPods(ctx context.Context) {
-	pods, err := r.client.PodList(ctx, map[string]string{"network": r.network})
+	pods, err := r.podmanClient.PodList(ctx, map[string]string{"network": r.network})
 	if err != nil {
 		return
 	}
@@ -145,8 +132,8 @@ func (r *podmanRunner) StopPod(uid string) {
 	r.mu.Unlock()
 
 	r.log.Info("stopping podman pod", "podID", p.id)
-	_ = r.client.PodStop(context.Background(), p.id, 10)
-	_ = r.client.PodRemove(context.Background(), p.id, true)
+	_ = r.podmanClient.PodStop(context.Background(), p.id, 10)
+	_ = r.podmanClient.PodRemove(context.Background(), p.id, true)
 }
 
 func (r *podmanRunner) StopAll() {
@@ -161,8 +148,8 @@ func (r *podmanRunner) StopAll() {
 
 	for _, p := range pods {
 		r.log.Info("stopping podman pod", "podID", p.id)
-		_ = r.client.PodStop(context.Background(), p.id, 10)
-		_ = r.client.PodRemove(context.Background(), p.id, true)
+		_ = r.podmanClient.PodStop(context.Background(), p.id, 10)
+		_ = r.podmanClient.PodRemove(context.Background(), p.id, true)
 	}
 }
 
@@ -189,7 +176,7 @@ func (r *podmanRunner) ensurePod(ctx context.Context, pod *corev1.Pod) (string, 
 	}
 
 	name := "kit-" + uid[:12]
-	id, err := r.client.PodCreate(ctx, podman.PodCreateOpts{
+	id, err := r.podmanClient.PodCreate(ctx, podman.PodCreateOpts{
 		Name:    name,
 		Network: r.network,
 		Labels: map[string]string{
@@ -229,7 +216,7 @@ func hasNewAliases(current, wanted []string) bool {
 }
 
 func (r *podmanRunner) serviceAliases(ctx context.Context, pod *corev1.Pod) []string {
-	svcs, err := r.clientset.CoreV1().Services(pod.Namespace).List(ctx, metav1.ListOptions{})
+	svcs, err := r.clients.Clientset.CoreV1().Services(pod.Namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		r.log.Warn("failed to list services for alias resolution", "namespace", pod.Namespace, "error", err)
 		return nil
@@ -267,8 +254,8 @@ func (r *podmanRunner) startContainer(ctx context.Context, pod *corev1.Pod, podI
 	key := processKey(uid, container.Name)
 	containerName := "kit-" + uid[:12] + "-" + container.Name
 
-	onWait := volumeEventEmitter(r.clientset, pod, r.log)
-	mounts, err := waitForVolumes(ctx, r.clientset, r.volumesDir, pod, container, r.log, onWait)
+	onWait := volumeEventEmitter(r.clients.Clientset, pod, r.log)
+	mounts, err := waitForVolumes(ctx, r.clients.Clientset, r.volumesDir, pod, container, r.log, onWait)
 	if err != nil {
 		var notReady *VolumeNotReadyError
 		if errors.As(err, &notReady) {
@@ -277,7 +264,7 @@ func (r *podmanRunner) startContainer(ctx context.Context, pod *corev1.Pod, podI
 		r.log.Warn("failed to materialize some volumes", "pod", pod.Name, "namespace", pod.Namespace, "error", err)
 	}
 
-	saToken, err := materializeSAToken(ctx, r.clientset, r.kubeConfig, r.volumesDir, pod)
+	saToken, err := materializeSAToken(ctx, r.clients.Clientset, r.clients.REST, r.volumesDir, pod)
 	if err != nil {
 		return fmt.Errorf("materializing SA token: %w", err)
 	}
@@ -317,7 +304,7 @@ func (r *podmanRunner) startContainer(ctx context.Context, pod *corev1.Pod, podI
 	var containerID string
 	err = r.pullSecret.WithAuthFile(func(authFile string) error {
 		var runErr error
-		containerID, runErr = r.client.Run(ctx, podman.RunOpts{
+		containerID, runErr = r.podmanClient.Run(ctx, podman.RunOpts{
 			Name:      containerName,
 			Image:     container.Image,
 			Pod:       podID,
@@ -363,7 +350,7 @@ func (r *podmanRunner) startContainer(ctx context.Context, pod *corev1.Pod, podI
 func (r *podmanRunner) waitContainer(uid, podName, namespace, container, containerID string) {
 	key := processKey(uid, container)
 
-	exitCode, err := r.client.Wait(context.Background(), containerID)
+	exitCode, err := r.podmanClient.Wait(context.Background(), containerID)
 
 	r.mu.Lock()
 	delete(r.running, key)

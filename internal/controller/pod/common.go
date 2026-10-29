@@ -11,13 +11,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
-
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 type VolumeNotReadyError struct {
@@ -211,7 +210,7 @@ type saTokenResult struct {
 	Port     string
 }
 
-func materializeSAToken(ctx context.Context, clientset kubernetes.Interface, kubeConfig *kube.KubeConfig, volumesDir string, pod *corev1.Pod) (*saTokenResult, error) {
+func materializeSAToken(ctx context.Context, clientset kubernetes.Interface, restCfg *rest.Config, volumesDir string, pod *corev1.Pod) (*saTokenResult, error) {
 	saName := pod.Spec.ServiceAccountName
 	if saName == "" {
 		saName = "default"
@@ -225,11 +224,6 @@ func materializeSAToken(ctx context.Context, clientset kubernetes.Interface, kub
 	}, metav1.CreateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("creating SA token: %w", err)
-	}
-
-	restCfg, err := kubeConfig.RestConfig()
-	if err != nil {
-		return nil, fmt.Errorf("building rest config: %w", err)
 	}
 
 	serverURL := restCfg.Host

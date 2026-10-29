@@ -19,13 +19,8 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
-func Start(ctx context.Context, log *slog.Logger, kitCluster *v1alpha1.KitCluster, kubeConfig *kube.KubeConfig, cacheDir, collectionsDir string, registry *image.Registry) (context.CancelFunc, error) {
+func Start(ctx context.Context, log *slog.Logger, kitCluster *v1alpha1.KitCluster, clients *kube.Clients, kubeConfig *kube.KubeConfig, cacheDir, collectionsDir string, registry *image.Registry) (context.CancelFunc, error) {
 	ctrl.SetLogger(logr.FromSlogHandler(log.Handler()))
-
-	clients, err := kube.NewClients(kubeConfig)
-	if err != nil {
-		return nil, err
-	}
 
 	installer := NewManifestInstaller(
 		clients.Extensions.ApiextensionsV1().CustomResourceDefinitions(),

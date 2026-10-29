@@ -6,12 +6,14 @@ import (
 	apiextclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 type Clients struct {
 	REST       *rest.Config
+	Clientset  kubernetes.Interface
 	Client     client.Client
 	Dynamic    dynamic.Interface
 	Discovery  discovery.DiscoveryInterface
@@ -31,6 +33,11 @@ func NewClients(kubeConfig *KubeConfig) (*Clients, error) {
 		return nil, fmt.Errorf("creating apiextensions client: %w", err)
 	}
 
+	clientset, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("creating clientset: %w", err)
+	}
+
 	dynClient, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("creating dynamic client: %w", err)
@@ -48,6 +55,7 @@ func NewClients(kubeConfig *KubeConfig) (*Clients, error) {
 
 	return &Clients{
 		REST:       cfg,
+		Clientset:  clientset,
 		Client:     cl,
 		Dynamic:    dynClient,
 		Discovery:  disc,

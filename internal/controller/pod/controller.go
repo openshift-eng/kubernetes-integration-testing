@@ -2,7 +2,6 @@ package pod
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -25,8 +24,7 @@ var logsGVR = schema.GroupVersionResource{
 	Resource: "logs",
 }
 
-type controller struct {
-	kubeConfig *kube.KubeConfig
+type Controller struct {
 	runner     PodRunner
 	changes    <-chan ContainerStateChange
 	log        *slog.Logger
@@ -41,39 +39,24 @@ type controller struct {
 	claimed   map[string]bool
 }
 
-func NewController(kubeConfig *kube.KubeConfig, runner PodRunner, changes <-chan ContainerStateChange, log *slog.Logger) *controller {
-	return &controller{
-		kubeConfig: kubeConfig,
-		runner:     runner,
-		changes:    changes,
-		log:        log,
-		restarts:   make(map[string]int),
-		claimed:    make(map[string]bool),
+func NewController(clients *kube.Clients, runner PodRunner, changes <-chan ContainerStateChange, log *slog.Logger) *Controller {
+	return &Controller{
+		runner:    runner,
+		changes:   changes,
+		log:       log,
+		clientset: clients.Clientset,
+		dynClient: clients.Dynamic,
+		restarts:  make(map[string]int),
+		claimed:   make(map[string]bool),
 	}
 }
 
-func (c *controller) Run(ctx context.Context) error {
-	cfg, err := c.kubeConfig.RestConfig()
-	if err != nil {
-		return fmt.Errorf("building kubeconfig: %w", err)
-	}
-
-	clientset, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		return fmt.Errorf("creating clientset: %w", err)
-	}
-	c.clientset = clientset
+func (c *Controller) Run(ctx context.Context) error {
 	c.ctx = ctx
-
-	dynClient, err := dynamic.NewForConfig(cfg)
-	if err != nil {
-		return fmt.Errorf("creating dynamic client: %w", err)
-	}
-	c.dynClient = dynClient
 
 	go c.processStateChanges()
 
-	factory := informers.NewSharedInformerFactory(clientset, 0)
+	factory := informers.NewSharedInformerFactory(c.clientset, 0)
 	podInformer := factory.Core().V1().Pods().Informer()
 
 	_, _ = podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -111,7 +94,7 @@ func (c *controller) Run(ctx context.Context) error {
 	return nil
 }
 
-func (c *controller) handlePod(ctx context.Context, pod *corev1.Pod) {
+func (c *Controller) handlePod(ctx context.Context, pod *corev1.Pod) {
 	if pod.Spec.NodeName == "" {
 		return
 	}
@@ -142,13 +125,13 @@ func (c *controller) handlePod(ctx context.Context, pod *corev1.Pod) {
 	}()
 }
 
-func (c *controller) processStateChanges() {
+func (c *Controller) processStateChanges() {
 	for change := range c.changes {
 		c.onStateChange(change)
 	}
 }
 
-func (c *controller) onStateChange(change ContainerStateChange) {
+func (c *Controller) onStateChange(change ContainerStateChange) {
 	if c.clientset == nil {
 		return
 	}
@@ -269,7 +252,7 @@ func restartBackoff(count int) time.Duration {
 	return d
 }
 
-func (c *controller) ensureLogsResource(ctx context.Context, pod *corev1.Pod, containerName string) {
+func (c *Controller) ensureLogsResource(ctx context.Context, pod *corev1.Pod, containerName string) {
 	logFile := c.runner.LogPath(pod.Namespace, pod.Name, containerName)
 	entry := map[string]interface{}{
 		"containers": []interface{}{containerName},
@@ -306,7 +289,7 @@ func (c *controller) ensureLogsResource(ctx context.Context, pod *corev1.Pod, co
 	}
 }
 
-func (c *controller) setPodWaiting(pod *corev1.Pod, reason error) {
+func (c *Controller) setPodWaiting(pod *corev1.Pod, reason error) {
 	if c.clientset == nil {
 		return
 	}
