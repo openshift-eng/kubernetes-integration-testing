@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"text/template"
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
@@ -39,6 +40,7 @@ type collectionReconciler struct {
 	discovery      discovery.DiscoveryInterface
 	release        *release.ReleaseManifests
 	collectionsDir string
+	funcMap        template.FuncMap
 	log            *slog.Logger
 }
 
@@ -147,6 +149,7 @@ func (r *collectionReconciler) render(rc *v1alpha1.ResourceCollection, kc *v1alp
 		APIServerURL: kc.Status.APIServerURL,
 		Platform:     "None",
 		NetworkType:  "OVNKubernetes",
+		DefaultCA:    kc.Status.DefaultCA,
 		Values:       rc.Spec.Values,
 	}
 
@@ -161,12 +164,24 @@ func (r *collectionReconciler) newMapper() (meta.RESTMapper, error) {
 	return restmapper.NewDiscoveryRESTMapper(groupResources), nil
 }
 
+// TODO: implement proper resource ordering (namespaces before namespaced
+// resources, CRDs before CRs, etc.) instead of relying on template walk order.
 func (r *collectionReconciler) apply(ctx context.Context, result *collection.RenderResult) error {
 	mapper, err := r.newMapper()
 	if err != nil {
 		return err
 	}
+
+	var namespaces, rest []*unstructured.Unstructured
 	for _, obj := range result.Objects {
+		if obj.GetKind() == "Namespace" {
+			namespaces = append(namespaces, obj)
+		} else {
+			rest = append(rest, obj)
+		}
+	}
+
+	for _, obj := range append(namespaces, rest...) {
 		applied, err := dynutil.ApplyWithMapper(ctx, r.dynClient, mapper, obj)
 		if err != nil {
 			return fmt.Errorf("applying %s %s: %w", obj.GetKind(), obj.GetName(), err)
@@ -242,14 +257,14 @@ func (r *collectionReconciler) loadCollection(rc *v1alpha1.ResourceCollection) (
 		for i, t := range rc.Spec.Inline {
 			contents[i] = t.Content
 		}
-		return collection.LoadInline(rc.Name, contents)
+		return collection.LoadInline(rc.Name, contents, r.funcMap)
 	}
 
 	var userFS fs.FS
 	if r.collectionsDir != "" {
 		userFS = os.DirFS(r.collectionsDir)
 	}
-	return collection.Load(rc.Spec.Source, userFS)
+	return collection.Load(rc.Spec.Source, userFS, r.funcMap)
 }
 
 func (r *collectionReconciler) handleDeletion(ctx context.Context, rc *v1alpha1.ResourceCollection) (ctrl.Result, error) {

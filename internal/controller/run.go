@@ -3,10 +3,10 @@ package controller
 import (
 	"context"
 	"fmt"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/common"
 	"log/slog"
 
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/bootstrap"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/common"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/deployer"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/pod"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/reconciler"
@@ -24,14 +24,14 @@ type Config struct {
 }
 
 func Run(ctx context.Context, log *slog.Logger, cfg Config) error {
-	clusterCfg, kitCluster, pullSecretData, err := bootstrap.Load(ctx, cfg.KubeConfig)
+	bd, err := bootstrap.Load(ctx, cfg.KubeConfig)
 	if err != nil {
 		return fmt.Errorf("loading bootstrap config: %w", err)
 	}
 
 	var ps pullsecret.PullSecret
-	if len(pullSecretData) > 0 {
-		ps.Set(pullSecretData)
+	if len(bd.PullSecret) > 0 {
+		ps.Set(bd.PullSecret)
 	}
 	keychain, err := ps.Keychain()
 	if err != nil {
@@ -45,12 +45,12 @@ func Run(ctx context.Context, log *slog.Logger, cfg Config) error {
 	}
 
 	shutdowner := common.NewDeferredShutdowner(ctx)
-	if err := reconciler.Start(shutdowner.Context(), log, kitCluster, clients, cfg.KubeConfig, cfg.CacheDir, cfg.CollectionsDir, registry, shutdowner); err != nil {
+	if err := reconciler.Start(shutdowner.Context(), log, bd, clients, cfg.KubeConfig, cfg.CacheDir, cfg.CollectionsDir, registry, shutdowner); err != nil {
 		return fmt.Errorf("starting reconciler: %w", err)
 	}
 
-	if kitCluster.Spec.Provider == "kwok" {
-		runner, err := runPodController(ctx, log, cfg, clusterCfg, &ps, clients)
+	if bd.KitCluster.Spec.Provider == "kwok" {
+		runner, err := runPodController(ctx, log, cfg, bd.ClusterConfig, &ps, clients)
 		if err != nil {
 			return fmt.Errorf("starting pod controller: %w", err)
 		}
@@ -59,7 +59,7 @@ func Run(ctx context.Context, log *slog.Logger, cfg Config) error {
 		})
 	}
 
-	log.Info("controller started", "cluster", kitCluster.Name, "provider", kitCluster.Spec.Provider)
+	log.Info("controller started", "cluster", bd.KitCluster.Name, "provider", bd.KitCluster.Spec.Provider)
 	<-ctx.Done()
 	log.Info("shutting down")
 	return nil

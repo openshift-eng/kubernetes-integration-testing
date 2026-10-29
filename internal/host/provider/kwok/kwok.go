@@ -255,6 +255,23 @@ func (c *kwokCluster) KubeConfig() string {
 	return c.kubeconfigPath
 }
 
+func (c *kwokCluster) CAData() ([]byte, []byte, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, nil, fmt.Errorf("getting home dir: %w", err)
+	}
+	pkiDir := filepath.Join(home, ".kwok", "clusters", prefixed(c.name), "pki")
+	certPEM, err := os.ReadFile(filepath.Join(pkiDir, "ca.crt"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading CA cert: %w", err)
+	}
+	keyPEM, err := os.ReadFile(filepath.Join(pkiDir, "ca.key"))
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading CA key: %w", err)
+	}
+	return certPEM, keyPEM, nil
+}
+
 func (c *kwokCluster) ControllerConfig() cluster.ControllerConfig {
 	toolName := prefixed(c.name)
 	dir, _ := c.store.ClusterDir(c.name)
