@@ -89,6 +89,9 @@ func (l *PodmanControllerLauncher) Launch(ctx context.Context, name string, c Cl
 
 	_, err = l.client.Run(ctx, runOpts)
 	if err != nil {
+		// podman may have created the container and attached it to the network
+		// before the OCI runtime failed; remove it to avoid blocking further cluster cleanup.
+		_ = l.client.Remove(context.Background(), containerName, true)
 		return nil, fmt.Errorf("launching controller container %s: %w", containerName, err)
 	}
 
