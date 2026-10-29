@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/podman"
@@ -27,11 +28,13 @@ type podmanRunner struct {
 	network       string
 	apiServerHost string
 	apiServerPort string
-	changes       chan<- ContainerStateChange
+	changes       chan ContainerStateChange
 	log           *slog.Logger
+	wg            sync.WaitGroup
 	mu            sync.Mutex
 	pods          map[string]podmanPod // k8s pod UID -> podman pod state
 	running       map[string]struct{}  // processKey -> running
+	stopped       atomic.Bool
 }
 
 type podmanPod struct {
@@ -50,7 +53,7 @@ type PodmanRunnerOpts struct {
 	APIServerPort string
 }
 
-func NewPodmanRunner(ctx context.Context, opts PodmanRunnerOpts, changes chan<- ContainerStateChange, log *slog.Logger) (PodRunner, error) {
+func NewPodmanRunner(ctx context.Context, opts PodmanRunnerOpts, log *slog.Logger) (PodRunner, error) {
 	r := &podmanRunner{
 		podmanClient:  opts.PodmanClient,
 		clients:       opts.Clients,
@@ -60,7 +63,7 @@ func NewPodmanRunner(ctx context.Context, opts PodmanRunnerOpts, changes chan<- 
 		network:       opts.Network,
 		apiServerHost: opts.APIServerHost,
 		apiServerPort: opts.APIServerPort,
-		changes:       changes,
+		changes:       make(chan ContainerStateChange, 100),
 		log:           log,
 		pods:          make(map[string]podmanPod),
 		running:       make(map[string]struct{}),
@@ -89,6 +92,10 @@ func (r *podmanRunner) recoverPods(ctx context.Context) {
 }
 
 func (r *podmanRunner) RunPod(ctx context.Context, pod *corev1.Pod) error {
+	if r.stopped.Load() {
+		return nil
+	}
+
 	uid := string(pod.UID)
 
 	podID, err := r.ensurePod(ctx, pod)
@@ -136,7 +143,11 @@ func (r *podmanRunner) StopPod(uid string) {
 	_ = r.podmanClient.PodRemove(context.Background(), p.id, true)
 }
 
-func (r *podmanRunner) StopAll() {
+func (r *podmanRunner) Teardown() {
+	r.log.Info("graceful shutdown of pod runner")
+	r.stopped.Store(true)
+	close(r.changes)
+
 	r.mu.Lock()
 	pods := make(map[string]podmanPod, len(r.pods))
 	for k, v := range r.pods {
@@ -151,6 +162,12 @@ func (r *podmanRunner) StopAll() {
 		_ = r.podmanClient.PodStop(context.Background(), p.id, 10)
 		_ = r.podmanClient.PodRemove(context.Background(), p.id, true)
 	}
+
+	r.wg.Wait()
+}
+
+func (r *podmanRunner) Changes() <-chan ContainerStateChange {
+	return r.changes
 }
 
 func (r *podmanRunner) LogPath(namespace, pod, container string) string {
@@ -342,14 +359,17 @@ func (r *podmanRunner) startContainer(ctx context.Context, pod *corev1.Pod, podI
 		State:     ContainerStarted,
 	}
 
+	r.wg.Add(1)
 	go r.waitContainer(uid, pod.Name, pod.Namespace, container.Name, containerID)
 
 	return nil
 }
 
 func (r *podmanRunner) waitContainer(uid, podName, namespace, container, containerID string) {
+	defer r.wg.Done()
 	key := processKey(uid, container)
 
+	// TODO: use a cancellable context so Ctrl-C / SIGTERM unblocks this
 	exitCode, err := r.podmanClient.Wait(context.Background(), containerID)
 
 	r.mu.Lock()
@@ -366,6 +386,10 @@ func (r *podmanRunner) waitContainer(uid, podName, namespace, container, contain
 	}
 
 	r.log.Info("container exited", "pod", podName, "namespace", namespace, "container", container, "exitCode", exitCode)
+
+	if r.stopped.Load() {
+		return
+	}
 
 	r.changes <- ContainerStateChange{
 		PodUID:    uid,

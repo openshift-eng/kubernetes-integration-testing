@@ -26,10 +26,8 @@ var logsGVR = schema.GroupVersionResource{
 
 type Controller struct {
 	runner     PodRunner
-	changes    <-chan ContainerStateChange
 	log        *slog.Logger
 	clientset  kubernetes.Interface
-	ctx        context.Context
 	dynClient  dynamic.Interface
 	restartsMu sync.Mutex
 	restarts   map[string]int
@@ -39,10 +37,9 @@ type Controller struct {
 	claimed   map[string]bool
 }
 
-func NewController(clients *kube.Clients, runner PodRunner, changes <-chan ContainerStateChange, log *slog.Logger) *Controller {
+func NewController(clients *kube.Clients, runner PodRunner, log *slog.Logger) *Controller {
 	return &Controller{
 		runner:    runner,
-		changes:   changes,
 		log:       log,
 		clientset: clients.Clientset,
 		dynClient: clients.Dynamic,
@@ -52,9 +49,7 @@ func NewController(clients *kube.Clients, runner PodRunner, changes <-chan Conta
 }
 
 func (c *Controller) Run(ctx context.Context) error {
-	c.ctx = ctx
-
-	go c.processStateChanges()
+	go c.processStateChanges(ctx, c.runner.Changes())
 
 	factory := informers.NewSharedInformerFactory(c.clientset, 0)
 	podInformer := factory.Core().V1().Pods().Informer()
@@ -125,20 +120,24 @@ func (c *Controller) handlePod(ctx context.Context, pod *corev1.Pod) {
 	}()
 }
 
-func (c *Controller) processStateChanges() {
-	for change := range c.changes {
-		c.onStateChange(change)
+func (c *Controller) processStateChanges(ctx context.Context, changes <-chan ContainerStateChange) {
+	for {
+		select {
+		case change, ok := <-changes:
+			if !ok {
+				return
+			}
+			c.onStateChange(ctx, change)
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
-func (c *Controller) onStateChange(change ContainerStateChange) {
-	if c.clientset == nil {
-		return
-	}
-
+func (c *Controller) onStateChange(ctx context.Context, change ContainerStateChange) {
 	now := metav1.NewTime(time.Now())
 
-	pod, err := c.clientset.CoreV1().Pods(change.Namespace).Get(context.TODO(), change.PodName, metav1.GetOptions{})
+	pod, err := c.clientset.CoreV1().Pods(change.Namespace).Get(ctx, change.PodName, metav1.GetOptions{})
 	if err != nil {
 		c.log.Warn("failed to get pod for status update", "pod", change.PodName, "namespace", change.Namespace, "error", err)
 		return
@@ -166,7 +165,7 @@ func (c *Controller) onStateChange(change ContainerStateChange) {
 		}
 		pod.Status.ContainerStatuses = statuses
 
-		c.ensureLogsResource(c.ctx, pod, change.Container)
+		c.ensureLogsResource(ctx, pod, change.Container)
 
 	case ContainerExited:
 		restartPolicy := pod.Spec.RestartPolicy
@@ -208,14 +207,14 @@ func (c *Controller) onStateChange(change ContainerStateChange) {
 			go func() {
 				select {
 				case <-time.After(backoff):
-				case <-c.ctx.Done():
+				case <-ctx.Done():
 					return
 				}
-				pod, err := c.clientset.CoreV1().Pods(change.Namespace).Get(c.ctx, change.PodName, metav1.GetOptions{})
+				pod, err := c.clientset.CoreV1().Pods(change.Namespace).Get(ctx, change.PodName, metav1.GetOptions{})
 				if err != nil {
 					return
 				}
-				if err := c.runner.RunPod(c.ctx, pod); err != nil {
+				if err := c.runner.RunPod(ctx, pod); err != nil {
 					c.log.Error("failed to restart pod", "pod", pod.Name, "namespace", pod.Namespace, "attempt", count, "error", err)
 				}
 			}()
@@ -239,7 +238,7 @@ func (c *Controller) onStateChange(change ContainerStateChange) {
 		}
 	}
 
-	if _, err := c.clientset.CoreV1().Pods(change.Namespace).UpdateStatus(context.TODO(), pod, metav1.UpdateOptions{}); err != nil {
+	if _, err := c.clientset.CoreV1().Pods(change.Namespace).UpdateStatus(ctx, pod, metav1.UpdateOptions{}); err != nil {
 		c.log.Warn("failed to update pod status", "pod", change.PodName, "namespace", change.Namespace, "state", change.State, "error", err)
 	}
 }
