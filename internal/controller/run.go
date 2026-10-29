@@ -38,14 +38,19 @@ func Run(ctx context.Context, log *slog.Logger, cfg Config) error {
 	}
 	registry := image.NewRegistry(cfg.CacheDir, keychain, log)
 
-	cancel, err := reconciler.Start(ctx, log, kitCluster, cfg.KubeConfig, cfg.CacheDir, cfg.CollectionsDir, registry)
+	clients, err := kube.NewClients(cfg.KubeConfig)
+	if err != nil {
+		return fmt.Errorf("creating kube clients: %w", err)
+	}
+
+	cancel, err := reconciler.Start(ctx, log, kitCluster, clients, cfg.KubeConfig, cfg.CacheDir, cfg.CollectionsDir, registry)
 	if err != nil {
 		return fmt.Errorf("starting reconciler: %w", err)
 	}
 	defer cancel()
 
 	if kitCluster.Spec.Provider == "kwok" {
-		if err := runPodController(ctx, log, cfg, clusterCfg, &ps); err != nil {
+		if err := runPodController(ctx, log, cfg, clusterCfg, &ps, clients); err != nil {
 			return fmt.Errorf("starting pod controller: %w", err)
 		}
 	}
@@ -56,7 +61,7 @@ func Run(ctx context.Context, log *slog.Logger, cfg Config) error {
 	return nil
 }
 
-func runPodController(ctx context.Context, log *slog.Logger, cfg Config, clusterCfg *bootstrap.ClusterConfig, ps *pullsecret.PullSecret) error {
+func runPodController(ctx context.Context, log *slog.Logger, cfg Config, clusterCfg *bootstrap.ClusterConfig, ps *pullsecret.PullSecret, clients *kube.Clients) error {
 	var podmanClient podman.Client
 	if cfg.PodmanSocket != "" {
 		podmanClient = podman.NewRemoteClient(cfg.PodmanSocket)
@@ -66,8 +71,8 @@ func runPodController(ctx context.Context, log *slog.Logger, cfg Config, cluster
 
 	changes := make(chan pod.ContainerStateChange, 100)
 	runner, err := pod.NewPodmanRunner(ctx, pod.PodmanRunnerOpts{
-		Client:        podmanClient,
-		KubeConfig:    cfg.KubeConfig,
+		PodmanClient:  podmanClient,
+		Clients:       clients,
 		PullSecret:    ps,
 		LogsDir:       clusterCfg.LogsDir,
 		VolumesDir:    clusterCfg.VolumesDir,
@@ -79,7 +84,7 @@ func runPodController(ctx context.Context, log *slog.Logger, cfg Config, cluster
 		return err
 	}
 
-	ctrl := pod.NewController(cfg.KubeConfig, runner, changes, log)
+	ctrl := pod.NewController(clients, runner, changes, log)
 	go func() {
 		if err := ctrl.Run(ctx); err != nil && ctx.Err() == nil {
 			log.Error("pod controller stopped unexpectedly", "error", err)
