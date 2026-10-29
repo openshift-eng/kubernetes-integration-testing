@@ -405,14 +405,20 @@ func (r *collectionReconciler) startFSWatcher(ctx context.Context) (<-chan event
 		return nil, err
 	}
 	if err := watcher.Add(r.collectionsDir); err != nil {
-		watcher.Close()
+		if closeErr := watcher.Close(); closeErr != nil {
+			r.log.Warn("failed to close watcher", "error", closeErr)
+		}
 		return nil, err
 	}
 
 	ch := make(chan event.GenericEvent)
 
 	go func() {
-		defer watcher.Close()
+		defer func() {
+			if err := watcher.Close(); err != nil {
+				r.log.Warn("failed to close watcher", "error", err)
+			}
+		}()
 		defer close(ch)
 		for {
 			select {

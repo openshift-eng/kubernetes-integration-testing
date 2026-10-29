@@ -120,7 +120,6 @@ func (r *recordingResource) ApplyStatus(context.Context, string, *unstructured.U
 
 type fakeDiscovery struct {
 	discovery.DiscoveryInterface
-	resources []metav1.APIResource
 }
 
 func (f *fakeDiscovery) ServerGroups() (*metav1.APIGroupList, error) {
