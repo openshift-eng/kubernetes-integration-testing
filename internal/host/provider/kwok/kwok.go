@@ -203,8 +203,10 @@ func (p *provider) createCluster(ctx context.Context, bin string, kc *v1alpha1.K
 	}
 
 	toolName := prefixed(kc.Name)
+	// Force kubeconfig to the cluster-local path to avoid writing ~/.kube/config,
+	// which causes lock contention when creating multiple clusters concurrently.
 	args := []string{"create", "cluster", "--name", toolName, "--runtime", "podman", "--config", kwokCfgPath,
-		"--kube-apiserver-port", strconv.Itoa(apiPort)}
+		"--kube-apiserver-port", strconv.Itoa(apiPort), "--kubeconfig", c.kubeconfigPath}
 
 	if err := run(ctx, p.log, bin, args...); err != nil {
 		p.ports.Release(apiPort)
