@@ -129,12 +129,18 @@ func (cm *ClusterManager) Destroy(ctx context.Context, name string) error {
 	cm.mu.Lock()
 	mc, ok := cm.clusters[name]
 	if ok {
-		if mc.stopController != nil {
-			mc.stopController()
-		}
 		delete(cm.clusters, name)
 	}
 	cm.mu.Unlock()
+
+	if ok {
+		if err := cm.deleteKitCluster(ctx, mc.Cluster, name); err != nil {
+			cm.log.Warn("failed to delete KitCluster CR, proceeding with teardown", "cluster", name, "error", err)
+		}
+		if mc.stopController != nil {
+			mc.stopController()
+		}
+	}
 
 	for _, p := range cm.providers {
 		if _, ok := p.Get(name); ok {
@@ -142,6 +148,36 @@ func (cm *ClusterManager) Destroy(ctx context.Context, name string) error {
 		}
 	}
 	return fmt.Errorf("cluster %q not found", name)
+}
+
+func (cm *ClusterManager) deleteKitCluster(ctx context.Context, c Cluster, name string) error {
+	clusterKC, err := kube.New(c.KubeConfig(), "")
+	if err != nil {
+		return fmt.Errorf("building kubeconfig: %w", err)
+	}
+
+	cfg, err := clusterKC.RestConfig()
+	if err != nil {
+		return fmt.Errorf("building rest config: %w", err)
+	}
+
+	dynClient, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return err
+	}
+
+	if err := dynClient.Resource(kitClusterGVR).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+		return fmt.Errorf("deleting KitCluster CR: %w", err)
+	}
+
+	cm.log.Info("waiting for KitCluster deletion (finalizer teardown)", "cluster", name)
+	return wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 30*time.Second, true, func(ctx context.Context) (bool, error) {
+		_, err := dynClient.Resource(kitClusterGVR).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return true, nil
+		}
+		return false, nil
+	})
 }
 
 func (cm *ClusterManager) Get(name string) (Cluster, string, bool) {

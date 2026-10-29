@@ -26,6 +26,7 @@ type ContainerStateChange struct {
 type PodRunner interface {
 	RunPod(ctx context.Context, pod *corev1.Pod) error
 	StopPod(uid string)
-	StopAll()
+	Teardown()
+	Changes() <-chan ContainerStateChange
 	LogPath(namespace, pod, container string) string
 }

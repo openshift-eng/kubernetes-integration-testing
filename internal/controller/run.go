@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/common"
 	"log/slog"
 
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/bootstrap"
@@ -43,16 +44,19 @@ func Run(ctx context.Context, log *slog.Logger, cfg Config) error {
 		return fmt.Errorf("creating kube clients: %w", err)
 	}
 
-	cancel, err := reconciler.Start(ctx, log, kitCluster, clients, cfg.KubeConfig, cfg.CacheDir, cfg.CollectionsDir, registry)
-	if err != nil {
+	shutdowner := common.NewDeferredShutdowner(ctx)
+	if err := reconciler.Start(shutdowner.Context(), log, kitCluster, clients, cfg.KubeConfig, cfg.CacheDir, cfg.CollectionsDir, registry, shutdowner); err != nil {
 		return fmt.Errorf("starting reconciler: %w", err)
 	}
-	defer cancel()
 
 	if kitCluster.Spec.Provider == "kwok" {
-		if err := runPodController(ctx, log, cfg, clusterCfg, &ps, clients); err != nil {
+		runner, err := runPodController(ctx, log, cfg, clusterCfg, &ps, clients)
+		if err != nil {
 			return fmt.Errorf("starting pod controller: %w", err)
 		}
+		shutdowner.Set(func(_ context.Context) {
+			runner.Teardown()
+		})
 	}
 
 	log.Info("controller started", "cluster", kitCluster.Name, "provider", kitCluster.Spec.Provider)
@@ -61,7 +65,7 @@ func Run(ctx context.Context, log *slog.Logger, cfg Config) error {
 	return nil
 }
 
-func runPodController(ctx context.Context, log *slog.Logger, cfg Config, clusterCfg *bootstrap.ClusterConfig, ps *pullsecret.PullSecret, clients *kube.Clients) error {
+func runPodController(ctx context.Context, log *slog.Logger, cfg Config, clusterCfg *bootstrap.ClusterConfig, ps *pullsecret.PullSecret, clients *kube.Clients) (pod.PodRunner, error) {
 	var podmanClient podman.Client
 	if cfg.PodmanSocket != "" {
 		podmanClient = podman.NewRemoteClient(cfg.PodmanSocket)
@@ -69,7 +73,6 @@ func runPodController(ctx context.Context, log *slog.Logger, cfg Config, cluster
 		podmanClient = podman.NewLocalClient()
 	}
 
-	changes := make(chan pod.ContainerStateChange, 100)
 	runner, err := pod.NewPodmanRunner(ctx, pod.PodmanRunnerOpts{
 		PodmanClient:  podmanClient,
 		Clients:       clients,
@@ -79,15 +82,15 @@ func runPodController(ctx context.Context, log *slog.Logger, cfg Config, cluster
 		Network:       clusterCfg.Network,
 		APIServerHost: clusterCfg.APIServerHost,
 		APIServerPort: clusterCfg.APIServerPort,
-	}, changes, log)
+	}, log)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	ctrl := pod.NewController(clients, runner, changes, log)
+	ctrl := pod.NewController(clients, runner, log)
 	go func() {
-		if err := ctrl.Run(ctx); err != nil && ctx.Err() == nil {
-			log.Error("pod controller stopped unexpectedly", "error", err)
+		if err := ctrl.Run(ctx); err != nil {
+			log.Error("pod controller stopped", "error", err)
 		}
 	}()
 
@@ -102,5 +105,5 @@ func runPodController(ctx context.Context, log *slog.Logger, cfg Config, cluster
 		}()
 	}
 
-	return nil
+	return runner, nil
 }

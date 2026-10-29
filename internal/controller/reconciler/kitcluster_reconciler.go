@@ -7,6 +7,7 @@ import (
 	"time"
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/common"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/release"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -35,6 +36,7 @@ type kitClusterReconciler struct {
 	release              *release.ReleaseManifests
 	apiServerURL         string
 	apiServerExternalURL string
+	shutdowner           common.Shutdowner
 	log                  *slog.Logger
 }
 
@@ -42,6 +44,10 @@ func (r *kitClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	var kc v1alpha1.KitCluster
 	if err := r.client.Get(ctx, req.NamespacedName, &kc); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	if !kc.DeletionTimestamp.IsZero() {
+		return r.handleDeletion(ctx, &kc)
 	}
 
 	if !controllerutil.ContainsFinalizer(&kc, protectionFinalizer) {
@@ -79,6 +85,20 @@ func (r *kitClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	return r.phaseReady(ctx, &kc)
+}
+
+func (r *kitClusterReconciler) handleDeletion(ctx context.Context, kc *v1alpha1.KitCluster) (ctrl.Result, error) {
+	r.log.Info("handling KitCluster deletion", "name", kc.Name)
+
+	controllerutil.RemoveFinalizer(kc, protectionFinalizer)
+	if err := r.client.Update(ctx, kc); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	r.shutdowner.Shutdown()
+
+	r.log.Info("KitCluster deleted", "name", kc.Name)
+	return ctrl.Result{}, nil
 }
 
 // phaseImagePull pulls the release image synchronously. Returns nil result to

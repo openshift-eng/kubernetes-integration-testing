@@ -8,6 +8,7 @@ import (
 	"github.com/go-logr/logr"
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/api/manifests"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/common"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/image"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/release"
@@ -19,7 +20,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
-func Start(ctx context.Context, log *slog.Logger, kitCluster *v1alpha1.KitCluster, clients *kube.Clients, kubeConfig *kube.KubeConfig, cacheDir, collectionsDir string, registry *image.Registry) (context.CancelFunc, error) {
+func Start(ctx context.Context, log *slog.Logger, kitCluster *v1alpha1.KitCluster, clients *kube.Clients, kubeConfig *kube.KubeConfig, cacheDir, collectionsDir string, registry *image.Registry, shutdowner common.Shutdowner) error {
 	ctrl.SetLogger(logr.FromSlogHandler(log.Handler()))
 
 	installer := NewManifestInstaller(
@@ -29,11 +30,11 @@ func Start(ctx context.Context, log *slog.Logger, kitCluster *v1alpha1.KitCluste
 		log,
 	)
 	if err := installer.Install(ctx, manifests.FS); err != nil {
-		return nil, fmt.Errorf("installing manifests: %w", err)
+		return fmt.Errorf("installing manifests: %w", err)
 	}
 
 	if err := clients.Client.Create(ctx, kitCluster); err != nil && !apierrors.IsAlreadyExists(err) {
-		return nil, fmt.Errorf("creating KitCluster CR: %w", err)
+		return fmt.Errorf("creating KitCluster CR: %w", err)
 	}
 	log.Info("ensured KitCluster CR", "name", kitCluster.Name)
 
@@ -43,25 +44,24 @@ func Start(ctx context.Context, log *slog.Logger, kitCluster *v1alpha1.KitCluste
 		Controller: config.Controller{SkipNameValidation: ptr.To(true)},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("creating controller manager: %w", err)
+		return fmt.Errorf("creating controller manager: %w", err)
 	}
 
-	if err := setupReconcilers(ctx, mgr, clients, kubeConfig, kitCluster.Name, cacheDir, collectionsDir, registry, log); err != nil {
-		return nil, err
+	if err := setupReconcilers(ctx, mgr, clients, kubeConfig, kitCluster.Name, cacheDir, collectionsDir, registry, shutdowner, log); err != nil {
+		return err
 	}
 
-	mgrCtx, cancel := context.WithCancel(ctx)
 	go func() {
-		if err := mgr.Start(mgrCtx); err != nil && mgrCtx.Err() == nil {
+		if err := mgr.Start(ctx); err != nil && ctx.Err() == nil {
 			log.Error("controller manager stopped unexpectedly", "error", err)
 		}
 	}()
 
 	log.Info("started controller manager")
-	return cancel, nil
+	return nil
 }
 
-func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clients, kubeConfig *kube.KubeConfig, clusterName, cacheDir, collectionsDir string, registry *image.Registry, log *slog.Logger) error {
+func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clients, kubeConfig *kube.KubeConfig, clusterName, cacheDir, collectionsDir string, registry *image.Registry, shutdowner common.Shutdowner, log *slog.Logger) error {
 	rel := release.NewReleaseManifests(registry, log)
 	crdMgr := NewCRDManager(clients.Extensions.ApiextensionsV1().CustomResourceDefinitions(), log)
 
@@ -76,6 +76,7 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 				release:              rel,
 				apiServerURL:         clients.REST.Host,
 				apiServerExternalURL: kubeConfig.OriginalServerURL(),
+				shutdowner:           shutdowner,
 				log:                  log,
 			}).SetupWithManager(mgr, clusterName)
 		}},
