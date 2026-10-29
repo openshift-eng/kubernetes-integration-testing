@@ -94,6 +94,13 @@ func (cm *ClusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 		return nil, errors.Join(fmt.Errorf("loading cluster kubeconfig: %w", err), destroyErr)
 	}
 
+	var caCertPEM, caKeyPEM []byte
+	if certPEM, keyPEM, err := c.CAData(); err != nil {
+		cm.log.Warn("could not extract CA data from provider, controller will generate self-signed", "error", err)
+	} else {
+		caCertPEM, caKeyPEM = certPEM, keyPEM
+	}
+
 	ccfg := c.ControllerConfig()
 	if err := bootstrap.Store(ctx, clusterKC, bootstrap.ClusterConfig{
 		Network:       ccfg.Network,
@@ -101,7 +108,7 @@ func (cm *ClusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 		VolumesDir:    ccfg.VolumesDir,
 		APIServerHost: ccfg.APIServerHost,
 		APIServerPort: ccfg.APIServerPort,
-	}, kc, ps.Data()); err != nil {
+	}, kc, ps.Data(), caCertPEM, caKeyPEM); err != nil {
 		destroyErr := p.Destroy(ctx, kc.Name)
 		return nil, errors.Join(fmt.Errorf("storing bootstrap config: %w", err), destroyErr)
 	}

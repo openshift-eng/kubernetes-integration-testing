@@ -30,12 +30,15 @@ type RenderResult struct {
 	Hash    string
 }
 
+// TODO: consider passing KitCluster directly instead of individual fields,
+// so templates have access to the full spec/status without adding fields here one by one.
 type RenderContext struct {
 	FeatureSet      string
 	APIServerURL    string
 	Platform        string
 	ServiceNetworks []string
 	NetworkType     string
+	DefaultCA       string
 	Values          map[string]string
 }
 
@@ -65,12 +68,13 @@ func BuiltinNames() []string {
 
 // Load resolves a collection by name. If userFS is non-nil and contains a
 // subdirectory matching name, it takes precedence over the embedded builtins.
-func Load(name string, userFS fs.FS) (*Collection, error) {
+// An optional funcMap registers custom template functions available during rendering.
+func Load(name string, userFS fs.FS, funcMap template.FuncMap) (*Collection, error) {
 	if userFS != nil {
 		sub, err := fs.Sub(userFS, name)
 		if err == nil {
 			if entries, err := fs.ReadDir(sub, "."); err == nil && len(entries) > 0 {
-				return loadFromFS(name, sub)
+				return loadFromFS(name, sub, funcMap)
 			}
 		}
 	}
@@ -78,15 +82,16 @@ func Load(name string, userFS fs.FS) (*Collection, error) {
 	if err != nil {
 		return nil, fmt.Errorf("collection %q not found: %w", name, err)
 	}
-	return loadFromFS(name, sub)
+	return loadFromFS(name, sub, funcMap)
 }
 
 // LoadInline creates a collection from inline template content.
-func LoadInline(name string, contents []string) (*Collection, error) {
+// An optional funcMap registers custom template functions available during rendering.
+func LoadInline(name string, contents []string, funcMap template.FuncMap) (*Collection, error) {
 	templates := make(map[string]*template.Template)
 	for i, content := range contents {
 		key := fmt.Sprintf("inline-%d", i)
-		tmpl, err := template.New(key).Parse(content)
+		tmpl, err := template.New(key).Funcs(mergeFuncMaps(builtinFuncMap, funcMap)).Parse(content)
 		if err != nil {
 			return nil, fmt.Errorf("parsing inline template %d: %w", i, err)
 		}
@@ -142,7 +147,30 @@ func isKitResource(data []byte) bool {
 	return strings.HasPrefix(obj.GetObjectKind().GroupVersionKind().Group, "kit.openshift.io")
 }
 
-func loadFromFS(name string, fsys fs.FS) (*Collection, error) {
+var builtinFuncMap = template.FuncMap{
+	"indent": func(spaces int, s string) string {
+		pad := strings.Repeat(" ", spaces)
+		lines := strings.Split(s, "\n")
+		for i, line := range lines {
+			if line != "" {
+				lines[i] = pad + line
+			}
+		}
+		return strings.Join(lines, "\n")
+	},
+}
+
+func mergeFuncMaps(maps ...template.FuncMap) template.FuncMap {
+	merged := make(template.FuncMap)
+	for _, m := range maps {
+		for k, v := range m {
+			merged[k] = v
+		}
+	}
+	return merged
+}
+
+func loadFromFS(name string, fsys fs.FS, funcMap template.FuncMap) (*Collection, error) {
 	templates := make(map[string]*template.Template)
 
 	err := fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
@@ -166,7 +194,7 @@ func loadFromFS(name string, fsys fs.FS) (*Collection, error) {
 			return nil
 		}
 
-		tmpl, err := template.New(path).Parse(string(data))
+		tmpl, err := template.New(path).Funcs(mergeFuncMaps(builtinFuncMap, funcMap)).Parse(string(data))
 		if err != nil {
 			return fmt.Errorf("parsing template %s: %w", path, err)
 		}

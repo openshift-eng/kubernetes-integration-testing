@@ -29,6 +29,8 @@ type KitClusterSpec struct {
 
 	// +kubebuilder:validation:Minimum=0
 	Workers int `json:"workers,omitempty"`
+
+	DefaultCA string `json:"defaultCA,omitempty"`
 }
 
 const (
@@ -40,6 +42,7 @@ const (
 type KitClusterStatus struct {
 	APIServerURL         string             `json:"apiServerURL,omitempty"`
 	APIServerExternalURL string             `json:"apiServerExternalURL,omitempty"`
+	DefaultCA            string             `json:"defaultCA,omitempty"`
 	Conditions           []metav1.Condition `json:"conditions,omitempty"`
 }
 

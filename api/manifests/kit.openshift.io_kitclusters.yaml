@@ -40,6 +40,8 @@ spec:
             type: object
           spec:
             properties:
+              defaultCA:
+                type: string
               featureSet:
                 enum:
                 - Default
@@ -126,6 +128,8 @@ spec:
                   - type
                   type: object
                 type: array
+              defaultCA:
+                type: string
             type: object
         required:
         - spec

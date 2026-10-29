@@ -197,6 +197,19 @@ func (c *kindCluster) KubeConfig() string {
 	return c.kubeconfigPath
 }
 
+func (c *kindCluster) CAData() ([]byte, []byte, error) {
+	nodeName := prefixed(c.name) + "-control-plane"
+	certPEM, err := exec.Command("podman", "exec", nodeName, "cat", "/etc/kubernetes/pki/ca.crt").Output()
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading CA cert from kind node: %w", err)
+	}
+	keyPEM, err := exec.Command("podman", "exec", nodeName, "cat", "/etc/kubernetes/pki/ca.key").Output()
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading CA key from kind node: %w", err)
+	}
+	return certPEM, keyPEM, nil
+}
+
 func (c *kindCluster) ControllerConfig() cluster.ControllerConfig {
 	return cluster.ControllerConfig{
 		Provider:      "kind",

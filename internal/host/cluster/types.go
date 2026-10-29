@@ -18,6 +18,7 @@ type ControllerConfig struct {
 
 type Cluster interface {
 	KubeConfig() string
+	CAData() (certPEM, keyPEM []byte, err error)
 	Teardown(ctx context.Context) error
 	ControllerConfig() ControllerConfig
 }

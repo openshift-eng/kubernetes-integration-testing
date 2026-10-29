@@ -7,14 +7,17 @@ import (
 	"time"
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/cert"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/common"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/release"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 )
 
 const (
@@ -70,6 +73,11 @@ func (r *kitClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if err := r.client.Status().Patch(ctx, &kc, client.MergeFrom(base)); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	result, err := r.phaseDefaultCA(ctx, &kc)
+	if result != nil {
+		return *result, err
 	}
 
 	if kc.Spec.Image != "" {
@@ -183,6 +191,41 @@ func (r *kitClusterReconciler) phaseCRDSync(ctx context.Context, kc *v1alpha1.Ki
 	return &ctrl.Result{RequeueAfter: time.Millisecond}, nil
 }
 
+func (r *kitClusterReconciler) phaseDefaultCA(ctx context.Context, kc *v1alpha1.KitCluster) (*ctrl.Result, error) {
+	defaultCAName := kc.Spec.DefaultCA
+	if defaultCAName == "" {
+		defaultCAName = cert.DefaultCAName
+	}
+
+	if kc.Status.DefaultCA != defaultCAName {
+		base := kc.DeepCopy()
+		kc.Status.DefaultCA = defaultCAName
+		if err := r.client.Status().Patch(ctx, kc, client.MergeFrom(base)); err != nil {
+			return &ctrl.Result{}, err
+		}
+	}
+
+	var ca v1alpha1.CertificateAuthority
+	if err := r.client.Get(ctx, client.ObjectKey{Name: defaultCAName}, &ca); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return &ctrl.Result{}, fmt.Errorf("getting CertificateAuthority: %w", err)
+		}
+	} else {
+		readyCond := meta.FindStatusCondition(ca.Status.Conditions, v1alpha1.ConditionCAReady)
+		if readyCond != nil && readyCond.Status == metav1.ConditionTrue {
+			return nil, nil
+		}
+	}
+
+	base := kc.DeepCopy()
+	r.setCondition(kc, v1alpha1.ConditionReady, metav1.ConditionFalse, "DefaultCANotReady",
+		fmt.Sprintf("Waiting for CertificateAuthority %q", defaultCAName))
+	if err := r.client.Status().Patch(ctx, kc, client.MergeFrom(base)); err != nil {
+		return &ctrl.Result{}, err
+	}
+	return &ctrl.Result{}, nil
+}
+
 func (r *kitClusterReconciler) phaseReady(ctx context.Context, kc *v1alpha1.KitCluster) (ctrl.Result, error) {
 	base := kc.DeepCopy()
 	r.setCondition(kc, v1alpha1.ConditionReady, metav1.ConditionTrue, reasonReady, "")
@@ -204,9 +247,28 @@ func (r *kitClusterReconciler) setCondition(kc *v1alpha1.KitCluster, condType st
 	})
 }
 
+func (r *kitClusterReconciler) caToCluster(ctx context.Context, obj client.Object) []ctrl.Request {
+	var kcList v1alpha1.KitClusterList
+	if err := r.client.List(ctx, &kcList); err != nil {
+		return nil
+	}
+	var requests []ctrl.Request
+	for _, kc := range kcList.Items {
+		defaultCA := kc.Spec.DefaultCA
+		if defaultCA == "" {
+			defaultCA = cert.DefaultCAName
+		}
+		if obj.GetName() == defaultCA {
+			requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKey{Name: kc.Name}})
+		}
+	}
+	return requests
+}
+
 func (r *kitClusterReconciler) SetupWithManager(mgr ctrl.Manager, clusterName string) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("kitcluster-"+clusterName).
 		For(&v1alpha1.KitCluster{}).
+		Watches(&v1alpha1.CertificateAuthority{}, handler.EnqueueRequestsFromMapFunc(r.caToCluster)).
 		Complete(r)
 }

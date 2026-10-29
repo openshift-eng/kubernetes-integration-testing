@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/cert"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 
 	corev1 "k8s.io/api/core/v1"
@@ -33,7 +34,7 @@ type ClusterConfig struct {
 	APIServerPort string `json:"apiServerPort,omitempty"`
 }
 
-func Store(ctx context.Context, kc *kube.KubeConfig, cfg ClusterConfig, kitCluster *v1alpha1.KitCluster, pullSecret []byte) error {
+func Store(ctx context.Context, kc *kube.KubeConfig, cfg ClusterConfig, kitCluster *v1alpha1.KitCluster, pullSecret, caCertPEM, caKeyPEM []byte) error {
 	clientset, err := newClientset(kc)
 	if err != nil {
 		return err
@@ -75,39 +76,68 @@ func Store(ctx context.Context, kc *kube.KubeConfig, cfg ClusterConfig, kitClust
 		}
 	}
 
+	if len(caCertPEM) > 0 && len(caKeyPEM) > 0 {
+		caName := kitCluster.Spec.DefaultCA
+		if caName == "" {
+			caName = cert.DefaultCAName
+		}
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      cert.CASecretName(caName),
+				Namespace: Namespace,
+				Labels:    map[string]string{cert.CALabel: caName},
+			},
+			Type: corev1.SecretTypeTLS,
+			Data: map[string][]byte{
+				corev1.TLSCertKey:       caCertPEM,
+				corev1.TLSPrivateKeyKey: caKeyPEM,
+			},
+		}
+		if err := upsertSecret(ctx, clientset, secret); err != nil {
+			return fmt.Errorf("storing CA keypair: %w", err)
+		}
+	}
+
 	return nil
 }
 
-func Load(ctx context.Context, kubeConfig *kube.KubeConfig) (*ClusterConfig, *v1alpha1.KitCluster, []byte, error) {
+type BootstrapData struct {
+	ClusterConfig *ClusterConfig
+	KitCluster    *v1alpha1.KitCluster
+	PullSecret    []byte
+}
+
+func Load(ctx context.Context, kubeConfig *kube.KubeConfig) (*BootstrapData, error) {
 	clientset, err := newClientset(kubeConfig)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 
 	cm, err := clientset.CoreV1().ConfigMaps(Namespace).Get(ctx, configMapName, metav1.GetOptions{})
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("loading cluster config: %w", err)
+		return nil, fmt.Errorf("loading cluster config: %w", err)
 	}
 
 	var cfg ClusterConfig
 	if err := json.Unmarshal([]byte(cm.Data[configKey]), &cfg); err != nil {
-		return nil, nil, nil, fmt.Errorf("parsing cluster config: %w", err)
+		return nil, fmt.Errorf("parsing cluster config: %w", err)
 	}
 
 	var kc v1alpha1.KitCluster
 	if err := json.Unmarshal([]byte(cm.Data[manifestKey]), &kc); err != nil {
-		return nil, nil, nil, fmt.Errorf("parsing KitCluster manifest: %w", err)
+		return nil, fmt.Errorf("parsing KitCluster manifest: %w", err)
 	}
 
-	var pullSecret []byte
+	data := &BootstrapData{ClusterConfig: &cfg, KitCluster: &kc}
+
 	secret, err := clientset.CoreV1().Secrets(Namespace).Get(ctx, secretName, metav1.GetOptions{})
 	if err == nil {
-		pullSecret = secret.Data[secretKey]
+		data.PullSecret = secret.Data[secretKey]
 	} else if !apierrors.IsNotFound(err) {
-		return nil, nil, nil, fmt.Errorf("loading pull secret: %w", err)
+		return nil, fmt.Errorf("loading pull secret: %w", err)
 	}
 
-	return &cfg, &kc, pullSecret, nil
+	return data, nil
 }
 
 func newClientset(kc *kube.KubeConfig) (*kubernetes.Clientset, error) {

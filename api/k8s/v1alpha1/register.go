@@ -21,6 +21,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&ResourceCollectionList{},
 		&DeploymentPlan{},
 		&DeploymentPlanList{},
+		&CertificateAuthority{},
+		&CertificateAuthorityList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 	return nil

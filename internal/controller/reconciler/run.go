@@ -8,19 +8,22 @@ import (
 	"github.com/go-logr/logr"
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/api/manifests"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/bootstrap"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/cert"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/common"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/image"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/release"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
-func Start(ctx context.Context, log *slog.Logger, kitCluster *v1alpha1.KitCluster, clients *kube.Clients, kubeConfig *kube.KubeConfig, cacheDir, collectionsDir string, registry *image.Registry, shutdowner common.Shutdowner) error {
+func Start(ctx context.Context, log *slog.Logger, bd *bootstrap.BootstrapData, clients *kube.Clients, kubeConfig *kube.KubeConfig, cacheDir, collectionsDir string, registry *image.Registry, shutdowner common.Shutdowner) error {
 	ctrl.SetLogger(logr.FromSlogHandler(log.Handler()))
 
 	installer := NewManifestInstaller(
@@ -33,10 +36,11 @@ func Start(ctx context.Context, log *slog.Logger, kitCluster *v1alpha1.KitCluste
 		return fmt.Errorf("installing manifests: %w", err)
 	}
 
-	if err := clients.Client.Create(ctx, kitCluster); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("creating KitCluster CR: %w", err)
+	if err := ensureBootstrapResources(ctx, clients, bd, log); err != nil {
+		return fmt.Errorf("ensuring bootstrap resources: %w", err)
 	}
-	log.Info("ensured KitCluster CR", "name", kitCluster.Name)
+
+	certProvider := cert.NewPersistentProvider(clients.Clientset, bootstrap.Namespace)
 
 	mgr, err := ctrl.NewManager(clients.REST, ctrl.Options{
 		Scheme:     kube.Scheme,
@@ -47,7 +51,7 @@ func Start(ctx context.Context, log *slog.Logger, kitCluster *v1alpha1.KitCluste
 		return fmt.Errorf("creating controller manager: %w", err)
 	}
 
-	if err := setupReconcilers(ctx, mgr, clients, kubeConfig, kitCluster.Name, cacheDir, collectionsDir, registry, shutdowner, log); err != nil {
+	if err := setupReconcilers(ctx, mgr, clients, kubeConfig, bd.KitCluster.Name, cacheDir, collectionsDir, registry, certProvider, shutdowner, log); err != nil {
 		return err
 	}
 
@@ -61,9 +65,33 @@ func Start(ctx context.Context, log *slog.Logger, kitCluster *v1alpha1.KitCluste
 	return nil
 }
 
-func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clients, kubeConfig *kube.KubeConfig, clusterName, cacheDir, collectionsDir string, registry *image.Registry, shutdowner common.Shutdowner, log *slog.Logger) error {
+func ensureBootstrapResources(ctx context.Context, clients *kube.Clients, bd *bootstrap.BootstrapData, log *slog.Logger) error {
+	if err := clients.Client.Create(ctx, bd.KitCluster); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating KitCluster CR: %w", err)
+	}
+	log.Info("ensured KitCluster CR", "name", bd.KitCluster.Name)
+	return nil
+}
+
+func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clients, kubeConfig *kube.KubeConfig, clusterName, cacheDir, collectionsDir string, registry *image.Registry, certProvider *cert.Provider, shutdowner common.Shutdowner, log *slog.Logger) error {
 	rel := release.NewReleaseManifests(registry, log)
 	crdMgr := NewCRDManager(clients.Extensions.ApiextensionsV1().CustomResourceDefinitions(), log)
+
+	// TODO: propagate context through Provider (requires adding ctx to getOrCreateCA, public methods, and FuncMap)
+	certProvider.OnNewCA = func(name string, ca *cert.CA) {
+		cr := &v1alpha1.CertificateAuthority{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: v1alpha1.CertificateAuthoritySpec{
+				CommonName: ca.Cert.Subject.CommonName,
+				Validity:   metav1.Duration{Duration: ca.Cert.NotAfter.Sub(ca.Cert.NotBefore)},
+			},
+		}
+		if err := mgr.GetClient().Create(context.Background(), cr); err != nil && !apierrors.IsAlreadyExists(err) {
+			log.Error("creating CertificateAuthority CR from provider callback", "ca", name, "error", err)
+		} else {
+			log.Info("created CertificateAuthority CR from provider callback", "ca", name)
+		}
+	}
 
 	reconcilers := []struct {
 		name  string
@@ -87,6 +115,7 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 				discovery:      clients.Discovery,
 				release:        rel,
 				collectionsDir: collectionsDir,
+				funcMap:        certProvider.FuncMap(),
 				log:            log,
 			}).SetupWithManager(ctx, mgr, clusterName)
 		}},
@@ -97,6 +126,15 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 				discovery: clients.Discovery,
 				release:   rel,
 				log:       log,
+			}).SetupWithManager(mgr, clusterName)
+		}},
+		{"CertificateAuthority", func() error {
+			return (&caReconciler{
+				client:       mgr.GetClient(),
+				clientset:    clients.Clientset,
+				certProvider: certProvider,
+				clusterName:  clusterName,
+				log:          log,
 			}).SetupWithManager(mgr, clusterName)
 		}},
 	}

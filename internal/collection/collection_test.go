@@ -3,14 +3,21 @@ package collection
 import (
 	"testing"
 	"testing/fstest"
+	"text/template"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
+var stubCertFuncMap = template.FuncMap{
+	"caCert":     func(name string) (string, error) { return "STUB-CA-CERT", nil },
+	"signedCert": func(ca, cn string) (string, error) { return "STUB-CERT", nil },
+	"signedKey":  func(ca, cn string) (string, error) { return "STUB-KEY", nil },
+}
+
 func TestLoadBuiltin(t *testing.T) {
-	coll, err := Load("openshift-default", nil)
+	coll, err := Load("openshift-default", nil, stubCertFuncMap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -20,7 +27,7 @@ func TestLoadBuiltin(t *testing.T) {
 }
 
 func TestLoadUnknown(t *testing.T) {
-	_, err := Load("nonexistent", nil)
+	_, err := Load("nonexistent", nil, nil)
 	if err == nil {
 		t.Fatal("expected error for unknown collection")
 	}
@@ -37,7 +44,7 @@ data:
 `)},
 	}
 
-	coll, err := Load("my-profile", userFS)
+	coll, err := Load("my-profile", userFS, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +75,7 @@ data:
 `)},
 	}
 
-	coll, err := Load("openshift-default", userFS)
+	coll, err := Load("openshift-default", userFS, stubCertFuncMap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +90,7 @@ data:
 }
 
 func TestRenderBuiltinObjects(t *testing.T) {
-	coll, err := Load("openshift-default", nil)
+	coll, err := Load("openshift-default", nil, stubCertFuncMap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,11 +106,13 @@ func TestRenderBuiltinObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(result.Objects) != 8 {
-		t.Fatalf("got %d objects, want 8", len(result.Objects))
+	// TODO: asserting an exact count is fragile — every new template breaks this.
+	// Consider checking for required kinds instead.
+	if len(result.Objects) != 11 {
+		t.Fatalf("got %d objects, want 11", len(result.Objects))
 	}
 
-	expected := []string{"APIServer", "ClusterVersion", "DNS", "FeatureGate", "Image", "Infrastructure", "Network", "Proxy"}
+	expected := []string{"APIServer", "ClusterVersion", "ConfigMap", "DNS", "FeatureGate", "Image", "Infrastructure", "Namespace", "Network", "Proxy"}
 	found := make(map[string]bool)
 	for _, obj := range result.Objects {
 		found[obj.GetKind()] = true
@@ -116,7 +125,7 @@ func TestRenderBuiltinObjects(t *testing.T) {
 }
 
 func TestRenderTemplateValues(t *testing.T) {
-	coll, err := Load("openshift-default", nil)
+	coll, err := Load("openshift-default", nil, stubCertFuncMap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +188,7 @@ data:
 `)},
 	}
 
-	coll, err := Load("templated", userFS)
+	coll, err := Load("templated", userFS, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +222,7 @@ data:
 `)},
 	}
 
-	coll, err := Load("with-values", userFS)
+	coll, err := Load("with-values", userFS, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +254,7 @@ metadata:
   name: from-inline
 data:
   key: "{{ .Values.myKey }}"`,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,14 +279,14 @@ data:
 }
 
 func TestLoadInlineEmpty(t *testing.T) {
-	_, err := LoadInline("empty", []string{})
+	_, err := LoadInline("empty", []string{}, nil)
 	if err == nil {
 		t.Fatal("expected error for empty inline collection")
 	}
 }
 
 func TestLoadInlineBadTemplate(t *testing.T) {
-	_, err := LoadInline("bad", []string{`{{ .Unclosed`})
+	_, err := LoadInline("bad", []string{`{{ .Unclosed`}, nil)
 	if err == nil {
 		t.Fatal("expected error for bad inline template")
 	}
@@ -288,7 +297,7 @@ func TestLoadEmptyCollection(t *testing.T) {
 		"empty/.keep": &fstest.MapFile{Data: []byte{}},
 	}
 
-	_, err := Load("empty", userFS)
+	_, err := Load("empty", userFS, nil)
 	if err == nil {
 		t.Fatal("expected error for empty collection")
 	}
@@ -303,14 +312,14 @@ metadata:
 `)},
 	}
 
-	_, err := Load("bad", userFS)
+	_, err := Load("bad", userFS, nil)
 	if err == nil {
 		t.Fatal("expected error for bad template syntax")
 	}
 }
 
 func TestRenderHashDeterministic(t *testing.T) {
-	coll, err := Load("openshift-default", nil)
+	coll, err := Load("openshift-default", nil, stubCertFuncMap)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +370,7 @@ func TestIsKitResourceFiltersCollectionYAML(t *testing.T) {
 	fsys, err := BuiltinFS("openshift-default")
 	require.NoError(t, err)
 
-	coll, err := loadFromFS("openshift-default", fsys)
+	coll, err := loadFromFS("openshift-default", fsys, stubCertFuncMap)
 	require.NoError(t, err)
 
 	result, err := coll.Render(RenderContext{Platform: "None", NetworkType: "OVNKubernetes"})
@@ -381,7 +390,7 @@ data:
   env: "{{ .Values.env }}"
 `)},
 	}
-	coll, err := Load("val", userFS)
+	coll, err := Load("val", userFS, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
