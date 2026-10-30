@@ -1,6 +1,7 @@
 package collection
 
 import (
+	"encoding/base64"
 	"testing"
 	"testing/fstest"
 	"text/template"
@@ -276,6 +277,27 @@ data:
 	if data["key"] != "hello" {
 		t.Errorf("key = %q, want hello", data["key"])
 	}
+}
+
+func TestB64TemplateFunction(t *testing.T) {
+	coll, err := LoadInline("test-b64", []string{
+		`apiVersion: v1
+kind: Secret
+metadata:
+  name: test-secret
+data:
+  value: {{ "hello world" | b64 }}`,
+	}, nil)
+	require.NoError(t, err)
+
+	result, err := coll.Render(RenderContext{})
+	require.NoError(t, err)
+	require.Len(t, result.Objects, 1)
+
+	val, _, _ := unstructured.NestedString(result.Objects[0].Object, "data", "value")
+	decoded, err := base64.StdEncoding.DecodeString(val)
+	require.NoError(t, err)
+	assert.Equal(t, "hello world", string(decoded))
 }
 
 func TestLoadInlineEmpty(t *testing.T) {

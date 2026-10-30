@@ -1,0 +1,6 @@
+apiVersion: kit.openshift.io/v1alpha1
+kind: ResourceCollection
+metadata:
+  name: openshift-mco
+spec:
+  source: openshift-mco
