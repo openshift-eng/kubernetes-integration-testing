@@ -96,11 +96,11 @@ func TestRenderBuiltinObjects(t *testing.T) {
 	}
 
 	result, err := coll.Render(RenderContext{
-		FeatureSet:      "TechPreviewNoUpgrade",
-		APIServerURL:    "https://127.0.0.1:6443",
-		Platform:        "None",
-		ServiceNetworks: []string{"10.96.0.0/16"},
-		NetworkType:     "OVNKubernetes",
+		FeatureSet:   "TechPreviewNoUpgrade",
+		APIServerURL: "https://127.0.0.1:6443",
+		Platform:     "None",
+		NetworkType:  "OVNKubernetes",
+		Values:       map[string]any{"serviceNetwork": []any{"10.96.0.0/16"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -108,8 +108,8 @@ func TestRenderBuiltinObjects(t *testing.T) {
 
 	// TODO: asserting an exact count is fragile — every new template breaks this.
 	// Consider checking for required kinds instead.
-	if len(result.Objects) != 11 {
-		t.Fatalf("got %d objects, want 11", len(result.Objects))
+	if len(result.Objects) != 12 {
+		t.Fatalf("got %d objects, want 12", len(result.Objects))
 	}
 
 	expected := []string{"APIServer", "ClusterVersion", "ConfigMap", "DNS", "FeatureGate", "Image", "Infrastructure", "Namespace", "Network", "Proxy"}
@@ -131,11 +131,11 @@ func TestRenderTemplateValues(t *testing.T) {
 	}
 
 	ctx := RenderContext{
-		FeatureSet:      "TechPreviewNoUpgrade",
-		APIServerURL:    "https://10.0.0.1:6443",
-		Platform:        "AWS",
-		ServiceNetworks: []string{"10.128.0.0/14"},
-		NetworkType:     "OpenShiftSDN",
+		FeatureSet:   "TechPreviewNoUpgrade",
+		APIServerURL: "https://10.0.0.1:6443",
+		Platform:     "AWS",
+		NetworkType:  "OpenShiftSDN",
+		Values:       map[string]any{"serviceNetwork": []any{"10.128.0.0/14"}},
 	}
 
 	result, err := coll.Render(ctx)
@@ -228,7 +228,7 @@ data:
 	}
 
 	result, err := coll.Render(RenderContext{
-		Values: map[string]string{"env": "staging", "region": "us-east-1"},
+		Values: map[string]any{"env": "staging", "region": "us-east-1"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -263,7 +263,7 @@ data:
 	}
 
 	result, err := coll.Render(RenderContext{
-		Values: map[string]string{"myKey": "hello"},
+		Values: map[string]any{"myKey": "hello"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -395,11 +395,11 @@ data:
 		t.Fatal(err)
 	}
 
-	r1, err := coll.Render(RenderContext{Values: map[string]string{"env": "dev"}})
+	r1, err := coll.Render(RenderContext{Values: map[string]any{"env": "dev"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	r2, err := coll.Render(RenderContext{Values: map[string]string{"env": "prod"}})
+	r2, err := coll.Render(RenderContext{Values: map[string]any{"env": "prod"}})
 	if err != nil {
 		t.Fatal(err)
 	}

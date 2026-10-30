@@ -6,6 +6,7 @@ package v1alpha1
 
 import (
 	"k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -476,9 +477,9 @@ func (in *ResourceCollectionSpec) DeepCopyInto(out *ResourceCollectionSpec) {
 	}
 	if in.Values != nil {
 		in, out := &in.Values, &out.Values
-		*out = make(map[string]string, len(*in))
+		*out = make(map[string]apiextensionsv1.JSON, len(*in))
 		for key, val := range *in {
-			(*out)[key] = val
+			(*out)[key] = *val.DeepCopy()
 		}
 	}
 	if in.StatusPatches != nil {

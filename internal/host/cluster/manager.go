@@ -29,9 +29,9 @@ type ClusterManager struct {
 	providers       map[string]Provider
 	defaultProvider string
 	launcher        ControllerLauncher
-	mu           sync.Mutex
-	clusters     map[string]*managedCluster
-	clusterLocks map[string]*sync.Mutex
+	mu              sync.Mutex
+	clusters        map[string]*managedCluster
+	clusterLocks    map[string]*sync.Mutex
 	log             *slog.Logger
 }
 
@@ -254,4 +254,3 @@ func (cm *ClusterManager) provider(name string) (Provider, error) {
 	}
 	return p, nil
 }
-

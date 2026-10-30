@@ -2,6 +2,7 @@ package reconciler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -143,6 +145,11 @@ func (r *collectionReconciler) render(rc *v1alpha1.ResourceCollection, kc *v1alp
 		return nil, err
 	}
 
+	values, err := unmarshalValues(rc.Spec.Values)
+	if err != nil {
+		return nil, err
+	}
+
 	// TODO: Platform and NetworkType should come from KitCluster spec.
 	renderCtx := collection.RenderContext{
 		FeatureSet:   kc.Spec.FeatureSet,
@@ -150,7 +157,7 @@ func (r *collectionReconciler) render(rc *v1alpha1.ResourceCollection, kc *v1alp
 		Platform:     "None",
 		NetworkType:  "OVNKubernetes",
 		DefaultCA:    kc.Status.DefaultCA,
-		Values:       rc.Spec.Values,
+		Values:       values,
 	}
 
 	return coll.Render(renderCtx)
@@ -209,6 +216,11 @@ func (r *collectionReconciler) applyStatusPatches(ctx context.Context, rc *v1alp
 		patches[i] = collcel.StatusPatchInput{Kind: sp.Kind, Name: sp.Name, Status: sp.Status}
 	}
 
+	values, err := unmarshalValues(rc.Spec.Values)
+	if err != nil {
+		return err
+	}
+
 	results, err := collcel.EvalStatusPatches(collcel.Context{
 		Cluster: collcel.ClusterContext{
 			Platform:     "None",
@@ -217,7 +229,7 @@ func (r *collectionReconciler) applyStatusPatches(ctx context.Context, rc *v1alp
 			Version:      r.release.Version(),
 			Image:        kc.Spec.Image,
 		},
-		Values:  rc.Spec.Values,
+		Values:  values,
 		Release: releaseObjs,
 	}, patches)
 	if err != nil {
@@ -484,4 +496,16 @@ func (r *collectionReconciler) handleFSEvent(ctx context.Context, ev fsnotify.Ev
 	if rc.Spec.Source != "" {
 		ch <- event.GenericEvent{Object: &rc}
 	}
+}
+
+func unmarshalValues(raw map[string]apiextensionsv1.JSON) (map[string]any, error) {
+	out := make(map[string]any, len(raw))
+	for k, v := range raw {
+		var parsed any
+		if err := json.Unmarshal(v.Raw, &parsed); err != nil {
+			return nil, fmt.Errorf("unmarshaling value %q: %w", k, err)
+		}
+		out[k] = parsed
+	}
+	return out, nil
 }

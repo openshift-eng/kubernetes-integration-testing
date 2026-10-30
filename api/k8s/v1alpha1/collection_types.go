@@ -31,7 +31,8 @@ type ResourceCollectionSpec struct {
 	Inline []InlineTemplate `json:"inline,omitempty"`
 
 	// Values are user-defined variables accessible as {{ .Values.key }} in templates.
-	Values map[string]string `json:"values,omitempty"`
+	// Each value can be any JSON primitive (string, number, bool, array, object).
+	Values map[string]apiextensionsv1.JSON `json:"values,omitempty"`
 
 	// StatusPatches are evaluated post-apply to set status on rendered objects.
 	// Each entry targets one object by kind+name and provides a CEL expression

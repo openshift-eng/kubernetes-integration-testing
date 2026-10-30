@@ -89,9 +89,10 @@ spec:
                 type: array
               values:
                 additionalProperties:
-                  type: string
-                description: Values are user-defined variables accessible as {{ .Values.key
-                  }} in templates.
+                  x-kubernetes-preserve-unknown-fields: true
+                description: |-
+                  Values are user-defined variables accessible as {{ .Values.key }} in templates.
+                  Each value can be any JSON primitive (string, number, bool, array, object).
                 type: object
             type: object
             x-kubernetes-validations:
