@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -62,6 +63,13 @@ func (r *serviceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
 			Namespace: svc.Namespace,
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: "v1",
+				Kind:       "Service",
+				Name:       svc.Name,
+				UID:        svc.UID,
+				Controller: ptr.To(true),
+			}},
 		},
 		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
@@ -117,6 +125,7 @@ func (r *serviceReconciler) SetupWithManager(mgr ctrl.Manager, clusterName strin
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("servicecert-"+clusterName).
 		For(&corev1.Service{}, builder.WithPredicates(hasAnnotation)).
+		Owns(&corev1.Secret{}).
 		Complete(r)
 }
 
