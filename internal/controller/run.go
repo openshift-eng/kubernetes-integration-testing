@@ -6,8 +6,8 @@ import (
 	"log/slog"
 
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/bootstrap"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/cert"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/common"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/deployer"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/pod"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/reconciler"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/image"
@@ -44,8 +44,10 @@ func Run(ctx context.Context, log *slog.Logger, cfg Config) error {
 		return fmt.Errorf("creating kube clients: %w", err)
 	}
 
+	certProvider := cert.NewPersistentProvider(clients.Clientset, bootstrap.Namespace)
+
 	shutdowner := common.NewDeferredShutdowner(ctx)
-	if err := reconciler.Start(shutdowner.Context(), log, bd, clients, cfg.KubeConfig, cfg.CacheDir, cfg.CollectionsDir, registry, shutdowner); err != nil {
+	if err := reconciler.Start(shutdowner.Context(), log, bd, clients, cfg.KubeConfig, cfg.CacheDir, cfg.CollectionsDir, registry, certProvider, shutdowner); err != nil {
 		return fmt.Errorf("starting reconciler: %w", err)
 	}
 
@@ -97,17 +99,6 @@ func runPodController(ctx context.Context, log *slog.Logger, cfg Config, cluster
 			log.Error("pod controller stopped", "error", err)
 		}
 	}()
-
-	secretProv, err := deployer.NewSecretProvisioner(cfg.KubeConfig, log)
-	if err != nil {
-		log.Warn("failed to start secret provisioner", "error", err)
-	} else {
-		go func() {
-			if err := secretProv.Run(ctx); err != nil && ctx.Err() == nil {
-				log.Error("secret provisioner stopped unexpectedly", "error", err)
-			}
-		}()
-	}
 
 	return runner, nil
 }
