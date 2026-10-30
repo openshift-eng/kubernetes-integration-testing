@@ -32,7 +32,7 @@ type SignedCertificateRef struct {
 type CertificateAuthorityStatus struct {
 	SecretRef          *corev1.SecretReference `json:"secretRef,omitempty"`
 	NotAfter           metav1.Time             `json:"notAfter,omitempty"`
-	SignedCertificates []SignedCertificateRef   `json:"signedCertificates,omitempty"`
+	SignedCertificates []SignedCertificateRef  `json:"signedCertificates,omitempty"`
 	Conditions         []metav1.Condition      `json:"conditions,omitempty"`
 }
 

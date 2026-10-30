@@ -313,4 +313,3 @@ func TestInstallEmptyFS(t *testing.T) {
 		t.Fatalf("empty fs should not error: %v", err)
 	}
 }
-

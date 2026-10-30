@@ -22,8 +22,8 @@ const (
 	cvoManifestsDir     = "manifests/"
 	releaseManifestsDir = "release-manifests/"
 
-	featureSetAnnotation  = "release.openshift.io/feature-set"
-	clusterProfile        = "self-managed-high-availability"
+	featureSetAnnotation = "release.openshift.io/feature-set"
+	clusterProfile       = "self-managed-high-availability"
 )
 
 type Manifest struct {

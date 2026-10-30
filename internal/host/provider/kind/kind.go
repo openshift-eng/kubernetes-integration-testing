@@ -15,8 +15,8 @@ import (
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/cluster"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/pullsecret"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/store"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/pullsecret"
 	"sigs.k8s.io/yaml"
 )
 
@@ -51,8 +51,6 @@ func registerBinary(s store.Store, version string) {
 func binID(version string) string {
 	return fmt.Sprintf("kind-%s", version)
 }
-
-
 
 func (p *provider) kindBin(version string) (string, error) {
 	if version == "" {

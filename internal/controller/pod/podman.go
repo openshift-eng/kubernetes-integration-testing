@@ -322,16 +322,16 @@ func (r *podmanRunner) startContainer(ctx context.Context, pod *corev1.Pod, podI
 	err = r.pullSecret.WithAuthFile(func(authFile string) error {
 		var runErr error
 		containerID, runErr = r.podmanClient.Run(ctx, podman.RunOpts{
-			Name:      containerName,
-			Image:     container.Image,
-			Pod:       podID,
-			Detach:    true,
-			Replace:   true,
-			LogDriver: "k8s-file",
-			LogOpts:   map[string]string{"path": logPath},
-			Env:       env,
-			Mounts:    runMounts,
-			AuthFile:  authFile,
+			Name:       containerName,
+			Image:      container.Image,
+			Pod:        podID,
+			Detach:     true,
+			Replace:    true,
+			LogDriver:  "k8s-file",
+			LogOpts:    map[string]string{"path": logPath},
+			Env:        env,
+			Mounts:     runMounts,
+			AuthFile:   authFile,
 			Entrypoint: container.Command,
 			Args:       container.Args,
 		})

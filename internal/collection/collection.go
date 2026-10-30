@@ -22,7 +22,6 @@ import (
 	k8syaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
-
 //go:embed builtin
 var builtinFS embed.FS
 
