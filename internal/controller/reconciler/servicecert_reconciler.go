@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 
+	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/cert"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -24,6 +26,7 @@ type serviceReconciler struct {
 	client       client.Client
 	clientset    kubernetes.Interface
 	certProvider *cert.Provider
+	clusterName  string
 	log          *slog.Logger
 }
 
@@ -38,12 +41,18 @@ func (r *serviceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
+	caName, ready := r.resolveCA(ctx)
+	if !ready {
+		r.log.Info("CA not ready, requeueing", "ca", caName, "service", svc.Name, "namespace", svc.Namespace)
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	cn := fmt.Sprintf("%s.%s.svc", svc.Name, svc.Namespace)
-	certPEM, err := r.certProvider.SignedCert(cert.DefaultCAName, cn)
+	certPEM, err := r.certProvider.SignedCert(caName, cn)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("generating cert for service %s/%s: %w", svc.Namespace, svc.Name, err)
 	}
-	keyPEM, err := r.certProvider.SignedKey(cert.DefaultCAName, cn)
+	keyPEM, err := r.certProvider.SignedKey(caName, cn)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("generating key for service %s/%s: %w", svc.Namespace, svc.Name, err)
 	}
@@ -69,6 +78,22 @@ func (r *serviceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	r.log.Info("provisioned serving cert", "namespace", svc.Namespace, "service", svc.Name, "secret", secretName)
 	return ctrl.Result{}, nil
+}
+
+func (r *serviceReconciler) resolveCA(ctx context.Context) (string, bool) {
+	var kc v1alpha1.KitCluster
+	if err := r.client.Get(ctx, client.ObjectKey{Name: r.clusterName}, &kc); err != nil {
+		return cert.DefaultCAName, false
+	}
+	caName := kc.Status.DefaultCA
+	if caName == "" {
+		caName = cert.DefaultCAName
+	}
+	var ca v1alpha1.CertificateAuthority
+	if err := r.client.Get(ctx, client.ObjectKey{Name: caName}, &ca); err != nil {
+		return caName, false
+	}
+	return caName, meta.IsStatusConditionTrue(ca.Status.Conditions, v1alpha1.ConditionCAReady)
 }
 
 func (r *serviceReconciler) SetupWithManager(mgr ctrl.Manager, clusterName string) error {
