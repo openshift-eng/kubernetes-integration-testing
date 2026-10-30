@@ -57,7 +57,8 @@ func TestProviderFuncMapInTemplate(t *testing.T) {
 	p.SetCA("cluster-ca", ca)
 
 	src := `ca: {{ caCert "cluster-ca" }}`
-	tmpl, err := template.New("test").Funcs(p.FuncMap()).Parse(src)
+	funcMap := template.FuncMap{"caCert": p.CACert}
+	tmpl, err := template.New("test").Funcs(funcMap).Parse(src)
 	require.NoError(t, err)
 
 	var buf bytes.Buffer

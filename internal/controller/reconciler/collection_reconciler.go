@@ -12,6 +12,8 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/cert"
+
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 	collcel "github.com/openshift-eng/kubernetes-integration-testing/internal/collection/cel"
@@ -44,7 +46,7 @@ type collectionReconciler struct {
 	release        *release.ReleaseManifests
 	collectionsDir string
 	pullSecret     string
-	funcMap        template.FuncMap
+	certProvider   *cert.Provider
 	log            *slog.Logger
 }
 
@@ -271,20 +273,32 @@ func findRenderedObject(result *collection.RenderResult, kind, name string) *uns
 	return nil
 }
 
+func (r *collectionReconciler) certFuncMap() template.FuncMap {
+	return template.FuncMap{
+		"caCert": r.certProvider.CACert,
+		"signedCert": func(caName, cn string) (string, error) {
+			return r.certProvider.SignedCert(caName, cn)
+		},
+		"signedKey": func(caName, cn string) (string, error) {
+			return r.certProvider.SignedKey(caName, cn)
+		},
+	}
+}
+
 func (r *collectionReconciler) loadCollection(rc *v1alpha1.ResourceCollection) (*collection.Collection, error) {
 	if len(rc.Spec.Inline) > 0 {
 		contents := make([]string, len(rc.Spec.Inline))
 		for i, t := range rc.Spec.Inline {
 			contents[i] = t.Content
 		}
-		return collection.LoadInline(rc.Name, contents, r.funcMap)
+		return collection.LoadInline(rc.Name, contents, r.certFuncMap())
 	}
 
 	var userFS fs.FS
 	if r.collectionsDir != "" {
 		userFS = os.DirFS(r.collectionsDir)
 	}
-	return collection.Load(rc.Spec.Source, userFS, r.funcMap)
+	return collection.Load(rc.Spec.Source, userFS, r.certFuncMap())
 }
 
 func (r *collectionReconciler) handleDeletion(ctx context.Context, rc *v1alpha1.ResourceCollection) (ctrl.Result, error) {
