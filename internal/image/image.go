@@ -139,7 +139,7 @@ func (r *Registry) Extract(ref string, matchers []Matcher) (map[string]string, e
 			return results, fmt.Errorf("reading layer %d: %w", i, err)
 		}
 
-		found, err := extractFromLayer(rc, filesDir, pending, results)
+		found, err := extractFromLayer(rc, filesDir, pending, results, r.log)
 		_ = rc.Close()
 		if err != nil {
 			return results, err
@@ -201,7 +201,7 @@ func (r *Registry) ExtractDir(ref string, dirPrefix string) (map[string]string, 
 			return results, fmt.Errorf("reading layer %d: %w", i, err)
 		}
 
-		if err := extractDirFromLayer(rc, filesDir, prefix, results); err != nil {
+		if err := extractDirFromLayer(rc, filesDir, prefix, results, r.log); err != nil {
 			_ = rc.Close()
 			return results, err
 		}
@@ -249,7 +249,7 @@ func (r *Registry) ensureLayout(digest v1.Hash) (layout.Path, error) {
 	return layout.Write(dir, emptyIndex())
 }
 
-func extractFromLayer(rc io.ReadCloser, filesDir string, matchers []Matcher, results map[string]string) (int, error) {
+func extractFromLayer(rc io.ReadCloser, filesDir string, matchers []Matcher, results map[string]string, log *slog.Logger) (int, error) {
 	gr, err := gzip.NewReader(rc)
 	if err != nil {
 		return 0, fmt.Errorf("decompressing layer: %w", err)
@@ -272,7 +272,11 @@ func extractFromLayer(rc io.ReadCloser, filesDir string, matchers []Matcher, res
 			continue
 		}
 
-		clean := filepath.Clean(strings.TrimPrefix(hdr.Name, "./"))
+		clean, dest, pathErr := safePath(filesDir, hdr.Name)
+		if pathErr != nil {
+			log.Warn("skipping unsafe tar entry", "name", hdr.Name, "error", pathErr)
+			continue
+		}
 
 		for i := range matchers {
 			key := matchers[i].Pattern.String()
@@ -283,12 +287,11 @@ func extractFromLayer(rc io.ReadCloser, filesDir string, matchers []Matcher, res
 				continue
 			}
 
-			dest := filepath.Join(filesDir, clean)
 			if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 				return found, err
 			}
 
-			f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, hdr.FileInfo().Mode()|0o644)
+			f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 			if err != nil {
 				return found, err
 			}
@@ -306,7 +309,19 @@ func extractFromLayer(rc io.ReadCloser, filesDir string, matchers []Matcher, res
 	}
 }
 
-func extractDirFromLayer(rc io.ReadCloser, filesDir, prefix string, results map[string]string) error {
+func safePath(root, name string) (string, string, error) {
+	clean := filepath.Clean(strings.TrimPrefix(name, "./"))
+	if filepath.IsAbs(clean) || strings.Contains(clean, "..") {
+		return "", "", fmt.Errorf("unsafe tar entry: %s", name)
+	}
+	dest := filepath.Join(root, clean)
+	if !strings.HasPrefix(dest, filepath.Clean(root)+string(os.PathSeparator)) {
+		return "", "", fmt.Errorf("path escapes root: %s", name)
+	}
+	return clean, dest, nil
+}
+
+func extractDirFromLayer(rc io.ReadCloser, filesDir, prefix string, results map[string]string, log *slog.Logger) error {
 	gr, err := gzip.NewReader(rc)
 	if err != nil {
 		return fmt.Errorf("decompressing layer: %w", err)
@@ -328,7 +343,11 @@ func extractDirFromLayer(rc io.ReadCloser, filesDir, prefix string, results map[
 			continue
 		}
 
-		clean := filepath.Clean(strings.TrimPrefix(hdr.Name, "./"))
+		clean, dest, pathErr := safePath(filesDir, hdr.Name)
+		if pathErr != nil {
+			log.Warn("skipping unsafe tar entry", "name", hdr.Name, "error", pathErr)
+			continue
+		}
 		if !strings.HasPrefix(clean, prefix) {
 			continue
 		}
@@ -338,12 +357,11 @@ func extractDirFromLayer(rc io.ReadCloser, filesDir, prefix string, results map[
 			continue
 		}
 
-		dest := filepath.Join(filesDir, clean)
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			return err
 		}
 
-		f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, hdr.FileInfo().Mode()|0o644)
+		f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
 			return err
 		}
