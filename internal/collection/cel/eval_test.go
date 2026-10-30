@@ -47,7 +47,7 @@ func TestEvalMapWithCELValues(t *testing.T) {
 		Kind: "Infrastructure",
 		Name: "cluster",
 		Status: rawJSON(map[string]interface{}{
-			"platform":            "cluster.platform",
+			"platform":             "cluster.platform",
 			"apiServerInternalURI": "cluster.apiServerURL",
 		}),
 	}}
@@ -279,8 +279,8 @@ func TestFindReleaseByProfile(t *testing.T) {
 				"metadata": map[string]interface{}{
 					"name": "cluster",
 					"annotations": map[string]interface{}{
-						"include.release.openshift.io/ibm-cloud-managed":              "false-except-for-the-config-operator",
-						"release.openshift.io/feature-set":                             "Default",
+						"include.release.openshift.io/ibm-cloud-managed": "false-except-for-the-config-operator",
+						"release.openshift.io/feature-set":               "Default",
 					},
 				},
 				"status": map[string]interface{}{"featureGates": []interface{}{map[string]interface{}{"name": "gate-hyper"}}},
@@ -290,8 +290,8 @@ func TestFindReleaseByProfile(t *testing.T) {
 				"metadata": map[string]interface{}{
 					"name": "cluster",
 					"annotations": map[string]interface{}{
-						"include.release.openshift.io/self-managed-high-availability":  "false-except-for-the-config-operator",
-						"release.openshift.io/feature-set":                             "Default",
+						"include.release.openshift.io/self-managed-high-availability": "false-except-for-the-config-operator",
+						"release.openshift.io/feature-set":                            "Default",
 					},
 				},
 				"status": map[string]interface{}{"featureGates": []interface{}{map[string]interface{}{"name": "gate-smha"}}},

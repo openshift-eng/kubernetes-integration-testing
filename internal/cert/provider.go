@@ -230,7 +230,7 @@ func (p *Provider) persistLeafSecret(caName, cn string, leaf *LeafCert) error {
 			Namespace: p.namespace,
 			Labels:    map[string]string{CALabel: caName},
 		},
-		Type:       corev1.SecretTypeTLS,
+		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
 			corev1.TLSCertKey:       []byte(leaf.CertPEM),
 			corev1.TLSPrivateKeyKey: []byte(leaf.KeyPEM),

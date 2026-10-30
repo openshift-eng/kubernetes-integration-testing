@@ -158,7 +158,6 @@ func (r *caReconciler) listSignedCerts(ctx context.Context, caName, caSecretName
 	return refs
 }
 
-
 func (r *caReconciler) handleDeletion(ctx context.Context, ca *v1alpha1.CertificateAuthority) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(ca, caFinalizer) {
 		return ctrl.Result{}, nil

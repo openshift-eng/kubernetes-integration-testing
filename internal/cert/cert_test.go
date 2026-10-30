@@ -44,7 +44,7 @@ func TestParseCARSAKey(t *testing.T) {
 	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 
-	serial, err := rand.Int(rand.Reader,new(big.Int).Lsh(big.NewInt(1), 128))
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	require.NoError(t, err)
 
 	tmpl := &x509.Certificate{
@@ -74,7 +74,7 @@ func TestParseCAPKCS8Key(t *testing.T) {
 	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 
-	serial, err := rand.Int(rand.Reader,new(big.Int).Lsh(big.NewInt(1), 128))
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	require.NoError(t, err)
 
 	tmpl := &x509.Certificate{
@@ -106,7 +106,7 @@ func TestGenerateLeafCertWithRSACA(t *testing.T) {
 	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 
-	serial, err := rand.Int(rand.Reader,new(big.Int).Lsh(big.NewInt(1), 128))
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	require.NoError(t, err)
 
 	tmpl := &x509.Certificate{

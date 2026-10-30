@@ -21,25 +21,25 @@ type Client interface {
 }
 
 type Mount struct {
-	Source   string
-	Target   string
+	Source  string
+	Target  string
 	Options string
 }
 
 type RunOpts struct {
-	Name       string
-	Image      string
-	Network    string
-	Pod        string
-	Labels     map[string]string
-	Env        map[string]string
-	Mounts     []Mount
-	Entrypoint []string
-	Args       []string
-	Detach     bool
-	Replace    bool
-	LogDriver  string
-	LogOpts    map[string]string
+	Name        string
+	Image       string
+	Network     string
+	Pod         string
+	Labels      map[string]string
+	Env         map[string]string
+	Mounts      []Mount
+	Entrypoint  []string
+	Args        []string
+	Detach      bool
+	Replace     bool
+	LogDriver   string
+	LogOpts     map[string]string
 	AuthFile    string
 	SecurityOpt []string
 }

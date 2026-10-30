@@ -126,7 +126,7 @@ func TestMergeWithContextVariables(t *testing.T) {
 		Cluster: collcel.ClusterContext{Version: "4.18.0"},
 		Release: []map[string]interface{}{
 			{
-				"kind": "FeatureGate",
+				"kind":     "FeatureGate",
 				"metadata": map[string]interface{}{"name": "cluster"},
 				"status": map[string]interface{}{
 					"featureGates": []interface{}{

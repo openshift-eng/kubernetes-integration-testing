@@ -107,4 +107,3 @@ func (l *PodmanControllerLauncher) Launch(ctx context.Context, name string, c Cl
 func podmanSocketPath() string {
 	return fmt.Sprintf("/run/user/%d/podman/podman.sock", os.Getuid())
 }
-
