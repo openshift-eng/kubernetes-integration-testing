@@ -4,7 +4,7 @@ metadata:
   name: cluster
 spec:
   serviceNetwork:
-  {{- range .ServiceNetworks }}
+  {{- range .Values.serviceNetwork }}
     - "{{ . }}"
   {{- end }}
   networkType: "{{ .NetworkType }}"

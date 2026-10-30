@@ -272,7 +272,7 @@ func TestFindReleaseNotFound(t *testing.T) {
 func TestFindReleaseByProfile(t *testing.T) {
 	ctx := collcel.Context{
 		Cluster: collcel.ClusterContext{FeatureSet: "Default"},
-		Values:  map[string]string{"clusterProfile": "self-managed-high-availability"},
+		Values:  map[string]any{"clusterProfile": "self-managed-high-availability"},
 		Release: []map[string]interface{}{
 			{
 				"kind": "FeatureGate",
@@ -320,7 +320,7 @@ func TestFindReleaseByProfile(t *testing.T) {
 func TestFindReleaseByProfileNotFound(t *testing.T) {
 	ctx := collcel.Context{
 		Cluster: collcel.ClusterContext{FeatureSet: "CustomNoUpgrade"},
-		Values:  map[string]string{"clusterProfile": "self-managed-high-availability"},
+		Values:  map[string]any{"clusterProfile": "self-managed-high-availability"},
 		Release: []map[string]interface{}{
 			{
 				"kind": "FeatureGate",

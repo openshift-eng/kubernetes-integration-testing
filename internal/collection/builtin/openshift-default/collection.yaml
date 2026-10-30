@@ -6,6 +6,8 @@ spec:
   source: openshift-default
   values:
     clusterProfile: self-managed-high-availability
+    serviceNetwork:
+      - "10.128.0.0/14"
   statusPatches:
     - kind: Infrastructure
       name: cluster

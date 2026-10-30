@@ -33,13 +33,12 @@ type RenderResult struct {
 // TODO: consider passing KitCluster directly instead of individual fields,
 // so templates have access to the full spec/status without adding fields here one by one.
 type RenderContext struct {
-	FeatureSet      string
-	APIServerURL    string
-	Platform        string
-	ServiceNetworks []string
-	NetworkType     string
-	DefaultCA       string
-	Values          map[string]string
+	FeatureSet   string
+	APIServerURL string
+	Platform     string
+	NetworkType  string
+	DefaultCA    string
+	Values       map[string]any
 }
 
 type Collection struct {

@@ -13,7 +13,7 @@ import (
 
 type Context struct {
 	Cluster ClusterContext
-	Values  map[string]string
+	Values  map[string]any
 	Release []map[string]interface{}
 }
 
