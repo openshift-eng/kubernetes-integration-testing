@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -20,13 +21,18 @@ type server struct {
 
 func (s *server) CreateCluster(ctx context.Context, req *pb.CreateClusterRequest) (*pb.CreateClusterResponse, error) {
 	var kc v1alpha1.KitCluster
-	if err := json.Unmarshal(req.GetManifest(), &kc); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(req.GetManifest()))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&kc); err != nil {
 		return nil, fmt.Errorf("parsing KitCluster manifest: %w", err)
 	}
 
 	if err := cluster.ValidateClusterName(kc.Name); err != nil {
 		return nil, err
 	}
+
+	// TODO: validate full KitCluster spec (provider, featureSet, workers, image, defaultCA)
+	// against the CRD OpenAPI schema once the daemon accepts KIT CRs at startup.
 
 	s.log.Info("creating cluster", "name", kc.Name, "provider", kc.Spec.Provider)
 
