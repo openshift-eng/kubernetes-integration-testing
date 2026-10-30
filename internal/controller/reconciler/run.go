@@ -114,7 +114,7 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 				release:        rel,
 				collectionsDir: collectionsDir,
 				pullSecret:     string(bd.PullSecret),
-				funcMap:        certProvider.FuncMap(),
+				certProvider:   certProvider,
 				log:            log,
 			}).SetupWithManager(ctx, mgr, bd.KitCluster.Name)
 		}},

@@ -48,11 +48,12 @@ func (r *serviceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	cn := fmt.Sprintf("%s.%s.svc", svc.Name, svc.Namespace)
-	certPEM, err := r.certProvider.SignedCert(caName, cn)
+	dnsNames := serviceDNSNames(&svc)
+	certPEM, err := r.certProvider.SignedCert(caName, cn, dnsNames...)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("generating cert for service %s/%s: %w", svc.Namespace, svc.Name, err)
 	}
-	keyPEM, err := r.certProvider.SignedKey(caName, cn)
+	keyPEM, err := r.certProvider.SignedKey(caName, cn, dnsNames...)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("generating key for service %s/%s: %w", svc.Namespace, svc.Name, err)
 	}
@@ -94,6 +95,18 @@ func (r *serviceReconciler) resolveCA(ctx context.Context) (string, bool) {
 		return caName, false
 	}
 	return caName, meta.IsStatusConditionTrue(ca.Status.Conditions, v1alpha1.ConditionCAReady)
+}
+
+// serviceDNSNames replicates the SAN logic from openshift/service-ca-operator's
+// certSubjectsForService: standard FQDN SANs plus pod wildcards for headless services.
+func serviceDNSNames(svc *corev1.Service) []string {
+	hostname := svc.Name + "." + svc.Namespace + ".svc"
+	names := []string{hostname, hostname + ".cluster.local"}
+	if svc.Spec.ClusterIP == corev1.ClusterIPNone {
+		wildcard := "*." + svc.Name + "." + svc.Namespace + ".svc"
+		names = append(names, wildcard, wildcard+".cluster.local")
+	}
+	return names
 }
 
 func (r *serviceReconciler) SetupWithManager(mgr ctrl.Manager, clusterName string) error {

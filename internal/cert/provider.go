@@ -5,7 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"sync"
-	"text/template"
+
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -64,28 +64,20 @@ func (p *Provider) CACert(name string) (string, error) {
 	return ca.CertPEM, nil
 }
 
-func (p *Provider) SignedCert(caName, cn string) (string, error) {
-	leaf, err := p.getOrCreateLeaf(caName, cn)
+func (p *Provider) SignedCert(caName, cn string, dnsNames ...string) (string, error) {
+	leaf, err := p.getOrCreateLeaf(caName, cn, dnsNames...)
 	if err != nil {
 		return "", err
 	}
 	return leaf.CertPEM, nil
 }
 
-func (p *Provider) SignedKey(caName, cn string) (string, error) {
-	leaf, err := p.getOrCreateLeaf(caName, cn)
+func (p *Provider) SignedKey(caName, cn string, dnsNames ...string) (string, error) {
+	leaf, err := p.getOrCreateLeaf(caName, cn, dnsNames...)
 	if err != nil {
 		return "", err
 	}
 	return leaf.KeyPEM, nil
-}
-
-func (p *Provider) FuncMap() template.FuncMap {
-	return template.FuncMap{
-		"caCert":     p.CACert,
-		"signedCert": p.SignedCert,
-		"signedKey":  p.SignedKey,
-	}
 }
 
 func CASecretName(name string) string {
@@ -169,7 +161,7 @@ func (p *Provider) persistCASecret(name string, ca *CA) error {
 	return nil
 }
 
-func (p *Provider) getOrCreateLeaf(caName, cn string) (*LeafCert, error) {
+func (p *Provider) getOrCreateLeaf(caName, cn string, dnsNames ...string) (*LeafCert, error) {
 	key := caName + "/" + cn
 	p.mu.Lock()
 	if leaf, ok := p.leafCerts[key]; ok {
@@ -194,7 +186,11 @@ func (p *Provider) getOrCreateLeaf(caName, cn string) (*LeafCert, error) {
 		return nil, fmt.Errorf("getting CA %q: %w", caName, err)
 	}
 
-	leaf, err := GenerateLeafCert(ca, cn, []string{cn}, DefaultValidity)
+	sans := dnsNames
+	if len(sans) == 0 {
+		sans = []string{cn}
+	}
+	leaf, err := GenerateLeafCert(ca, cn, sans, DefaultValidity)
 	if err != nil {
 		return nil, err
 	}
