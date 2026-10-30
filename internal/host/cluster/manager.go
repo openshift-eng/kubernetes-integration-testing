@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sync"
 	"time"
 
@@ -82,6 +83,10 @@ func (cm *ClusterManager) clusterLock(name string) *sync.Mutex {
 }
 
 func (cm *ClusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, pullSecretPath string) (Cluster, error) {
+	if err := ValidateClusterName(kc.Name); err != nil {
+		return nil, err
+	}
+
 	mu := cm.clusterLock(kc.Name)
 	mu.Lock()
 	defer mu.Unlock()
@@ -152,6 +157,10 @@ func (cm *ClusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 }
 
 func (cm *ClusterManager) Destroy(ctx context.Context, name string) error {
+	if err := ValidateClusterName(name); err != nil {
+		return err
+	}
+
 	mu := cm.clusterLock(name)
 	mu.Lock()
 	defer mu.Unlock()
@@ -243,6 +252,21 @@ func (cm *ClusterManager) waitForController(ctx context.Context, kc *kube.KubeCo
 	}
 
 	cm.log.Info("controller ready", "cluster", crName)
+	return nil
+}
+
+var dnsLabelRegexp = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
+// ValidateClusterName enforces RFC 1123 DNS label rules on cluster names.
+// This prevents path-traversal attacks (the name is used in filesystem paths)
+// and ensures the name is safe as a Kubernetes resource name.
+func ValidateClusterName(name string) error {
+	if len(name) == 0 || len(name) > 63 {
+		return fmt.Errorf("invalid cluster name: must be 1-63 characters")
+	}
+	if !dnsLabelRegexp.MatchString(name) {
+		return fmt.Errorf("invalid cluster name %q: must be a valid DNS label (lowercase alphanumeric and hyphens)", name)
+	}
 	return nil
 }
 

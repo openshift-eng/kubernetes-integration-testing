@@ -24,8 +24,8 @@ func (s *server) CreateCluster(ctx context.Context, req *pb.CreateClusterRequest
 		return nil, fmt.Errorf("parsing KitCluster manifest: %w", err)
 	}
 
-	if kc.Name == "" {
-		return nil, fmt.Errorf("KitCluster metadata.name is required")
+	if err := cluster.ValidateClusterName(kc.Name); err != nil {
+		return nil, err
 	}
 
 	s.log.Info("creating cluster", "name", kc.Name, "provider", kc.Spec.Provider)
@@ -41,6 +41,9 @@ func (s *server) CreateCluster(ctx context.Context, req *pb.CreateClusterRequest
 
 func (s *server) DestroyCluster(ctx context.Context, req *pb.DestroyClusterRequest) (*pb.DestroyClusterResponse, error) {
 	name := req.GetName()
+	if err := cluster.ValidateClusterName(name); err != nil {
+		return nil, err
+	}
 	s.log.Info("destroying cluster", "name", name)
 
 	if err := s.clusterManager.Destroy(ctx, name); err != nil {
