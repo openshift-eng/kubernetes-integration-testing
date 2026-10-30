@@ -24,17 +24,11 @@ const (
 
 	featureSetAnnotation  = "release.openshift.io/feature-set"
 	clusterProfile        = "self-managed-high-availability"
-	ServingCertAnnotation = "service.beta.openshift.io/serving-cert-secret-name"
 )
 
 type Manifest struct {
 	Filename string
 	Obj      *unstructured.Unstructured
-}
-
-type ServingCertSecret struct {
-	Name      string
-	Namespace string
 }
 
 type ReleaseManifests struct {
@@ -139,29 +133,6 @@ func FindFeatureGateStatus(manifests []Manifest, featureSet string) map[string]i
 		}
 	}
 	return nil
-}
-
-func CollectServingCertSecrets(resources []Manifest) []ServingCertSecret {
-	var secrets []ServingCertSecret
-	seen := make(map[string]bool)
-	for _, m := range resources {
-		if m.Obj.GetKind() != "Service" {
-			continue
-		}
-		annotations := m.Obj.GetAnnotations()
-		secretName, ok := annotations[ServingCertAnnotation]
-		if !ok || secretName == "" {
-			continue
-		}
-		ns := m.Obj.GetNamespace()
-		key := ns + "/" + secretName
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		secrets = append(secrets, ServingCertSecret{Name: secretName, Namespace: ns})
-	}
-	return secrets
 }
 
 func loadManifests(files map[string]string) ([]Manifest, error) {

@@ -23,7 +23,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
-func Start(ctx context.Context, log *slog.Logger, bd *bootstrap.BootstrapData, clients *kube.Clients, kubeConfig *kube.KubeConfig, cacheDir, collectionsDir string, registry *image.Registry, shutdowner common.Shutdowner) error {
+func Start(ctx context.Context, log *slog.Logger, bd *bootstrap.BootstrapData, clients *kube.Clients, kubeConfig *kube.KubeConfig, cacheDir, collectionsDir string, registry *image.Registry, certProvider *cert.Provider, shutdowner common.Shutdowner) error {
 	ctrl.SetLogger(logr.FromSlogHandler(log.Handler()))
 
 	installer := NewManifestInstaller(
@@ -39,8 +39,6 @@ func Start(ctx context.Context, log *slog.Logger, bd *bootstrap.BootstrapData, c
 	if err := ensureBootstrapResources(ctx, clients, bd, log); err != nil {
 		return fmt.Errorf("ensuring bootstrap resources: %w", err)
 	}
-
-	certProvider := cert.NewPersistentProvider(clients.Clientset, bootstrap.Namespace)
 
 	mgr, err := ctrl.NewManager(clients.REST, ctrl.Options{
 		Scheme:     kube.Scheme,
@@ -127,6 +125,14 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 				discovery: clients.Discovery,
 				release:   rel,
 				log:       log,
+			}).SetupWithManager(mgr, bd.KitCluster.Name)
+		}},
+		{"ServiceCert", func() error {
+			return (&serviceReconciler{
+				client:       mgr.GetClient(),
+				clientset:    clients.Clientset,
+				certProvider: certProvider,
+				log:          log,
 			}).SetupWithManager(mgr, bd.KitCluster.Name)
 		}},
 		{"CertificateAuthority", func() error {
