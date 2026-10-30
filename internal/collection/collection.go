@@ -38,6 +38,7 @@ type RenderContext struct {
 	Platform     string
 	NetworkType  string
 	DefaultCA    string
+	PullSecret   string
 	Values       map[string]any
 }
 
