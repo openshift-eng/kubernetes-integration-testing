@@ -49,19 +49,23 @@ func Run(ctx context.Context, log *slog.Logger, cfg Config) error {
 		return fmt.Errorf("starting reconciler: %w", err)
 	}
 
+	var runner pod.PodRunner
 	if bd.KitCluster.Spec.Provider == "kwok" {
-		runner, err := runPodController(ctx, log, cfg, bd.ClusterConfig, &ps, clients)
+		var err error
+		runner, err = runPodController(ctx, log, cfg, bd.ClusterConfig, &ps, clients)
 		if err != nil {
 			return fmt.Errorf("starting pod controller: %w", err)
 		}
-		shutdowner.Set(func(_ context.Context) {
-			runner.Teardown()
-		})
 	}
 
 	log.Info("controller started", "cluster", bd.KitCluster.Name, "provider", bd.KitCluster.Spec.Provider)
 	<-ctx.Done()
 	log.Info("shutting down")
+
+	if shutdowner.IsDeleting() && runner != nil {
+		runner.Teardown()
+	}
+
 	return nil
 }
 
