@@ -29,8 +29,9 @@ type ClusterManager struct {
 	providers       map[string]Provider
 	defaultProvider string
 	launcher        ControllerLauncher
-	mu              sync.Mutex
-	clusters        map[string]*managedCluster
+	mu           sync.Mutex
+	clusters     map[string]*managedCluster
+	clusterLocks map[string]*sync.Mutex
 	log             *slog.Logger
 }
 
@@ -41,6 +42,7 @@ func NewClusterManager(ctx context.Context, log *slog.Logger, defaultProvider st
 		defaultProvider: defaultProvider,
 		launcher:        launcher,
 		clusters:        make(map[string]*managedCluster),
+		clusterLocks:    make(map[string]*sync.Mutex),
 		log:             log,
 	}
 	go cm.recover(ctx)
@@ -66,7 +68,22 @@ func (cm *ClusterManager) recover(ctx context.Context) {
 	}
 }
 
+func (cm *ClusterManager) clusterLock(name string) *sync.Mutex {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	mu, ok := cm.clusterLocks[name]
+	if !ok {
+		mu = &sync.Mutex{}
+		cm.clusterLocks[name] = mu
+	}
+	return mu
+}
+
 func (cm *ClusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, pullSecretPath string) (Cluster, error) {
+	mu := cm.clusterLock(kc.Name)
+	mu.Lock()
+	defer mu.Unlock()
+
 	if _, _, ok := cm.Get(kc.Name); ok {
 		return nil, fmt.Errorf("cluster %q already exists", kc.Name)
 	}
@@ -133,6 +150,10 @@ func (cm *ClusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 }
 
 func (cm *ClusterManager) Destroy(ctx context.Context, name string) error {
+	mu := cm.clusterLock(name)
+	mu.Lock()
+	defer mu.Unlock()
+
 	cm.mu.Lock()
 	mc, ok := cm.clusters[name]
 	if ok {
