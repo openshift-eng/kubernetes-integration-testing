@@ -108,8 +108,8 @@ func TestRenderBuiltinObjects(t *testing.T) {
 
 	// TODO: asserting an exact count is fragile — every new template breaks this.
 	// Consider checking for required kinds instead.
-	if len(result.Objects) != 12 {
-		t.Fatalf("got %d objects, want 12", len(result.Objects))
+	if len(result.Objects) != 13 {
+		t.Fatalf("got %d objects, want 13", len(result.Objects))
 	}
 
 	expected := []string{"APIServer", "ClusterVersion", "ConfigMap", "DNS", "FeatureGate", "Image", "Infrastructure", "Namespace", "Network", "Proxy"}

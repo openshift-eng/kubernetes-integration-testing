@@ -49,6 +49,8 @@ func NewClusterManager(ctx context.Context, log *slog.Logger, defaultProvider st
 	return cm
 }
 
+// TODO: check if kit-controller-<name> is already running before re-launching;
+// --replace kills a healthy controller unnecessarily on daemon restart.
 func (cm *ClusterManager) recover(ctx context.Context) {
 	for _, p := range cm.providers {
 		for _, name := range p.List() {

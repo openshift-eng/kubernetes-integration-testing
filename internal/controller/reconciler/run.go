@@ -51,7 +51,7 @@ func Start(ctx context.Context, log *slog.Logger, bd *bootstrap.BootstrapData, c
 		return fmt.Errorf("creating controller manager: %w", err)
 	}
 
-	if err := setupReconcilers(ctx, mgr, clients, kubeConfig, bd.KitCluster.Name, cacheDir, collectionsDir, registry, certProvider, shutdowner, log); err != nil {
+	if err := setupReconcilers(ctx, mgr, clients, kubeConfig, bd, cacheDir, collectionsDir, registry, certProvider, shutdowner, log); err != nil {
 		return err
 	}
 
@@ -73,7 +73,7 @@ func ensureBootstrapResources(ctx context.Context, clients *kube.Clients, bd *bo
 	return nil
 }
 
-func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clients, kubeConfig *kube.KubeConfig, clusterName, cacheDir, collectionsDir string, registry *image.Registry, certProvider *cert.Provider, shutdowner common.Shutdowner, log *slog.Logger) error {
+func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clients, kubeConfig *kube.KubeConfig, bd *bootstrap.BootstrapData, cacheDir, collectionsDir string, registry *image.Registry, certProvider *cert.Provider, shutdowner common.Shutdowner, log *slog.Logger) error {
 	rel := release.NewReleaseManifests(registry, log)
 	crdMgr := NewCRDManager(clients.Extensions.ApiextensionsV1().CustomResourceDefinitions(), log)
 
@@ -106,7 +106,7 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 				apiServerExternalURL: kubeConfig.OriginalServerURL(),
 				shutdowner:           shutdowner,
 				log:                  log,
-			}).SetupWithManager(mgr, clusterName)
+			}).SetupWithManager(mgr, bd.KitCluster.Name)
 		}},
 		{"ResourceCollection", func() error {
 			return (&collectionReconciler{
@@ -115,9 +115,10 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 				discovery:      clients.Discovery,
 				release:        rel,
 				collectionsDir: collectionsDir,
+				pullSecret:     string(bd.PullSecret),
 				funcMap:        certProvider.FuncMap(),
 				log:            log,
-			}).SetupWithManager(ctx, mgr, clusterName)
+			}).SetupWithManager(ctx, mgr, bd.KitCluster.Name)
 		}},
 		{"DeploymentPlan", func() error {
 			return (&deploymentPlanReconciler{
@@ -126,16 +127,16 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 				discovery: clients.Discovery,
 				release:   rel,
 				log:       log,
-			}).SetupWithManager(mgr, clusterName)
+			}).SetupWithManager(mgr, bd.KitCluster.Name)
 		}},
 		{"CertificateAuthority", func() error {
 			return (&caReconciler{
 				client:       mgr.GetClient(),
 				clientset:    clients.Clientset,
 				certProvider: certProvider,
-				clusterName:  clusterName,
+				clusterName:  bd.KitCluster.Name,
 				log:          log,
-			}).SetupWithManager(mgr, clusterName)
+			}).SetupWithManager(mgr, bd.KitCluster.Name)
 		}},
 	}
 

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"text/template"
+	"time"
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
@@ -18,8 +19,8 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/release"
 
 	"github.com/fsnotify/fsnotify"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -42,6 +43,7 @@ type collectionReconciler struct {
 	discovery      discovery.DiscoveryInterface
 	release        *release.ReleaseManifests
 	collectionsDir string
+	pullSecret     string
 	funcMap        template.FuncMap
 	log            *slog.Logger
 }
@@ -80,6 +82,11 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, fmt.Errorf("no KitCluster found")
 	}
 	kc := kcList.Items[0]
+
+	if !meta.IsStatusConditionTrue(kc.Status.Conditions, v1alpha1.ConditionReady) {
+		r.log.Info("KitCluster not ready, deferring collection apply", "name", rc.Name)
+		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+	}
 
 	renderResult, err := r.render(&rc, &kc)
 	if err != nil {
@@ -157,6 +164,7 @@ func (r *collectionReconciler) render(rc *v1alpha1.ResourceCollection, kc *v1alp
 		Platform:     "None",
 		NetworkType:  "OVNKubernetes",
 		DefaultCA:    kc.Status.DefaultCA,
+		PullSecret:   r.pullSecret,
 		Values:       values,
 	}
 
