@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -51,6 +52,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := os.Chmod(sockPath, 0o600); err != nil {
+		lis.Close()
+		return fmt.Errorf("restricting socket permissions: %w", err)
+	}
 	defer func() {
 		if err := d.fs.Remove(sockPath); err != nil {
 			d.log.Warn("removing socket", "error", err)
@@ -75,7 +80,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 }
 
 func Start(ctx context.Context, paths Paths, appStore store.Store, factories map[string]ProviderFactory) error {
-	logFile, err := os.OpenFile(paths.Log(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := os.OpenFile(paths.Log(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}

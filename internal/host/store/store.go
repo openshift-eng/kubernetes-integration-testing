@@ -54,7 +54,7 @@ func newStore(fs afero.Fs, root string) (Store, error) {
 		filepath.Join(root, "images"),
 	}
 	for _, d := range dirs {
-		if err := fs.MkdirAll(d, 0o755); err != nil {
+		if err := fs.MkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
 	}
@@ -91,7 +91,7 @@ func (s *store) Has(id string) bool {
 
 func (s *store) ClusterDir(name string) (string, error) {
 	dir := filepath.Join(s.root, "clusters", name)
-	if err := s.fs.MkdirAll(dir, 0o755); err != nil {
+	if err := s.fs.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
 	return dir, nil
