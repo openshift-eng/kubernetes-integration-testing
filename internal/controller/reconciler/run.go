@@ -132,6 +132,7 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 				client:       mgr.GetClient(),
 				clientset:    clients.Clientset,
 				certProvider: certProvider,
+				clusterName:  bd.KitCluster.Name,
 				log:          log,
 			}).SetupWithManager(mgr, bd.KitCluster.Name)
 		}},
