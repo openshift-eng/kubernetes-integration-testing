@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -148,6 +149,9 @@ func isKitResource(data []byte) bool {
 }
 
 var builtinFuncMap = template.FuncMap{
+	"b64": func(s string) string {
+		return base64.StdEncoding.EncodeToString([]byte(s))
+	},
 	"indent": func(spaces int, s string) string {
 		pad := strings.Repeat(" ", spaces)
 		lines := strings.Split(s, "\n")
