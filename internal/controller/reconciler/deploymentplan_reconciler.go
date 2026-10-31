@@ -81,10 +81,11 @@ func (r *deploymentPlanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 }
 
 func (r *deploymentPlanReconciler) initStepStatuses(ctx context.Context, plan *v1alpha1.DeploymentPlan) error {
-	if len(plan.Status.Steps) == len(plan.Spec.Steps) {
+	if plan.Status.ObservedGeneration == plan.Generation && len(plan.Status.Steps) == len(plan.Spec.Steps) {
 		return nil
 	}
 	base := plan.DeepCopy()
+	plan.Status.ObservedGeneration = plan.Generation
 	plan.Status.Steps = make([]v1alpha1.DeploymentStepStatus, len(plan.Spec.Steps))
 	for i, step := range plan.Spec.Steps {
 		plan.Status.Steps[i] = v1alpha1.DeploymentStepStatus{
@@ -92,6 +93,7 @@ func (r *deploymentPlanReconciler) initStepStatuses(ctx context.Context, plan *v
 			Phase: v1alpha1.StepPending,
 		}
 	}
+	meta.RemoveStatusCondition(&plan.Status.Conditions, v1alpha1.ConditionPlanReady)
 	return r.client.Status().Patch(ctx, plan, client.MergeFrom(base))
 }
 

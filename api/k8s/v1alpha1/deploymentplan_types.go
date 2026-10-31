@@ -54,15 +54,15 @@ const (
 )
 
 type DeploymentPlanStatus struct {
-	Steps      []DeploymentStepStatus `json:"steps,omitempty"`
-	Conditions []metav1.Condition     `json:"conditions,omitempty"`
+	ObservedGeneration int64                  `json:"observedGeneration,omitempty"`
+	Steps              []DeploymentStepStatus `json:"steps,omitempty"`
+	Conditions         []metav1.Condition     `json:"conditions,omitempty"`
 }
 
 type DeploymentStepStatus struct {
-	Name        string              `json:"name"`
-	Phase       DeploymentStepPhase `json:"phase"`
-	ContentHash string              `json:"contentHash,omitempty"`
-	Message     string              `json:"message,omitempty"`
+	Name    string              `json:"name"`
+	Phase   DeploymentStepPhase `json:"phase"`
+	Message string              `json:"message,omitempty"`
 }
 
 // +kubebuilder:object:root=true
