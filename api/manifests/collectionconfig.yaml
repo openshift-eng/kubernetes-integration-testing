@@ -1,4 +1,0 @@
-apiVersion: kit.openshift.io/v1alpha1
-kind: CollectionConfig
-metadata:
-  name: cluster
