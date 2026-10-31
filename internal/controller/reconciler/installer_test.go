@@ -108,8 +108,15 @@ func (r *recordingResource) List(context.Context, metav1.ListOptions) (*unstruct
 func (r *recordingResource) Watch(context.Context, metav1.ListOptions) (watch.Interface, error) {
 	return nil, nil
 }
-func (r *recordingResource) Patch(context.Context, string, types.PatchType, []byte, metav1.PatchOptions, ...string) (*unstructured.Unstructured, error) {
-	return nil, nil
+func (r *recordingResource) Patch(_ context.Context, _ string, _ types.PatchType, body []byte, _ metav1.PatchOptions, _ ...string) (*unstructured.Unstructured, error) {
+	var obj unstructured.Unstructured
+	if err := obj.UnmarshalJSON(body); err != nil {
+		return nil, err
+	}
+	r.rec.applied = append(r.rec.applied, obj.GetKind())
+	r.rec.appliedNames = append(r.rec.appliedNames, obj.GetName())
+	r.rec.history.ops = append(r.rec.history.ops, "dyn:"+obj.GetKind()+"/"+obj.GetName())
+	return &obj, nil
 }
 func (r *recordingResource) Apply(context.Context, string, *unstructured.Unstructured, metav1.ApplyOptions, ...string) (*unstructured.Unstructured, error) {
 	return nil, nil
