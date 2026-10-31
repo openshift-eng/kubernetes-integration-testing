@@ -58,7 +58,7 @@ func EvalStatusPatches(ctx Context, patches []StatusPatchInput) ([]StatusResult,
 func newEnv() (*cel.Env, error) {
 	return cel.NewEnv(
 		cel.Variable("cluster", cel.MapType(cel.StringType, cel.DynType)),
-		cel.Variable("values", cel.MapType(cel.StringType, cel.StringType)),
+		cel.Variable("values", cel.MapType(cel.StringType, cel.DynType)),
 		cel.Variable("release", cel.ListType(cel.DynType)),
 		celMergeFunc(),
 		celAnnotationFunc(),
