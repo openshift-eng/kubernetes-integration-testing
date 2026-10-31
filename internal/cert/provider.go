@@ -53,10 +53,14 @@ func (p *Provider) SetCA(name string, ca *CA) {
 }
 
 func (p *Provider) GetCA(name string) (*CA, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.getOrCreateCA(name)
 }
 
 func (p *Provider) CACert(name string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	ca, err := p.getOrCreateCA(name)
 	if err != nil {
 		return "", err
@@ -90,9 +94,6 @@ func leafSecretName(caName, cn string) string {
 }
 
 func (p *Provider) getOrCreateCA(name string) (*CA, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if ca, ok := p.cas[name]; ok {
 		return ca, nil
 	}
@@ -112,7 +113,8 @@ func (p *Provider) getOrCreateCA(name string) (*CA, error) {
 	}
 
 	if p.clientset != nil {
-		if err := p.persistCASecret(name, ca); err != nil {
+		ca, err = p.persistOrLoadCA(name, ca)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -141,7 +143,7 @@ func (p *Provider) loadCAFromSecret(name string) (*CA, error) {
 	return ca, nil
 }
 
-func (p *Provider) persistCASecret(name string, ca *CA) error {
+func (p *Provider) persistOrLoadCA(name string, ca *CA) (*CA, error) {
 	secretName := CASecretName(name)
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -155,28 +157,34 @@ func (p *Provider) persistCASecret(name string, ca *CA) error {
 			corev1.TLSPrivateKeyKey: []byte(ca.KeyPEM),
 		},
 	}
-	if _, err := p.clientset.CoreV1().Secrets(p.namespace).Create(context.TODO(), secret, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("creating CA secret %s: %w", secretName, err)
+	_, err := p.clientset.CoreV1().Secrets(p.namespace).Create(context.TODO(), secret, metav1.CreateOptions{})
+	if err == nil {
+		return ca, nil
 	}
-	return nil
+	if !apierrors.IsAlreadyExists(err) {
+		return nil, fmt.Errorf("creating CA secret %s: %w", secretName, err)
+	}
+	existing, loadErr := p.loadCAFromSecret(name)
+	if loadErr != nil {
+		return nil, loadErr
+	}
+	return existing, nil
 }
 
 func (p *Provider) getOrCreateLeaf(caName, cn string, dnsNames ...string) (*LeafCert, error) {
 	key := caName + "/" + cn
 	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	if leaf, ok := p.leafCerts[key]; ok {
-		p.mu.Unlock()
 		return leaf, nil
 	}
-	p.mu.Unlock()
 
 	if p.clientset != nil {
 		if leaf, err := p.loadLeafFromSecret(caName, cn); err != nil {
 			return nil, err
 		} else if leaf != nil {
-			p.mu.Lock()
 			p.leafCerts[key] = leaf
-			p.mu.Unlock()
 			return leaf, nil
 		}
 	}
@@ -196,14 +204,13 @@ func (p *Provider) getOrCreateLeaf(caName, cn string, dnsNames ...string) (*Leaf
 	}
 
 	if p.clientset != nil {
-		if err := p.persistLeafSecret(caName, cn, leaf); err != nil {
+		leaf, err = p.persistOrLoadLeaf(caName, cn, leaf)
+		if err != nil {
 			return nil, err
 		}
 	}
 
-	p.mu.Lock()
 	p.leafCerts[key] = leaf
-	p.mu.Unlock()
 	return leaf, nil
 }
 
@@ -222,7 +229,7 @@ func (p *Provider) loadLeafFromSecret(caName, cn string) (*LeafCert, error) {
 	}, nil
 }
 
-func (p *Provider) persistLeafSecret(caName, cn string, leaf *LeafCert) error {
+func (p *Provider) persistOrLoadLeaf(caName, cn string, leaf *LeafCert) (*LeafCert, error) {
 	secretName := leafSecretName(caName, cn)
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -236,8 +243,16 @@ func (p *Provider) persistLeafSecret(caName, cn string, leaf *LeafCert) error {
 			corev1.TLSPrivateKeyKey: []byte(leaf.KeyPEM),
 		},
 	}
-	if _, err := p.clientset.CoreV1().Secrets(p.namespace).Create(context.TODO(), secret, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("creating leaf secret %s: %w", secretName, err)
+	_, err := p.clientset.CoreV1().Secrets(p.namespace).Create(context.TODO(), secret, metav1.CreateOptions{})
+	if err == nil {
+		return leaf, nil
 	}
-	return nil
+	if !apierrors.IsAlreadyExists(err) {
+		return nil, fmt.Errorf("creating leaf secret %s: %w", secretName, err)
+	}
+	existing, loadErr := p.loadLeafFromSecret(caName, cn)
+	if loadErr != nil {
+		return nil, loadErr
+	}
+	return existing, nil
 }
