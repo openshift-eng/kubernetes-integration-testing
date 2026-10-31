@@ -329,7 +329,7 @@ func (r *collectionReconciler) isRequested(ctx context.Context, name string) (bo
 	}
 	for _, plan := range planList.Items {
 		for i, stepStatus := range plan.Status.Steps {
-			if stepStatus.Phase != v1alpha1.StepRequested {
+			if stepStatus.Phase != v1alpha1.StepRequested && stepStatus.Phase != v1alpha1.StepFailed {
 				continue
 			}
 			if i < len(plan.Spec.Steps) && plan.Spec.Steps[i].Collection != nil && plan.Spec.Steps[i].Collection.Source == name {
@@ -380,7 +380,7 @@ func (r *collectionReconciler) planToCollections(ctx context.Context, obj client
 	}
 	var requests []ctrl.Request
 	for i, stepStatus := range plan.Status.Steps {
-		if stepStatus.Phase != v1alpha1.StepRequested {
+		if stepStatus.Phase != v1alpha1.StepRequested && stepStatus.Phase != v1alpha1.StepFailed {
 			continue
 		}
 		if i < len(plan.Spec.Steps) && plan.Spec.Steps[i].Collection != nil {
