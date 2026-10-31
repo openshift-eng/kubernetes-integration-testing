@@ -57,6 +57,9 @@ func newStore(fs afero.Fs, root string) (Store, error) {
 		if err := fs.MkdirAll(d, 0o700); err != nil {
 			return nil, err
 		}
+		if err := fs.Chmod(d, 0o700); err != nil {
+			return nil, err
+		}
 	}
 	return &store{
 		fs:       fs,
@@ -92,6 +95,9 @@ func (s *store) Has(id string) bool {
 func (s *store) ClusterDir(name string) (string, error) {
 	dir := filepath.Join(s.root, "clusters", name)
 	if err := s.fs.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	if err := s.fs.Chmod(dir, 0o700); err != nil {
 		return "", err
 	}
 	return dir, nil

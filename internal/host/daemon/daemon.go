@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -83,6 +84,9 @@ func Start(ctx context.Context, paths Paths, appStore store.Store, factories map
 	logFile, err := os.OpenFile(paths.Log(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
+	}
+	if err := logFile.Chmod(0o600); err != nil {
+		return errors.Join(err, logFile.Close())
 	}
 	defer func() {
 		if err := logFile.Close(); err != nil {
