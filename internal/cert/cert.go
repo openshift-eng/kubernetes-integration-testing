@@ -21,6 +21,7 @@ type CA struct {
 }
 
 type LeafCert struct {
+	Cert    *x509.Certificate
 	CertPEM string
 	KeyPEM  string
 }
@@ -144,6 +145,11 @@ func GenerateLeafCert(ca *CA, cn string, dnsNames []string, validity time.Durati
 		return nil, fmt.Errorf("creating leaf certificate: %w", err)
 	}
 
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		return nil, fmt.Errorf("parsing leaf certificate: %w", err)
+	}
+
 	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER}))
 
 	keyDER, err := x509.MarshalECPrivateKey(key)
@@ -152,5 +158,5 @@ func GenerateLeafCert(ca *CA, cn string, dnsNames []string, validity time.Durati
 	}
 	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
 
-	return &LeafCert{CertPEM: certPEM, KeyPEM: keyPEM}, nil
+	return &LeafCert{Cert: cert, CertPEM: certPEM, KeyPEM: keyPEM}, nil
 }

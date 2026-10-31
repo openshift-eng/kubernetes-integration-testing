@@ -79,10 +79,20 @@ func (r *serviceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	if _, err := r.clientset.CoreV1().Secrets(svc.Namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			return ctrl.Result{}, nil
+		if !apierrors.IsAlreadyExists(err) {
+			return ctrl.Result{}, fmt.Errorf("creating secret %s/%s: %w", svc.Namespace, secretName, err)
 		}
-		return ctrl.Result{}, fmt.Errorf("creating secret %s/%s: %w", svc.Namespace, secretName, err)
+		// Adopt pre-existing secret: update data and ownerReference, preserving existing labels/annotations.
+		existing, err := r.clientset.CoreV1().Secrets(svc.Namespace).Get(ctx, secretName, metav1.GetOptions{})
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("reading existing secret %s/%s: %w", svc.Namespace, secretName, err)
+		}
+		existing.Type = corev1.SecretTypeTLS
+		existing.Data = secret.Data
+		existing.OwnerReferences = secret.OwnerReferences
+		if _, err := r.clientset.CoreV1().Secrets(svc.Namespace).Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
+			return ctrl.Result{}, fmt.Errorf("updating secret %s/%s: %w", svc.Namespace, secretName, err)
+		}
 	}
 
 	r.log.Info("provisioned serving cert", "namespace", svc.Namespace, "service", svc.Name, "secret", secretName)

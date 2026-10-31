@@ -44,7 +44,7 @@ func Run(ctx context.Context, log *slog.Logger, cfg Config) error {
 		return fmt.Errorf("creating kube clients: %w", err)
 	}
 
-	certProvider := cert.NewPersistentProvider(clients.Clientset, bootstrap.Namespace)
+	certProvider := cert.NewProvider(clients.Clientset, bootstrap.Namespace)
 
 	shutdowner := common.NewDeferredShutdowner(ctx)
 	if err := reconciler.Start(shutdowner.Context(), log, bd, clients, cfg.KubeConfig, cfg.CacheDir, cfg.CollectionsDir, registry, certProvider, shutdowner); err != nil {

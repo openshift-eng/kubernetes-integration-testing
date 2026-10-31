@@ -3,7 +3,10 @@ package cert
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
+	"slices"
 	"sync"
 
 	"time"
@@ -30,14 +33,7 @@ type Provider struct {
 	OnNewCA   func(name string, ca *CA)
 }
 
-func NewProvider() *Provider {
-	return &Provider{
-		cas:       make(map[string]*CA),
-		leafCerts: make(map[string]*LeafCert),
-	}
-}
-
-func NewPersistentProvider(clientset kubernetes.Interface, namespace string) *Provider {
+func NewProvider(clientset kubernetes.Interface, namespace string) *Provider {
 	return &Provider{
 		cas:       make(map[string]*CA),
 		leafCerts: make(map[string]*LeafCert),
@@ -98,13 +94,11 @@ func (p *Provider) getOrCreateCA(name string) (*CA, error) {
 		return ca, nil
 	}
 
-	if p.clientset != nil {
-		if ca, err := p.loadCAFromSecret(name); err != nil {
-			return nil, err
-		} else if ca != nil {
-			p.cas[name] = ca
-			return ca, nil
-		}
+	if ca, err := p.loadCAFromSecret(name); err != nil {
+		return nil, err
+	} else if ca != nil {
+		p.cas[name] = ca
+		return ca, nil
 	}
 
 	ca, err := GenerateCA(name, DefaultValidity)
@@ -112,11 +106,9 @@ func (p *Provider) getOrCreateCA(name string) (*CA, error) {
 		return nil, err
 	}
 
-	if p.clientset != nil {
-		ca, err = p.persistOrLoadCA(name, ca)
-		if err != nil {
-			return nil, err
-		}
+	ca, err = p.persistOrLoadCA(name, ca)
+	if err != nil {
+		return nil, err
 	}
 
 	if p.OnNewCA != nil {
@@ -172,42 +164,40 @@ func (p *Provider) persistOrLoadCA(name string, ca *CA) (*CA, error) {
 }
 
 func (p *Provider) getOrCreateLeaf(caName, cn string, dnsNames ...string) (*LeafCert, error) {
+	if len(dnsNames) == 0 {
+		dnsNames = []string{cn}
+	}
+
 	key := caName + "/" + cn
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if leaf, ok := p.leafCerts[key]; ok {
-		return leaf, nil
-	}
-
-	if p.clientset != nil {
-		if leaf, err := p.loadLeafFromSecret(caName, cn); err != nil {
-			return nil, err
-		} else if leaf != nil {
-			p.leafCerts[key] = leaf
+		// If the cached cert doesn't have the same SANs, regenerate it
+		if leaf.Cert != nil && slices.Equal(leaf.Cert.DNSNames, dnsNames) {
 			return leaf, nil
 		}
+	}
+
+	if leaf, err := p.loadLeafFromSecret(caName, cn); err != nil {
+		return nil, err
+	} else if leaf != nil && leaf.Cert != nil && slices.Equal(leaf.Cert.DNSNames, dnsNames) {
+		p.leafCerts[key] = leaf
+		return leaf, nil
 	}
 
 	ca, err := p.getOrCreateCA(caName)
 	if err != nil {
 		return nil, fmt.Errorf("getting CA %q: %w", caName, err)
 	}
-
-	sans := dnsNames
-	if len(sans) == 0 {
-		sans = []string{cn}
-	}
-	leaf, err := GenerateLeafCert(ca, cn, sans, DefaultValidity)
+	leaf, err := GenerateLeafCert(ca, cn, dnsNames, DefaultValidity)
 	if err != nil {
 		return nil, err
 	}
 
-	if p.clientset != nil {
-		leaf, err = p.persistOrLoadLeaf(caName, cn, leaf)
-		if err != nil {
-			return nil, err
-		}
+	leaf, err = p.persistOrLoadLeaf(caName, cn, leaf)
+	if err != nil {
+		return nil, err
 	}
 
 	p.leafCerts[key] = leaf
@@ -223,7 +213,20 @@ func (p *Provider) loadLeafFromSecret(caName, cn string) (*LeafCert, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading leaf secret %s: %w", secretName, err)
 	}
+	// Discard malformed or expired certs so they get regenerated.
+	block, _ := pem.Decode(secret.Data[corev1.TLSCertKey])
+	if block == nil {
+		return nil, nil
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, nil
+	}
+	if time.Now().After(cert.NotAfter) {
+		return nil, nil
+	}
 	return &LeafCert{
+		Cert:    cert,
 		CertPEM: string(secret.Data[corev1.TLSCertKey]),
 		KeyPEM:  string(secret.Data[corev1.TLSPrivateKeyKey]),
 	}, nil
@@ -254,5 +257,12 @@ func (p *Provider) persistOrLoadLeaf(caName, cn string, leaf *LeafCert) (*LeafCe
 	if loadErr != nil {
 		return nil, loadErr
 	}
-	return existing, nil
+	if existing != nil && existing.Cert != nil && leaf.Cert != nil && slices.Equal(existing.Cert.DNSNames, leaf.Cert.DNSNames) {
+		return existing, nil
+	}
+	// Expired, malformed, SAN-changed, or deleted-between-create-and-load: persist the new leaf.
+	if _, err := p.clientset.CoreV1().Secrets(p.namespace).Update(context.TODO(), secret, metav1.UpdateOptions{}); err != nil {
+		return nil, fmt.Errorf("updating leaf secret %s: %w", secretName, err)
+	}
+	return leaf, nil
 }
