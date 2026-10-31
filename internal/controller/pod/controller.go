@@ -264,6 +264,14 @@ func (c *Controller) ensureLogsResource(ctx context.Context, pod *corev1.Pod, co
 	existing, err := res.Get(ctx, pod.Name, metav1.GetOptions{})
 	if err == nil {
 		logs, _, _ := unstructured.NestedSlice(existing.Object, "spec", "logs")
+		// Deduplicate: skip if this container already has a log entry.
+		for _, logEntry := range logs {
+			if entryMap, ok := logEntry.(map[string]interface{}); ok {
+				if containers, _ := entryMap["containers"].([]interface{}); len(containers) > 0 && containers[0] == containerName {
+					return
+				}
+			}
+		}
 		logs = append(logs, entry)
 		_ = unstructured.SetNestedSlice(existing.Object, logs, "spec", "logs")
 		if _, err := res.Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
