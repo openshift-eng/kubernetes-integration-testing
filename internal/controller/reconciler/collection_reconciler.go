@@ -453,11 +453,21 @@ func (r *collectionReconciler) startFSWatcher(ctx context.Context) (<-chan event
 	if err != nil {
 		return nil, err
 	}
+
+	// Add a watcher to the root of the collections directory
 	if err := watcher.Add(r.collectionsDir); err != nil {
 		if closeErr := watcher.Close(); closeErr != nil {
 			r.log.Warn("failed to close watcher", "error", closeErr)
 		}
 		return nil, err
+	}
+
+	// Add a watcher to each existing collections directory
+	entries, _ := os.ReadDir(r.collectionsDir)
+	for _, e := range entries {
+		if e.IsDir() {
+			_ = watcher.Add(filepath.Join(r.collectionsDir, e.Name()))
+		}
 	}
 
 	ch := make(chan event.GenericEvent)
@@ -477,6 +487,12 @@ func (r *collectionReconciler) startFSWatcher(ctx context.Context) (<-chan event
 				}
 				if ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) == 0 {
 					continue
+				}
+				// Watch new top-level collection dirs so edits to their templates trigger reconciliation.
+				if ev.Op&fsnotify.Create != 0 {
+					if rel, err := filepath.Rel(r.collectionsDir, ev.Name); err == nil && !strings.Contains(rel, string(filepath.Separator)) {
+						_ = watcher.Add(ev.Name)
+					}
 				}
 				r.handleFSEvent(ctx, ev, ch)
 			case err, ok := <-watcher.Errors:
