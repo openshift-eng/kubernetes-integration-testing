@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/dynutil"
@@ -45,7 +46,12 @@ func (r *deploymentPlanReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			continue
 
 		case v1alpha1.StepFailed:
-			return ctrl.Result{}, nil
+			if step.Collection != nil {
+				return r.reconcileCollectionStep(ctx, &plan, i)
+			}
+			if step.Release != nil {
+				return r.reconcileReleaseStep(ctx, &plan, i, step.Release)
+			}
 
 		case v1alpha1.StepPending:
 			return ctrl.Result{}, r.setStepPhase(ctx, &plan, i, v1alpha1.StepRequested, "")
@@ -93,14 +99,12 @@ func (r *deploymentPlanReconciler) reconcileCollectionStep(ctx context.Context, 
 	source := plan.Spec.Steps[idx].Collection.Source
 	var rc v1alpha1.ResourceCollection
 	if err := r.client.Get(ctx, client.ObjectKey{Name: source}, &rc); err != nil {
-		msg := fmt.Sprintf("collection %q not found", source)
-		return ctrl.Result{}, r.setStepPhase(ctx, plan, idx, v1alpha1.StepFailed, msg)
+		return r.failStepWithRetry(ctx, plan, idx, fmt.Sprintf("collection %q not found", source))
 	}
 
 	cond := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionApplied)
 	if cond != nil && cond.Status == metav1.ConditionFalse {
-		msg := fmt.Sprintf("collection %q failed: %s", source, cond.Message)
-		return ctrl.Result{}, r.setStepPhase(ctx, plan, idx, v1alpha1.StepFailed, msg)
+		return r.failStepWithRetry(ctx, plan, idx, fmt.Sprintf("collection %q failed: %s", source, cond.Message))
 	}
 
 	if cond == nil || cond.Status != metav1.ConditionTrue {
@@ -122,41 +126,42 @@ func (r *deploymentPlanReconciler) reconcileReleaseStep(ctx context.Context, pla
 
 	all, err := r.release.All()
 	if err != nil {
-		return ctrl.Result{}, r.setStepPhase(ctx, plan, idx, v1alpha1.StepFailed, fmt.Sprintf("loading manifests: %v", err))
+		return r.failStepWithRetry(ctx, plan, idx, fmt.Sprintf("loading manifests: %v", err))
 	}
 
 	_, nonCRDs := release.SplitCRDs(all)
 	namespaces, resources, err := release.FilterResources(nonCRDs, kc.Spec.FeatureSet, []string{step.FilenameRegex})
 	if err != nil {
-		return ctrl.Result{}, r.setStepPhase(ctx, plan, idx, v1alpha1.StepFailed, fmt.Sprintf("filtering manifests: %v", err))
+		return r.failStepWithRetry(ctx, plan, idx, fmt.Sprintf("filtering manifests: %v", err))
 	}
 
 	r.log.Info("applying release step", "name", plan.Status.Steps[idx].Name, "namespaces", len(namespaces), "resources", len(resources))
 
 	mapper, err := r.newMapper()
 	if err != nil {
-		return ctrl.Result{}, r.setStepPhase(ctx, plan, idx, v1alpha1.StepFailed, fmt.Sprintf("discovering API: %v", err))
+		return r.failStepWithRetry(ctx, plan, idx, fmt.Sprintf("discovering API: %v", err))
 	}
 
-	for _, m := range namespaces {
-		if _, err := dynutil.ApplyWithMapper(ctx, r.dynClient, mapper, m.Obj); err != nil {
-			r.log.Warn("failed to apply namespace", "name", m.Obj.GetName(), "error", err)
-		}
+	// TODO: add tests for partial failures, namespace-only failures, and eventual success.
+	toApply := append(namespaces, resources...)
+	failed := r.applyManifests(ctx, mapper, toApply)
+
+	if failed > 0 {
+		return r.failStepWithRetry(ctx, plan, idx, fmt.Sprintf("%d/%d resources failed to apply", failed, len(toApply)))
 	}
 
+	return ctrl.Result{}, r.setStepPhase(ctx, plan, idx, v1alpha1.StepReady, "")
+}
+
+func (r *deploymentPlanReconciler) applyManifests(ctx context.Context, mapper meta.RESTMapper, manifests []release.Manifest) int {
 	var failed int
-	for _, m := range resources {
+	for _, m := range manifests {
 		if _, err := dynutil.ApplyWithMapper(ctx, r.dynClient, mapper, m.Obj); err != nil {
 			r.log.Warn("failed to apply resource", "kind", m.Obj.GetKind(), "name", m.Obj.GetName(), "error", err)
 			failed++
 		}
 	}
-
-	if failed > 0 {
-		r.log.Warn("some resources failed", "step", plan.Status.Steps[idx].Name, "failed", failed, "total", len(resources))
-	}
-
-	return ctrl.Result{}, r.setStepPhase(ctx, plan, idx, v1alpha1.StepReady, "")
+	return failed
 }
 
 func (r *deploymentPlanReconciler) newMapper() (meta.RESTMapper, error) {
@@ -165,6 +170,15 @@ func (r *deploymentPlanReconciler) newMapper() (meta.RESTMapper, error) {
 		return nil, fmt.Errorf("discovering API resources: %w", err)
 	}
 	return restmapper.NewDiscoveryRESTMapper(groupResources), nil
+}
+
+const stepRetryInterval = 10 * time.Second
+
+func (r *deploymentPlanReconciler) failStepWithRetry(ctx context.Context, plan *v1alpha1.DeploymentPlan, idx int, msg string) (ctrl.Result, error) {
+	if err := r.setStepPhase(ctx, plan, idx, v1alpha1.StepFailed, msg); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: stepRetryInterval}, nil
 }
 
 func (r *deploymentPlanReconciler) setStepPhase(ctx context.Context, plan *v1alpha1.DeploymentPlan, idx int, phase v1alpha1.DeploymentStepPhase, message string) error {
@@ -182,7 +196,7 @@ func (r *deploymentPlanReconciler) collectionToPlan(ctx context.Context, obj cli
 	var requests []ctrl.Request
 	for _, plan := range planList.Items {
 		for i, stepStatus := range plan.Status.Steps {
-			if stepStatus.Phase != v1alpha1.StepRequested {
+			if stepStatus.Phase != v1alpha1.StepRequested && stepStatus.Phase != v1alpha1.StepFailed {
 				continue
 			}
 			if i < len(plan.Spec.Steps) && plan.Spec.Steps[i].Collection != nil && plan.Spec.Steps[i].Collection.Source == obj.GetName() {
