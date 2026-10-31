@@ -2,25 +2,26 @@ package dynutil
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/utils/ptr"
 )
 
 func Apply(ctx context.Context, client dynamic.ResourceInterface, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
-	existing, err := client.Get(ctx, obj.GetName(), metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return client.Create(ctx, obj, metav1.CreateOptions{})
-	}
+	data, err := json.Marshal(obj)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("marshaling %s %s: %w", obj.GetKind(), obj.GetName(), err)
 	}
-	obj.SetResourceVersion(existing.GetResourceVersion())
-	return client.Update(ctx, obj, metav1.UpdateOptions{})
+	return client.Patch(ctx, obj.GetName(), types.ApplyPatchType, data, metav1.PatchOptions{
+		FieldManager: "kit-controller",
+		Force:        ptr.To(true),
+	})
 }
 
 func ApplyWithMapper(ctx context.Context, client dynamic.Interface, mapper meta.RESTMapper, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
