@@ -23,6 +23,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&DeploymentPlanList{},
 		&CertificateAuthority{},
 		&CertificateAuthorityList{},
+		&WorkloadOverride{},
+		&WorkloadOverrideList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 	return nil
