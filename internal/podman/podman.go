@@ -95,13 +95,6 @@ func (c *client) run(ctx context.Context, args ...string) error {
 	return nil
 }
 
-func (c *client) cmdNoCtx(args ...string) *exec.Cmd {
-	all := make([]string, 0, len(c.args)+len(args))
-	all = append(all, c.args...)
-	all = append(all, args...)
-	return exec.Command(c.binary, all...)
-}
-
 func (c *client) Run(ctx context.Context, opts RunOpts) (string, error) {
 	args := []string{"run"}
 	if opts.Detach {
@@ -179,7 +172,7 @@ func (c *client) Remove(ctx context.Context, name string, force bool) error {
 }
 
 func (c *client) Wait(ctx context.Context, name string) (int, error) {
-	out, err := c.cmdNoCtx("wait", name).CombinedOutput()
+	out, err := c.cmd(ctx, "wait", name).CombinedOutput()
 	if err != nil {
 		return 1, fmt.Errorf("podman wait: %s: %w", strings.TrimSpace(string(out)), err)
 	}

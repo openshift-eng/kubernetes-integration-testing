@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/podman"
@@ -102,6 +103,9 @@ func (r *podmanRunner) RunPod(ctx context.Context, pod *corev1.Pod) error {
 	if err != nil {
 		return err
 	}
+	if r.stopped.Load() {
+		return nil
+	}
 
 	var firstErr error
 	for _, container := range pod.Spec.Containers {
@@ -143,12 +147,14 @@ func (r *podmanRunner) StopPod(uid string) {
 	_ = r.podmanClient.PodRemove(context.Background(), p.id, true)
 }
 
+const teardownTimeout = 30 * time.Second
+
 func (r *podmanRunner) Teardown() {
 	r.log.Info("graceful shutdown of pod runner")
-	r.stopped.Store(true)
-	close(r.changes)
 
+	// Serialize with ensurePod/startContainer to prevent registering new pods or waiters after snapshot.
 	r.mu.Lock()
+	r.stopped.Store(true)
 	pods := make(map[string]podmanPod, len(r.pods))
 	for k, v := range r.pods {
 		pods[k] = v
@@ -157,13 +163,26 @@ func (r *podmanRunner) Teardown() {
 	r.running = make(map[string]struct{})
 	r.mu.Unlock()
 
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), teardownTimeout)
+	defer stopCancel()
+	// TODO: PodRemove(force) already kills, PodStop is redundant here.
 	for _, p := range pods {
 		r.log.Info("stopping podman pod", "podID", p.id)
-		_ = r.podmanClient.PodStop(context.Background(), p.id, 10)
-		_ = r.podmanClient.PodRemove(context.Background(), p.id, true)
+		_ = r.podmanClient.PodStop(stopCtx, p.id, 10)
+		_ = r.podmanClient.PodRemove(stopCtx, p.id, true)
 	}
 
-	r.wg.Wait()
+	// Make the WG something we can select against
+	done := make(chan struct{})
+	go func() {
+		r.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(teardownTimeout):
+		r.log.Warn("teardown timed out waiting for container goroutines")
+	}
 }
 
 func (r *podmanRunner) Changes() <-chan ContainerStateChange {
@@ -179,7 +198,13 @@ func (r *podmanRunner) ensurePod(ctx context.Context, pod *corev1.Pod) (string, 
 
 	aliases := r.serviceAliases(ctx, pod)
 
+	// Check under lock to avoid creating a pod after Teardown's cleanup snapshot.
 	r.mu.Lock()
+	if r.stopped.Load() {
+		r.mu.Unlock()
+		r.log.Debug("skipping pod creation, runner is shutting down", "pod", pod.Name, "namespace", pod.Namespace)
+		return "", nil
+	}
 	if existing, ok := r.pods[uid]; ok {
 		if !hasNewAliases(existing.aliases, aliases) {
 			r.mu.Unlock()
@@ -207,6 +232,14 @@ func (r *podmanRunner) ensurePod(ctx context.Context, pod *corev1.Pod) (string, 
 	}
 
 	r.mu.Lock()
+	if r.stopped.Load() {
+		r.mu.Unlock()
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), teardownTimeout)
+		defer cleanupCancel()
+		_ = r.podmanClient.PodStop(cleanupCtx, id, 10)
+		_ = r.podmanClient.PodRemove(cleanupCtx, id, true)
+		return "", nil
+	}
 	r.pods[uid] = podmanPod{id: id, aliases: aliases}
 	r.mu.Unlock()
 
@@ -341,8 +374,14 @@ func (r *podmanRunner) startContainer(ctx context.Context, pod *corev1.Pod, podI
 		return err
 	}
 
+	// Check+register+wg.Add under lock to prevent racing with Teardown's wg.Wait.
 	r.mu.Lock()
+	if r.stopped.Load() {
+		r.mu.Unlock()
+		return nil
+	}
 	r.running[key] = struct{}{}
+	r.wg.Add(1)
 	r.mu.Unlock()
 
 	shortID := containerID
@@ -351,26 +390,27 @@ func (r *podmanRunner) startContainer(ctx context.Context, pod *corev1.Pod, podI
 	}
 	r.log.Info("started container", "pod", pod.Name, "namespace", pod.Namespace, "container", container.Name, "containerID", shortID)
 
-	r.changes <- ContainerStateChange{
+	select {
+	case r.changes <- ContainerStateChange{
 		PodUID:    uid,
 		PodName:   pod.Name,
 		Namespace: pod.Namespace,
 		Container: container.Name,
 		State:     ContainerStarted,
+	}:
+	case <-ctx.Done():
 	}
 
-	r.wg.Add(1)
-	go r.waitContainer(uid, pod.Name, pod.Namespace, container.Name, containerID)
+	go r.waitContainer(ctx, uid, pod.Name, pod.Namespace, container.Name, containerID)
 
 	return nil
 }
 
-func (r *podmanRunner) waitContainer(uid, podName, namespace, container, containerID string) {
+func (r *podmanRunner) waitContainer(ctx context.Context, uid, podName, namespace, container, containerID string) {
 	defer r.wg.Done()
 	key := processKey(uid, container)
 
-	// TODO: use a cancellable context so Ctrl-C / SIGTERM unblocks this
-	exitCode, err := r.podmanClient.Wait(context.Background(), containerID)
+	exitCode, err := r.podmanClient.Wait(ctx, containerID)
 
 	r.mu.Lock()
 	delete(r.running, key)
@@ -391,7 +431,8 @@ func (r *podmanRunner) waitContainer(uid, podName, namespace, container, contain
 		return
 	}
 
-	r.changes <- ContainerStateChange{
+	select {
+	case r.changes <- ContainerStateChange{
 		PodUID:    uid,
 		PodName:   podName,
 		Namespace: namespace,
@@ -399,5 +440,7 @@ func (r *podmanRunner) waitContainer(uid, podName, namespace, container, contain
 		State:     ContainerExited,
 		ExitCode:  int32(exitCode),
 		Err:       exitErr,
+	}:
+	case <-ctx.Done():
 	}
 }
