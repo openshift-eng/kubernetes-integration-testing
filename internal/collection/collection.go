@@ -139,12 +139,13 @@ func findSpec(name string, fsys fs.FS) *v1alpha1.ResourceCollectionSpec {
 	return nil
 }
 
-func isKitResource(data []byte) bool {
+func isCollectionSpec(data []byte) bool {
 	obj, _, err := kube.Decoder.Decode(data, nil, nil)
 	if err != nil {
 		return false
 	}
-	return strings.HasPrefix(obj.GetObjectKind().GroupVersionKind().Group, "kit.openshift.io")
+	gvk := obj.GetObjectKind().GroupVersionKind()
+	return gvk.Group == "kit.openshift.io" && gvk.Kind == "ResourceCollection"
 }
 
 var builtinFuncMap = template.FuncMap{
@@ -193,7 +194,7 @@ func loadFromFS(name string, fsys fs.FS, funcMap template.FuncMap) (*Collection,
 			return fmt.Errorf("reading %s: %w", path, err)
 		}
 
-		if isKitResource(data) {
+		if isCollectionSpec(data) {
 			return nil
 		}
 

@@ -1,0 +1,10 @@
+apiVersion: kit.openshift.io/v1alpha1
+kind: WorkloadOverride
+metadata:
+  name: suppress-machine-config-daemon
+spec:
+  match:
+    namespace: openshift-machine-config-operator
+    labels:
+      k8s-app: machine-config-daemon
+  noOp: true

@@ -388,7 +388,7 @@ func TestLoadSpecSkipsNonMatchingName(t *testing.T) {
 	assert.Nil(t, spec)
 }
 
-func TestIsKitResourceFiltersCollectionYAML(t *testing.T) {
+func TestCollectionSpecFilteredFromTemplates(t *testing.T) {
 	fsys, err := BuiltinFS("openshift-default")
 	require.NoError(t, err)
 
