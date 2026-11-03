@@ -145,25 +145,15 @@ func (c *Controller) onStateChange(ctx context.Context, change ContainerStateCha
 
 	switch change.State {
 	case ContainerStarted:
-		pod.Status.Phase = corev1.PodRunning
-		pod.Status.Conditions = []corev1.PodCondition{
-			{Type: corev1.PodScheduled, Status: corev1.ConditionTrue, LastTransitionTime: now},
-			{Type: corev1.PodInitialized, Status: corev1.ConditionTrue, LastTransitionTime: now},
-			{Type: corev1.ContainersReady, Status: corev1.ConditionTrue, LastTransitionTime: now},
-			{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: now},
-		}
-		var statuses []corev1.ContainerStatus
-		for _, cs := range pod.Spec.Containers {
-			statuses = append(statuses, corev1.ContainerStatus{
-				Name:  cs.Name,
-				Image: cs.Image,
-				Ready: true,
-				State: corev1.ContainerState{
-					Running: &corev1.ContainerStateRunning{StartedAt: now},
-				},
-			})
-		}
-		pod.Status.ContainerStatuses = statuses
+		setContainerStatus(pod, change.Container, corev1.ContainerStatus{
+			Name:  change.Container,
+			Image: containerImage(pod, change.Container),
+			Ready: true,
+			State: corev1.ContainerState{
+				Running: &corev1.ContainerStateRunning{StartedAt: now},
+			},
+		})
+		computePodReadiness(pod, now)
 
 		c.ensureLogsResource(ctx, pod, change.Container)
 
@@ -183,23 +173,24 @@ func (c *Controller) onStateChange(ctx context.Context, change ContainerStateCha
 			count := c.restarts[key]
 			c.restartsMu.Unlock()
 
-			for i := range pod.Status.ContainerStatuses {
-				if pod.Status.ContainerStatuses[i].Name == change.Container {
-					pod.Status.ContainerStatuses[i].Ready = false
-					pod.Status.ContainerStatuses[i].RestartCount = int32(count)
-					pod.Status.ContainerStatuses[i].LastTerminationState = corev1.ContainerState{
-						Terminated: &corev1.ContainerStateTerminated{
-							ExitCode:   change.ExitCode,
-							FinishedAt: now,
-						},
-					}
-					pod.Status.ContainerStatuses[i].State = corev1.ContainerState{
-						Waiting: &corev1.ContainerStateWaiting{
-							Reason: "CrashLoopBackOff",
-						},
-					}
-				}
-			}
+			setContainerStatus(pod, change.Container, corev1.ContainerStatus{
+				Name:         change.Container,
+				Image:        containerImage(pod, change.Container),
+				Ready:        false,
+				RestartCount: int32(count),
+				LastTerminationState: corev1.ContainerState{
+					Terminated: &corev1.ContainerStateTerminated{
+						ExitCode:   change.ExitCode,
+						FinishedAt: now,
+					},
+				},
+				State: corev1.ContainerState{
+					Waiting: &corev1.ContainerStateWaiting{
+						Reason: "CrashLoopBackOff",
+					},
+				},
+			})
+			computePodReadiness(pod, now)
 
 			backoff := restartBackoff(count)
 			c.log.Info("scheduling restart", "pod", change.PodName, "namespace", change.Namespace, "container", change.Container, "attempt", count, "backoff", backoff)
@@ -219,28 +210,108 @@ func (c *Controller) onStateChange(ctx context.Context, change ContainerStateCha
 				}
 			}()
 		} else {
-			if change.Err != nil {
-				pod.Status.Phase = corev1.PodFailed
-			} else {
-				pod.Status.Phase = corev1.PodSucceeded
-			}
-			for i := range pod.Status.ContainerStatuses {
-				if pod.Status.ContainerStatuses[i].Name == change.Container {
-					pod.Status.ContainerStatuses[i].Ready = false
-					pod.Status.ContainerStatuses[i].State = corev1.ContainerState{
-						Terminated: &corev1.ContainerStateTerminated{
-							ExitCode:   change.ExitCode,
-							FinishedAt: now,
-						},
-					}
-				}
-			}
+			setContainerStatus(pod, change.Container, corev1.ContainerStatus{
+				Name:  change.Container,
+				Image: containerImage(pod, change.Container),
+				Ready: false,
+				State: corev1.ContainerState{
+					Terminated: &corev1.ContainerStateTerminated{
+						ExitCode:   change.ExitCode,
+						FinishedAt: now,
+					},
+				},
+			})
+			computePodReadiness(pod, now)
 		}
 	}
 
 	if _, err := c.clientset.CoreV1().Pods(change.Namespace).UpdateStatus(ctx, pod, metav1.UpdateOptions{}); err != nil {
 		c.log.Warn("failed to update pod status", "pod", change.PodName, "namespace", change.Namespace, "state", change.State, "error", err)
 	}
+}
+
+func containerImage(pod *corev1.Pod, name string) string {
+	for _, c := range pod.Spec.Containers {
+		if c.Name == name {
+			return c.Image
+		}
+	}
+	return ""
+}
+
+func setContainerStatus(pod *corev1.Pod, name string, status corev1.ContainerStatus) {
+	for i := range pod.Status.ContainerStatuses {
+		if pod.Status.ContainerStatuses[i].Name == name {
+			pod.Status.ContainerStatuses[i] = status
+			return
+		}
+	}
+	pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, status)
+}
+
+func computePodReadiness(pod *corev1.Pod, now metav1.Time) {
+	allReady := true
+	allTerminated := true
+	anyRunning := false
+	anyFailed := false
+
+	for _, cs := range pod.Status.ContainerStatuses {
+		if !cs.Ready {
+			allReady = false
+		}
+		if cs.State.Running != nil {
+			anyRunning = true
+		}
+		if cs.State.Terminated == nil {
+			allTerminated = false
+		}
+		if cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0 {
+			anyFailed = true
+		}
+	}
+
+	hasAllContainers := len(pod.Status.ContainerStatuses) == len(pod.Spec.Containers)
+	ready := allReady && hasAllContainers
+
+	readyStatus := corev1.ConditionFalse
+	if ready {
+		readyStatus = corev1.ConditionTrue
+	}
+
+	setCondition(pod, corev1.PodScheduled, corev1.ConditionTrue, now)
+	setCondition(pod, corev1.PodInitialized, corev1.ConditionTrue, now)
+	setCondition(pod, corev1.ContainersReady, readyStatus, now)
+	setCondition(pod, corev1.PodReady, readyStatus, now)
+
+	switch {
+	case allTerminated && hasAllContainers:
+		if anyFailed {
+			pod.Status.Phase = corev1.PodFailed
+		} else {
+			pod.Status.Phase = corev1.PodSucceeded
+		}
+	case anyRunning:
+		pod.Status.Phase = corev1.PodRunning
+	default:
+		pod.Status.Phase = corev1.PodPending
+	}
+}
+
+func setCondition(pod *corev1.Pod, condType corev1.PodConditionType, status corev1.ConditionStatus, now metav1.Time) {
+	for i := range pod.Status.Conditions {
+		if pod.Status.Conditions[i].Type == condType {
+			if pod.Status.Conditions[i].Status != status {
+				pod.Status.Conditions[i].Status = status
+				pod.Status.Conditions[i].LastTransitionTime = now
+			}
+			return
+		}
+	}
+	pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+		Type:               condType,
+		Status:             status,
+		LastTransitionTime: now,
+	})
 }
 
 func restartBackoff(count int) time.Duration {
