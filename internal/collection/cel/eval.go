@@ -141,15 +141,15 @@ func evalValue(env *cel.Env, act map[string]interface{}, v interface{}) (interfa
 	case string:
 		ast, issues := env.Compile(val)
 		if issues != nil && issues.Err() != nil {
-			return val, nil
+			return nil, fmt.Errorf("compiling CEL %q: %w", val, issues.Err())
 		}
 		prg, err := env.Program(ast)
 		if err != nil {
-			return val, nil
+			return nil, fmt.Errorf("creating CEL program %q: %w", val, err)
 		}
 		out, _, err := prg.Eval(act)
 		if err != nil {
-			return val, nil
+			return nil, fmt.Errorf("evaluating CEL %q: %w", val, err)
 		}
 		return unwrapRefVal(out), nil
 	case map[string]interface{}:

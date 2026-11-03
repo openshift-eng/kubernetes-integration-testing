@@ -346,7 +346,7 @@ func TestFindReleaseByProfileNotFound(t *testing.T) {
 	assert.Error(t, err, "should fail because no manifest matches CustomNoUpgrade")
 }
 
-func TestEvalLiteralStringNotCEL(t *testing.T) {
+func TestEvalInvalidCELReturnsError(t *testing.T) {
 	ctx := collcel.Context{}
 	patches := []collcel.StatusPatchInput{{
 		Kind: "Test",
@@ -356,7 +356,7 @@ func TestEvalLiteralStringNotCEL(t *testing.T) {
 		}),
 	}}
 
-	results, err := collcel.EvalStatusPatches(ctx, patches)
-	require.NoError(t, err)
-	assert.Equal(t, "hello world", results[0].Status["message"], "literal string should pass through")
+	_, err := collcel.EvalStatusPatches(ctx, patches)
+	assert.Error(t, err, "invalid CEL expression should return an error")
+	assert.Contains(t, err.Error(), "compiling CEL")
 }
