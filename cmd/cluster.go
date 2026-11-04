@@ -2,42 +2,34 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"time"
 
-	pb "github.com/openshift-eng/kubernetes-integration-testing/api/proto"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/daemon"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/store"
+	"golang.org/x/sys/unix"
+
+	pb "github.com/openshift-eng/kubernetes-integration-testing/api/grpc"
+	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/daemon"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 var (
 	clusterProvider   string
-	clusterImage      string
 	clusterPullSecret string
+	clusterWorkers    int
+	clusterImage      string
 	clusterFeatureSet string
-	clusterIncludes   []string
-	clusterWorkers    int32
-	clusterRuntime    string
 )
 
 var clusterCmd = &cobra.Command{
 	Use:   "cluster",
 	Short: "Manage clusters",
-}
-
-var stateMessages = map[pb.ClusterState]string{
-	pb.ClusterState_CREATING:  "Creating cluster...",
-	pb.ClusterState_CREATED:   "Cluster created",
-	pb.ClusterState_DELETING:  "Deleting cluster...",
-	pb.ClusterState_DELETED:   "Cluster deleted",
-	pb.ClusterState_DEPLOYING: "Deploying...",
-	pb.ClusterState_DEPLOYED:  "Deploy complete",
 }
 
 var clusterCreateCmd = &cobra.Command{
@@ -55,21 +47,34 @@ var clusterCreateCmd = &cobra.Command{
 			}
 		}()
 
-		stream, err := client.CreateCluster(context.Background(), &pb.CreateClusterRequest{
-			Name:       args[0],
-			Provider:   clusterProvider,
-			Image:      clusterImage,
+		kc := v1alpha1.KitCluster{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: v1alpha1.GroupVersion.String(),
+				Kind:       "KitCluster",
+			},
+			ObjectMeta: metav1.ObjectMeta{Name: args[0]},
+			Spec: v1alpha1.KitClusterSpec{
+				Provider:   clusterProvider,
+				Image:      clusterImage,
+				FeatureSet: clusterFeatureSet,
+				Workers:    clusterWorkers,
+			},
+		}
+		manifest, err := json.Marshal(kc)
+		if err != nil {
+			return fmt.Errorf("marshaling KitCluster: %w", err)
+		}
+
+		resp, err := client.CreateCluster(context.Background(), &pb.CreateClusterRequest{
+			Manifest:   manifest,
 			PullSecret: clusterPullSecret,
-			FeatureSet: clusterFeatureSet,
-			Includes:   clusterIncludes,
-			Workers:    clusterWorkers,
-			Runtime:    clusterRuntime,
 		})
 		if err != nil {
 			return grpcError(err)
 		}
 
-		return printStatusStream(stream)
+		fmt.Printf("Cluster created (kubeconfig: %s)\n", resp.GetKubeconfig())
+		return nil
 	},
 }
 
@@ -88,44 +93,28 @@ var clusterDestroyCmd = &cobra.Command{
 			}
 		}()
 
-		stream, err := client.DestroyCluster(context.Background(), &pb.DestroyClusterRequest{Name: args[0]})
-		if err != nil {
+		if _, err := client.DestroyCluster(context.Background(), &pb.DestroyClusterRequest{Name: args[0]}); err != nil {
 			return grpcError(err)
 		}
 
-		return printStatusStream(stream)
+		fmt.Println("Cluster destroyed")
+		return nil
 	},
 }
 
-type statusReceiver interface {
-	Recv() (*pb.ClusterStatus, error)
-}
-
-func printStatusStream(stream statusReceiver) error {
-	for {
-		msg, err := stream.Recv()
-		if err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return grpcError(err)
-		}
-		message, ok := stateMessages[msg.GetState()]
-		if !ok {
-			message = msg.GetState().String()
-		}
-		if m := msg.GetMessage(); m != "" {
-			message += fmt.Sprintf(": %s", m)
-		}
-		if kc := msg.GetKubeconfig(); kc != "" {
-			message += fmt.Sprintf(" (kubeconfig: %s)", kc)
-		}
-		fmt.Println(message)
-	}
-}
-
 func ensureDaemon() error {
-	if _, running := store.IsRunning(appStore.PidPath(), appStore.SocketPath()); running {
+	f, err := os.OpenFile(appPaths.Lock(), os.O_CREATE|os.O_RDONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("opening lock file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		return fmt.Errorf("acquiring lock: %w", err)
+	}
+	defer func() { _ = unix.Flock(int(f.Fd()), unix.LOCK_UN) }()
+
+	if _, running := daemon.IsRunning(appFs, appPaths.Pid(), appPaths.Socket()); running {
 		return nil
 	}
 
@@ -134,8 +123,8 @@ func ensureDaemon() error {
 		return fmt.Errorf("could not start daemon: %w", err)
 	}
 
-	sock := appStore.SocketPath()
-	for range 30 {
+	sock := appPaths.Socket()
+	for range 600 {
 		if _, err := os.Stat(sock); err == nil {
 			return nil
 		}
@@ -148,7 +137,7 @@ func daemonClient() (pb.DaemonClient, *grpc.ClientConn, error) {
 	if err := ensureDaemon(); err != nil {
 		return nil, nil, err
 	}
-	return daemon.NewClient(appStore)
+	return daemon.NewClient(appPaths.Socket())
 }
 
 func grpcError(err error) error {
@@ -199,12 +188,10 @@ var clusterKubeconfigCmd = &cobra.Command{
 
 func init() {
 	clusterCreateCmd.Flags().StringVar(&clusterProvider, "provider", "kwok", "cluster provider (kwok, kind)")
-	clusterCreateCmd.Flags().StringVar(&clusterImage, "image", "", "release image to deploy CRDs and resources from")
-	clusterCreateCmd.Flags().StringVar(&clusterPullSecret, "pull-secret", "", "path to pull secret for the release image")
-	clusterCreateCmd.Flags().StringVar(&clusterFeatureSet, "feature-set", "", "feature set for manifest filtering (Default, TechPreviewNoUpgrade)")
-	clusterCreateCmd.Flags().StringSliceVar(&clusterIncludes, "include", nil, "regex patterns for non-CRD manifests to include")
-	clusterCreateCmd.Flags().Int32Var(&clusterWorkers, "workers", 1, "number of worker nodes (kind provider only)")
-	clusterCreateCmd.Flags().StringVar(&clusterRuntime, "runtime", "podman", "container runtime for kwok provider (process, podman)")
+	clusterCreateCmd.Flags().StringVar(&clusterPullSecret, "pull-secret", "", "path to pull secret")
+	clusterCreateCmd.Flags().IntVar(&clusterWorkers, "workers", 1, "number of worker nodes")
+	clusterCreateCmd.Flags().StringVar(&clusterImage, "image", "", "release image to deploy operators from")
+	clusterCreateCmd.Flags().StringVar(&clusterFeatureSet, "feature-set", "", "feature set (Default, TechPreviewNoUpgrade)")
 	clusterKubeconfigCmd.Flags().BoolVar(&kubeconfigOutput, "output", false, "print kubeconfig content instead of path")
 	clusterCmd.AddCommand(clusterCreateCmd)
 	clusterCmd.AddCommand(clusterDestroyCmd)

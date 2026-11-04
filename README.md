@@ -6,7 +6,7 @@ Lightweight tool for creating simulated Kubernetes clusters using [kwok](https:/
 
 ## Prerequisites
 
-- Go 1.22+
+- Go 1.26+
 - podman (rootless)
 - kwokctl is downloaded automatically on first use
 
@@ -52,10 +52,7 @@ There are two providers: **kwok** (lightweight, simulated control plane) and **k
 
 ```bash
 ./bin/kit cluster create test-cluster \
-  --provider kwok \
-  --image registry.ci.openshift.org/ocp/release-5:5.1.0-0.nightly-2026-09-28-053718 \
-  --pull-secret ~/mco-dev/pull-secret \
-  --include machine-config
+  --pull-secret ~/mco-dev/pull-secret
 ```
 
 #### kind
@@ -63,10 +60,41 @@ There are two providers: **kwok** (lightweight, simulated control plane) and **k
 ```bash
 ./bin/kit cluster create test-cluster \
   --provider kind \
-  --image registry.ci.openshift.org/ocp/release-5:5.1.0-0.nightly-2026-09-28-053718 \
   --pull-secret ~/mco-dev/pull-secret \
-  --include machine-config \
   --workers 2
+```
+
+### Deploying operators
+
+Operator deployment is driven by `KitCluster` spec and `DeploymentPlan` resources. After creating a cluster, patch the `KitCluster` with the release image and feature set, then apply a `DeploymentPlan`:
+
+```bash
+export KUBECONFIG=$(./bin/kit cluster kubeconfig test-cluster)
+
+oc patch kitcluster test-cluster --type merge -p \
+  '{"spec":{"image":"registry.ci.openshift.org/ocp/release-5:5.1.0-0.nightly-2026-10-21-040310", "featureSet":"TechPreviewNoUpgrade"}}'
+
+oc apply -f deploymentplan.yaml
+```
+
+A `DeploymentPlan` declares an ordered sequence of steps. Each step is either a `ResourceCollection` (rendered templates) or a set of manifests filtered from the release image:
+
+```yaml
+apiVersion: kit.openshift.io/v1alpha1
+kind: DeploymentPlan
+metadata:
+  name: mco-deployment
+spec:
+  steps:
+    - name: default-collection
+      collection:
+        source: openshift-default
+    - name: mco-collection
+      collection:
+        source: openshift-mco
+    - name: machine-config-operator
+      release:
+        filenameRegex: machine-config
 ```
 
 ### Interacting with the cluster
@@ -80,7 +108,7 @@ kubectl logs -n openshift-machine-config-operator <pod-name>
 ### Destroying a cluster
 
 ```bash
-./bin/kit cluster destroy test-cluster --provider kwok
+./bin/kit cluster destroy test-cluster
 ```
 
 ## Architecture
@@ -89,4 +117,6 @@ kubectl logs -n openshift-machine-config-operator <pod-name>
 - **kit controller** watches for pods claimed by kwok fake nodes and starts real containers for them via podman.
 - **Service DNS** is provided by podman's aardvark-dns: each pod gets `--network-alias` entries matching Kubernetes service DNS conventions (`<svc>.<ns>.svc.cluster.local`).
 - **Volume materialization**: Secrets and ConfigMaps are fetched from the API and bind-mounted into containers.
-- **SecretProvisioner**: a PoC controller that watches workloads and auto-generates TLS secrets for missing secret volume references.
+- **Service certificates**: a controller-runtime reconciler watches Services with the `service.beta.openshift.io/serving-cert-secret-name` annotation and auto-generates TLS secrets, replicating the OpenShift service-ca-operator behavior.
+- **DeploymentPlan**: an ordered pipeline of collection and release steps with automatic retry on failure.
+- **ResourceCollection**: templated Kubernetes manifests with cert helper functions, rendered and applied by the collection reconciler.

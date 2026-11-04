@@ -1,0 +1,36 @@
+apiVersion: kit.openshift.io/v1alpha1
+kind: ResourceCollection
+metadata:
+  name: openshift-default
+spec:
+  source: openshift-default
+  values:
+    clusterProfile: self-managed-high-availability
+    serviceNetwork:
+      - "10.128.0.0/14"
+  statusPatches:
+    - kind: Infrastructure
+      name: cluster
+      status:
+        platform: cluster.platform
+        platformStatus:
+          type: cluster.platform
+        apiServerInternalURI: cluster.apiServerURL
+    - kind: ClusterVersion
+      name: version
+      status:
+        desired:
+          image: cluster.image
+          version: cluster.version
+        history: "[{'state': 'Completed', 'version': cluster.version, 'image': cluster.image, 'verified': false, 'startedTime': '2024-01-01T00:00:00Z', 'completionTime': '2024-01-01T00:00:00Z'}]"
+        observedGeneration: "0"
+        versionHash: "''"
+        availableUpdates: "[]"
+    - kind: FeatureGate
+      name: cluster
+      status: >
+        findReleaseByProfile(release, 'FeatureGate', 'cluster', cluster.featureSet, values.clusterProfile)
+          .status.merge({
+            'featureGates': findReleaseByProfile(release, 'FeatureGate', 'cluster', cluster.featureSet, values.clusterProfile)
+              .status.featureGates.map(g, g.merge({'version': cluster.version}))
+          })

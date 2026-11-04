@@ -9,11 +9,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/cluster"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/daemon"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/kind"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/kwok"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/store"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/cluster"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/daemon"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/provider/kind"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/provider/kwok"
 	"github.com/spf13/cobra"
 )
 
@@ -23,7 +22,7 @@ var startCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Start the daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if pid, running := store.IsRunning(appStore.PidPath(), appStore.SocketPath()); running {
+		if pid, running := daemon.IsRunning(appFs, appPaths.Pid(), appPaths.Socket()); running {
 			return fmt.Errorf("already running (pid %d)", pid)
 		}
 
@@ -38,7 +37,7 @@ var startCmd = &cobra.Command{
 					return kind.NewProvider(ctx, appStore, log.With("module", "kind"))
 				},
 			}
-			return daemon.Run(ctx, appStore, factories, true)
+			return daemon.Start(ctx, appPaths, appStore, factories)
 		}
 		return runBackground()
 	},

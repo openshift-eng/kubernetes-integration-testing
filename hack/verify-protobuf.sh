@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-PROTO_DIR="api/proto"
+PROTO_DIR="api/grpc"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TMP_DIR}"' EXIT
 

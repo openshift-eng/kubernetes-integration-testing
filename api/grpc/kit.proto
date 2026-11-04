@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package kit;
+
+option go_package = "github.com/openshift-eng/kubernetes-integration-testing/api/grpc";
+
+service Daemon {
+  rpc CreateCluster(CreateClusterRequest) returns (CreateClusterResponse);
+  rpc DestroyCluster(DestroyClusterRequest) returns (DestroyClusterResponse);
+  rpc GetClusterKubeConfig(GetClusterKubeConfigRequest) returns (GetClusterKubeConfigResponse);
+}
+
+message CreateClusterRequest {
+  bytes manifest = 1;
+  string pull_secret = 2;
+}
+
+message CreateClusterResponse {
+  string kubeconfig = 1;
+}
+
+message DestroyClusterRequest {
+  string name = 1;
+}
+
+message DestroyClusterResponse {}
+
+message GetClusterKubeConfigRequest {
+  string name = 1;
+  bool content = 2;
+}
+
+message GetClusterKubeConfigResponse {
+  string path = 1;
+  string content = 2;
+}
