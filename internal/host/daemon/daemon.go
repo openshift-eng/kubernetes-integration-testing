@@ -54,8 +54,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 	if err := os.Chmod(sockPath, 0o600); err != nil {
-		lis.Close()
-		return fmt.Errorf("restricting socket permissions: %w", err)
+		return errors.Join(fmt.Errorf("restricting socket permissions: %w", err), lis.Close())
 	}
 	defer func() {
 		if err := d.fs.Remove(sockPath); err != nil {
