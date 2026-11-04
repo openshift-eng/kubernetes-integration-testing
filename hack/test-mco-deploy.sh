@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PULL_SECRET="${PULL_SECRET:-$HOME/mco-dev/pull-secret}"
-RELEASE_IMAGE="registry.ci.openshift.org/ocp/release-5:5.1.0-0.nightly-2026-10-21-040310"
+RELEASE_IMAGE="quay.io/openshift-release-dev/ocp-release:5.0.0-x86_64"
 CLUSTER_NAME="test-cluster"
 
 echo "=== Building ==="
