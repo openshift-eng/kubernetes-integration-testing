@@ -18,7 +18,10 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
 )
+
+const podWorkers = 10
 
 var logsGVR = schema.GroupVersionResource{
 	Group:    "kwok.x-k8s.io",
@@ -26,17 +29,35 @@ var logsGVR = schema.GroupVersionResource{
 	Resource: "logs",
 }
 
+type podRoute int
+
+const (
+	podRouteIgnore podRoute = iota
+	podRouteNoOp
+	podRouteRunner
+)
+
+func routePod(pod *corev1.Pod) podRoute {
+	if pod.Spec.NodeName == "" {
+		return podRouteIgnore
+	}
+	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+		return podRouteIgnore
+	}
+	if override.IsNoOp(pod) {
+		return podRouteNoOp
+	}
+	return podRouteRunner
+}
+
 type Controller struct {
 	runner     PodRunner
 	log        *slog.Logger
 	clientset  kubernetes.Interface
 	dynClient  dynamic.Interface
+	queue      workqueue.TypedRateLimitingInterface[string]
 	restartsMu sync.Mutex
 	restarts   map[string]int
-	// claimed tracks pod UIDs for which RunPod is already in progress,
-	// preventing duplicate goroutines from concurrent informer events.
-	claimedMu sync.Mutex
-	claimed   map[string]bool
 }
 
 func NewController(clients *kube.Clients, runner PodRunner, log *slog.Logger) *Controller {
@@ -45,93 +66,184 @@ func NewController(clients *kube.Clients, runner PodRunner, log *slog.Logger) *C
 		log:       log,
 		clientset: clients.Clientset,
 		dynClient: clients.Dynamic,
+		queue:     workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
 		restarts:  make(map[string]int),
-		claimed:   make(map[string]bool),
 	}
 }
 
 func (c *Controller) Run(ctx context.Context) error {
+	defer c.queue.ShutDown()
+
 	go c.processStateChanges(ctx, c.runner.Changes())
 
 	factory := informers.NewSharedInformerFactory(c.clientset, 0)
 	podInformer := factory.Core().V1().Pods().Informer()
 
 	_, _ = podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			if pod, ok := obj.(*corev1.Pod); ok {
-				c.handlePod(ctx, pod)
+		AddFunc: c.enqueue,
+		// Only enqueue updates for spec-level transitions this controller
+		// cares about. Status-only updates (from kit itself, Kwok Stages,
+		// or setPodWaiting) must not re-enqueue: they bypass the workqueue's
+		// rate-limited backoff and cause a feedback loop. Future predicates
+		// (e.g. podBecameTerminal for Podman cleanup) can be OR'd here.
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			oldPod, okOld := oldObj.(*corev1.Pod)
+			newPod, okNew := newObj.(*corev1.Pod)
+			if !okOld || !okNew {
+				return
+			}
+			if podBecameScheduled(oldPod, newPod) {
+				c.enqueue(newObj)
 			}
 		},
-		UpdateFunc: func(_, newObj interface{}) {
-			if pod, ok := newObj.(*corev1.Pod); ok {
-				c.handlePod(ctx, pod)
-			}
-		},
-		DeleteFunc: func(obj interface{}) {
-			pod, ok := obj.(*corev1.Pod)
-			if !ok {
-				if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
-					pod, _ = tombstone.Obj.(*corev1.Pod)
-				}
-			}
-			if pod != nil {
-				uid := string(pod.UID)
-				c.claimedMu.Lock()
-				delete(c.claimed, uid)
-				c.claimedMu.Unlock()
-				c.runner.StopPod(uid)
-			}
-		},
+		DeleteFunc: c.handleDelete,
 	})
 
 	factory.Start(ctx.Done())
 	factory.WaitForCacheSync(ctx.Done())
 
+	for i := 0; i < podWorkers; i++ {
+		go c.runWorker(ctx)
+	}
+
 	<-ctx.Done()
 	return nil
 }
 
-func (c *Controller) handlePod(ctx context.Context, pod *corev1.Pod) {
-	if pod.Spec.NodeName == "" {
-		return
-	}
-	if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
-		return
-	}
-
-	uid := string(pod.UID)
-	c.claimedMu.Lock()
-	if c.claimed[uid] {
-		c.claimedMu.Unlock()
-		return
-	}
-	c.claimed[uid] = true
-	c.claimedMu.Unlock()
-
-	pod = pod.DeepCopy()
-
-	if override.IsNoOp(pod) {
-		go c.setNoOpStatus(ctx, pod)
+func (c *Controller) handleDelete(obj interface{}) {
+	pod := podFromDelete(obj)
+	if pod == nil {
 		return
 	}
 
-	go func() {
-		if err := c.runner.RunPod(ctx, pod); err != nil {
-			c.log.Error("failed to run pod", "pod", pod.Name, "namespace", pod.Namespace, "error", err)
+	if key, err := cache.MetaNamespaceKeyFunc(pod); err == nil {
+		c.queue.Forget(key)
+	}
 
-			c.claimedMu.Lock()
-			delete(c.claimed, uid)
-			c.claimedMu.Unlock()
-
-			c.setPodWaiting(pod, err)
-		}
-	}()
+	c.clearRestartCounts(pod)
+	c.runner.StopPod(string(pod.UID))
 }
 
-func (c *Controller) unclaimPod(uid string) {
-	c.claimedMu.Lock()
-	delete(c.claimed, uid)
-	c.claimedMu.Unlock()
+func podFromDelete(obj interface{}) *corev1.Pod {
+	if pod, ok := obj.(*corev1.Pod); ok {
+		return pod
+	}
+	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+		if pod, ok := tombstone.Obj.(*corev1.Pod); ok {
+			return pod
+		}
+	}
+	return nil
+}
+
+func (c *Controller) clearRestartCounts(pod *corev1.Pod) {
+	uid := string(pod.UID)
+	c.restartsMu.Lock()
+	defer c.restartsMu.Unlock()
+	for _, container := range pod.Spec.Containers {
+		delete(c.restarts, processKey(uid, container.Name))
+	}
+}
+
+func podBecameScheduled(oldPod, newPod *corev1.Pod) bool {
+	return oldPod.Spec.NodeName == "" && newPod.Spec.NodeName != ""
+}
+
+func (c *Controller) enqueue(obj interface{}) {
+	key, err := cache.MetaNamespaceKeyFunc(obj)
+	if err != nil {
+		return
+	}
+	c.queue.Add(key)
+}
+
+func (c *Controller) runWorker(ctx context.Context) {
+	for c.processNextItem(ctx) {
+	}
+}
+
+func (c *Controller) processNextItem(ctx context.Context) bool {
+	key, shutdown := c.queue.Get()
+	if shutdown {
+		return false
+	}
+	defer c.queue.Done(key)
+
+	if err := c.reconcile(ctx, key); err != nil {
+		c.queue.AddRateLimited(key)
+		return true
+	}
+
+	c.queue.Forget(key)
+	return true
+}
+
+func (c *Controller) reconcile(ctx context.Context, key string) error {
+	namespace, name, err := cache.SplitMetaNamespaceKey(key)
+	if err != nil {
+		return nil
+	}
+
+	pod, err := c.clientset.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+
+	switch routePod(pod) {
+	case podRouteNoOp:
+		return c.reconcileNoOpStatus(ctx, pod)
+	case podRouteRunner:
+		return c.reconcileRunnerPod(ctx, pod)
+	}
+	return nil
+}
+
+func (c *Controller) reconcileRunnerPod(ctx context.Context, pod *corev1.Pod) error {
+	if err := c.runner.RunPod(ctx, pod); err != nil {
+		c.log.Error("failed to run pod", "pod", pod.Name, "namespace", pod.Namespace, "error", err)
+		c.setPodWaiting(pod, err)
+		return err
+	}
+	return nil
+}
+
+func (c *Controller) reconcileNoOpStatus(ctx context.Context, pod *corev1.Pod) error {
+	if !noOpStatusSeedable(pod) {
+		return nil
+	}
+
+	applyNoOpStatus(pod, time.Now())
+
+	_, err := c.clientset.CoreV1().Pods(pod.Namespace).UpdateStatus(ctx, pod, metav1.UpdateOptions{})
+	if err != nil {
+		c.log.Warn("failed to set no-op pod status", "pod", pod.Name, "namespace", pod.Namespace, "error", err)
+		return err
+	}
+
+	c.log.Info("set no-op pod status", "pod", pod.Name, "namespace", pod.Namespace)
+	return nil
+}
+
+func applyNoOpStatus(pod *corev1.Pod, now time.Time) {
+	t := metav1.NewTime(now)
+	pod.Status.Phase = corev1.PodRunning
+	pod.Status.Conditions = []corev1.PodCondition{
+		{Type: corev1.PodScheduled, Status: corev1.ConditionTrue, LastTransitionTime: t},
+		{Type: corev1.PodInitialized, Status: corev1.ConditionTrue, LastTransitionTime: t},
+		{Type: corev1.ContainersReady, Status: corev1.ConditionTrue, LastTransitionTime: t},
+		{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: t},
+	}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:  override.NoOpContainerName,
+		Image: override.NoOpImage,
+		Ready: true,
+		State: corev1.ContainerState{
+			Running: &corev1.ContainerStateRunning{StartedAt: t},
+		},
+	}}
 }
 
 func (c *Controller) processStateChanges(ctx context.Context, changes <-chan ContainerStateChange) {
@@ -209,20 +321,8 @@ func (c *Controller) onStateChange(ctx context.Context, change ContainerStateCha
 			backoff := restartBackoff(count)
 			c.log.Info("scheduling restart", "pod", change.PodName, "namespace", change.Namespace, "container", change.Container, "attempt", count, "backoff", backoff)
 
-			go func() {
-				select {
-				case <-time.After(backoff):
-				case <-ctx.Done():
-					return
-				}
-				pod, err := c.clientset.CoreV1().Pods(change.Namespace).Get(ctx, change.PodName, metav1.GetOptions{})
-				if err != nil {
-					return
-				}
-				if err := c.runner.RunPod(ctx, pod); err != nil {
-					c.log.Error("failed to restart pod", "pod", pod.Name, "namespace", pod.Namespace, "attempt", count, "error", err)
-				}
-			}()
+			queueKey, _ := cache.MetaNamespaceKeyFunc(pod)
+			c.queue.AddAfter(queueKey, backoff)
 		} else {
 			setContainerStatus(pod, change.Container, corev1.ContainerStatus{
 				Name:  change.Container,
@@ -381,75 +481,6 @@ func (c *Controller) ensureLogsResource(ctx context.Context, pod *corev1.Pod, co
 	}
 }
 
-const noOpStatusMaxRetries = 3
-
-func (c *Controller) setNoOpStatus(ctx context.Context, pod *corev1.Pod) {
-	uid := pod.UID
-
-	for attempt := 0; attempt < noOpStatusMaxRetries; attempt++ {
-		latest, err := c.clientset.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
-		if err != nil {
-			if isTransientError(err) && attempt < noOpStatusMaxRetries-1 {
-				c.log.Info("transient error getting pod for no-op status, retrying", "pod", pod.Name, "namespace", pod.Namespace, "error", err, "attempt", attempt+1)
-				continue
-			}
-			c.log.Warn("failed to get pod for no-op status", "pod", pod.Name, "namespace", pod.Namespace, "error", err)
-			c.unclaimPod(string(uid))
-			return
-		}
-
-		if latest.UID != uid {
-			c.unclaimPod(string(uid))
-			return
-		}
-
-		if !override.IsNoOp(latest) {
-			c.unclaimPod(string(uid))
-			return
-		}
-
-		if !noOpStatusSeedable(latest) {
-			c.log.Info("no-op pod status already populated, yielding", "pod", pod.Name, "namespace", pod.Namespace)
-			return
-		}
-
-		now := metav1.NewTime(time.Now())
-		latest.Status.Phase = corev1.PodRunning
-		latest.Status.Conditions = []corev1.PodCondition{
-			{Type: corev1.PodScheduled, Status: corev1.ConditionTrue, LastTransitionTime: now},
-			{Type: corev1.PodInitialized, Status: corev1.ConditionTrue, LastTransitionTime: now},
-			{Type: corev1.ContainersReady, Status: corev1.ConditionTrue, LastTransitionTime: now},
-			{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: now},
-		}
-		latest.Status.ContainerStatuses = []corev1.ContainerStatus{{
-			Name:  override.NoOpContainerName,
-			Image: override.NoOpImage,
-			Ready: true,
-			State: corev1.ContainerState{
-				Running: &corev1.ContainerStateRunning{StartedAt: now},
-			},
-		}}
-
-		_, err = c.clientset.CoreV1().Pods(pod.Namespace).UpdateStatus(ctx, latest, metav1.UpdateOptions{})
-		if err == nil {
-			c.log.Info("set no-op pod status", "pod", pod.Name, "namespace", pod.Namespace)
-			return
-		}
-
-		if apierrors.IsConflict(err) || isTransientError(err) {
-			c.log.Info("no-op status write failed, retrying", "pod", pod.Name, "namespace", pod.Namespace, "error", err, "attempt", attempt+1)
-			continue
-		}
-
-		c.log.Warn("failed to set no-op pod status", "pod", pod.Name, "namespace", pod.Namespace, "error", err)
-		c.unclaimPod(string(uid))
-		return
-	}
-
-	c.log.Warn("no-op status retries exhausted", "pod", pod.Name, "namespace", pod.Namespace)
-	c.unclaimPod(string(uid))
-}
-
 // noOpStatusSeedable returns true if the pod status has not been populated by
 // another controller (e.g. a Kwok Stage). Seedable means the status is still
 // in its initial empty/Pending form with no evidence of another writer:
@@ -484,12 +515,6 @@ func noOpStatusSeedable(pod *corev1.Pod) bool {
 		}
 	}
 	return true
-}
-
-func isTransientError(err error) bool {
-	return apierrors.IsServerTimeout(err) ||
-		apierrors.IsTimeout(err) ||
-		apierrors.IsTooManyRequests(err)
 }
 
 func (c *Controller) setPodWaiting(pod *corev1.Pod, reason error) {
