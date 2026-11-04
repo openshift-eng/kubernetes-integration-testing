@@ -11,6 +11,7 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/bootstrap"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/cert"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/common"
+	kitwebhook "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/webhook"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/image"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/release"
@@ -19,11 +20,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
-func Start(ctx context.Context, log *slog.Logger, bd *bootstrap.BootstrapData, clients *kube.Clients, kubeConfig *kube.KubeConfig, cacheDir, collectionsDir string, registry *image.Registry, certProvider *cert.Provider, shutdowner common.Shutdowner) error {
+func Start(ctx context.Context, log *slog.Logger, bd *bootstrap.BootstrapData, clients *kube.Clients, cfg common.Config, registry *image.Registry, certProvider *cert.Provider, shutdowner common.Shutdowner) error {
 	ctrl.SetLogger(logr.FromSlogHandler(log.Handler()))
 
 	installer := NewManifestInstaller(
@@ -41,23 +43,42 @@ func Start(ctx context.Context, log *slog.Logger, bd *bootstrap.BootstrapData, c
 	}
 
 	mgr, err := ctrl.NewManager(clients.REST, ctrl.Options{
-		Scheme:     kube.Scheme,
-		Metrics:    metricsserver.Options{BindAddress: "0"},
-		Controller: config.Controller{SkipNameValidation: ptr.To(true)},
+		Scheme:                 kube.Scheme,
+		Metrics:                metricsserver.Options{BindAddress: "0"},
+		HealthProbeBindAddress: "127.0.0.1:8081",
+		Controller:             config.Controller{SkipNameValidation: ptr.To(true)},
 	})
 	if err != nil {
 		return fmt.Errorf("creating controller manager: %w", err)
 	}
 
-	if err := setupReconcilers(ctx, mgr, clients, kubeConfig, bd, cacheDir, collectionsDir, registry, certProvider, shutdowner, log); err != nil {
+	if err := setupReconcilers(ctx, mgr, clients, cfg, bd, registry, certProvider, shutdowner, log); err != nil {
 		return err
+	}
+
+	wh, err := kitwebhook.NewConfigurer(mgr, clients, cfg.ContainerName, certProvider, log)
+	if err != nil {
+		return fmt.Errorf("configuring webhook: %w", err)
+	}
+
+	if err := mgr.AddReadyzCheck("workload-overrides", wh.Ready); err != nil {
+		return fmt.Errorf("adding readyz check: %w", err)
+	}
+
+	if err := wh.EnsureConfiguration(ctx); err != nil {
+		return fmt.Errorf("installing webhook configuration: %w", err)
 	}
 
 	go func() {
 		if err := mgr.Start(ctx); err != nil && ctx.Err() == nil {
-			log.Error("controller manager stopped unexpectedly", "error", err)
+			log.Error("controller manager stopped unexpectedly, shutting down", "error", err)
+			shutdowner.Shutdown()
 		}
 	}()
+
+	if err := wh.WaitReady(ctx); err != nil {
+		return fmt.Errorf("waiting for webhook server: %w", err)
+	}
 
 	log.Info("started controller manager")
 	return nil
@@ -71,25 +92,9 @@ func ensureBootstrapResources(ctx context.Context, clients *kube.Clients, bd *bo
 	return nil
 }
 
-func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clients, kubeConfig *kube.KubeConfig, bd *bootstrap.BootstrapData, cacheDir, collectionsDir string, registry *image.Registry, certProvider *cert.Provider, shutdowner common.Shutdowner, log *slog.Logger) error {
+func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clients, cfg common.Config, bd *bootstrap.BootstrapData, registry *image.Registry, certProvider *cert.Provider, shutdowner common.Shutdowner, log *slog.Logger) error {
 	rel := release.NewReleaseManifests(registry, log)
 	crdMgr := NewCRDManager(clients.Extensions.ApiextensionsV1().CustomResourceDefinitions(), log)
-
-	// TODO: propagate context through Provider (requires adding ctx to getOrCreateCA, public methods, and FuncMap)
-	certProvider.OnNewCA = func(name string, ca *cert.CA) {
-		cr := &v1alpha1.CertificateAuthority{
-			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Spec: v1alpha1.CertificateAuthoritySpec{
-				CommonName: ca.Cert.Subject.CommonName,
-				Validity:   metav1.Duration{Duration: ca.Cert.NotAfter.Sub(ca.Cert.NotBefore)},
-			},
-		}
-		if err := mgr.GetClient().Create(context.Background(), cr); err != nil && !apierrors.IsAlreadyExists(err) {
-			log.Error("creating CertificateAuthority CR from provider callback", "ca", name, "error", err)
-		} else {
-			log.Info("created CertificateAuthority CR from provider callback", "ca", name)
-		}
-	}
 
 	reconcilers := []struct {
 		name  string
@@ -101,7 +106,7 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 				crdManager:           crdMgr,
 				release:              rel,
 				apiServerURL:         clients.REST.Host,
-				apiServerExternalURL: kubeConfig.OriginalServerURL(),
+				apiServerExternalURL: cfg.KubeConfig.OriginalServerURL(),
 				shutdowner:           shutdowner,
 				log:                  log,
 			}).SetupWithManager(mgr, bd.KitCluster.Name)
@@ -112,7 +117,7 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 				dynClient:      clients.Dynamic,
 				discovery:      clients.Discovery,
 				release:        rel,
-				collectionsDir: collectionsDir,
+				collectionsDir: cfg.CollectionsDir,
 				pullSecret:     string(bd.PullSecret),
 				certProvider:   certProvider,
 				log:            log,
@@ -153,4 +158,22 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 		}
 	}
 	return nil
+}
+
+// TODO: propagate context through Provider (requires adding ctx to getOrCreateCA, public methods, and FuncMap)
+func NewCACallback(c client.Client, log *slog.Logger) func(string, *cert.CA) {
+	return func(name string, ca *cert.CA) {
+		cr := &v1alpha1.CertificateAuthority{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: v1alpha1.CertificateAuthoritySpec{
+				CommonName: ca.Cert.Subject.CommonName,
+				Validity:   metav1.Duration{Duration: ca.Cert.NotAfter.Sub(ca.Cert.NotBefore)},
+			},
+		}
+		if err := c.Create(context.Background(), cr); err != nil && !apierrors.IsAlreadyExists(err) {
+			log.Error("creating CertificateAuthority CR from provider callback", "ca", name, "error", err)
+		} else {
+			log.Info("created CertificateAuthority CR from provider callback", "ca", name)
+		}
+	}
 }

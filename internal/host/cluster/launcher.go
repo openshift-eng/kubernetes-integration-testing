@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/podman"
@@ -35,7 +36,8 @@ func (l *PodmanControllerLauncher) Launch(ctx context.Context, name string, c Cl
 	}
 
 	env := map[string]string{
-		"KIT_KUBECONFIG": "/run/kit/kubeconfig",
+		"KIT_KUBECONFIG":     "/run/kit/kubeconfig",
+		"KIT_CONTAINER_NAME": containerName,
 	}
 	mounts := []podman.Mount{
 		{Source: c.KubeConfig(), Target: "/run/kit/kubeconfig", Options: "ro,z"},
@@ -82,6 +84,7 @@ func (l *PodmanControllerLauncher) Launch(ctx context.Context, name string, c Cl
 		Detach:    true,
 		Replace:   true,
 		LogDriver: "journald",
+		HealthCmd: "curl -fsS --max-time 2 http://127.0.0.1:8081/readyz",
 	}
 	if cfg.Provider == "kwok" {
 		runOpts.SecurityOpt = []string{"label=disable"}
@@ -102,6 +105,27 @@ func (l *PodmanControllerLauncher) Launch(ctx context.Context, name string, c Cl
 	}
 
 	return stop, nil
+}
+
+const controllerHealthTimeout = 2 * time.Minute
+
+func (l *PodmanControllerLauncher) WaitHealthy(ctx context.Context, name string) error {
+	containerName := "kit-controller-" + name
+	ctx, cancel := context.WithTimeout(ctx, controllerHealthTimeout)
+	defer cancel()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := l.client.HealthCheckRun(ctx, containerName); err == nil {
+			l.log.Info("controller healthy", "name", containerName)
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("controller %s did not become healthy within %s", containerName, controllerHealthTimeout)
+		case <-ticker.C:
+		}
+	}
 }
 
 func podmanSocketPath() string {

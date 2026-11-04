@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/workload/override"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -107,6 +109,12 @@ func (c *Controller) handlePod(ctx context.Context, pod *corev1.Pod) {
 	c.claimedMu.Unlock()
 
 	pod = pod.DeepCopy()
+
+	if override.IsNoOp(pod) {
+		go c.setNoOpStatus(ctx, pod)
+		return
+	}
+
 	go func() {
 		if err := c.runner.RunPod(ctx, pod); err != nil {
 			c.log.Error("failed to run pod", "pod", pod.Name, "namespace", pod.Namespace, "error", err)
@@ -118,6 +126,12 @@ func (c *Controller) handlePod(ctx context.Context, pod *corev1.Pod) {
 			c.setPodWaiting(pod, err)
 		}
 	}()
+}
+
+func (c *Controller) unclaimPod(uid string) {
+	c.claimedMu.Lock()
+	delete(c.claimed, uid)
+	c.claimedMu.Unlock()
 }
 
 func (c *Controller) processStateChanges(ctx context.Context, changes <-chan ContainerStateChange) {
@@ -365,6 +379,117 @@ func (c *Controller) ensureLogsResource(ctx context.Context, pod *corev1.Pod, co
 	if _, err := res.Create(ctx, obj, metav1.CreateOptions{}); err != nil {
 		c.log.Warn("failed to create Logs resource", "pod", pod.Name, "namespace", pod.Namespace, "error", err)
 	}
+}
+
+const noOpStatusMaxRetries = 3
+
+func (c *Controller) setNoOpStatus(ctx context.Context, pod *corev1.Pod) {
+	uid := pod.UID
+
+	for attempt := 0; attempt < noOpStatusMaxRetries; attempt++ {
+		latest, err := c.clientset.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+		if err != nil {
+			if isTransientError(err) && attempt < noOpStatusMaxRetries-1 {
+				c.log.Info("transient error getting pod for no-op status, retrying", "pod", pod.Name, "namespace", pod.Namespace, "error", err, "attempt", attempt+1)
+				continue
+			}
+			c.log.Warn("failed to get pod for no-op status", "pod", pod.Name, "namespace", pod.Namespace, "error", err)
+			c.unclaimPod(string(uid))
+			return
+		}
+
+		if latest.UID != uid {
+			c.unclaimPod(string(uid))
+			return
+		}
+
+		if !override.IsNoOp(latest) {
+			c.unclaimPod(string(uid))
+			return
+		}
+
+		if !noOpStatusSeedable(latest) {
+			c.log.Info("no-op pod status already populated, yielding", "pod", pod.Name, "namespace", pod.Namespace)
+			return
+		}
+
+		now := metav1.NewTime(time.Now())
+		latest.Status.Phase = corev1.PodRunning
+		latest.Status.Conditions = []corev1.PodCondition{
+			{Type: corev1.PodScheduled, Status: corev1.ConditionTrue, LastTransitionTime: now},
+			{Type: corev1.PodInitialized, Status: corev1.ConditionTrue, LastTransitionTime: now},
+			{Type: corev1.ContainersReady, Status: corev1.ConditionTrue, LastTransitionTime: now},
+			{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: now},
+		}
+		latest.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:  override.NoOpContainerName,
+			Image: override.NoOpImage,
+			Ready: true,
+			State: corev1.ContainerState{
+				Running: &corev1.ContainerStateRunning{StartedAt: now},
+			},
+		}}
+
+		_, err = c.clientset.CoreV1().Pods(pod.Namespace).UpdateStatus(ctx, latest, metav1.UpdateOptions{})
+		if err == nil {
+			c.log.Info("set no-op pod status", "pod", pod.Name, "namespace", pod.Namespace)
+			return
+		}
+
+		if apierrors.IsConflict(err) || isTransientError(err) {
+			c.log.Info("no-op status write failed, retrying", "pod", pod.Name, "namespace", pod.Namespace, "error", err, "attempt", attempt+1)
+			continue
+		}
+
+		c.log.Warn("failed to set no-op pod status", "pod", pod.Name, "namespace", pod.Namespace, "error", err)
+		c.unclaimPod(string(uid))
+		return
+	}
+
+	c.log.Warn("no-op status retries exhausted", "pod", pod.Name, "namespace", pod.Namespace)
+	c.unclaimPod(string(uid))
+}
+
+// noOpStatusSeedable returns true if the pod status has not been populated by
+// another controller (e.g. a Kwok Stage). Seedable means the status is still
+// in its initial empty/Pending form with no evidence of another writer:
+// phase empty or Pending, no startTime, no container/init/ephemeral statuses,
+// no networking fields, no reason/message, and at most one condition which must
+// be PodScheduled=True.
+func noOpStatusSeedable(pod *corev1.Pod) bool {
+	if pod.Status.Phase != "" && pod.Status.Phase != corev1.PodPending {
+		return false
+	}
+	if pod.Status.StartTime != nil {
+		return false
+	}
+	if len(pod.Status.ContainerStatuses) > 0 ||
+		len(pod.Status.InitContainerStatuses) > 0 ||
+		len(pod.Status.EphemeralContainerStatuses) > 0 {
+		return false
+	}
+	if pod.Status.PodIP != "" || pod.Status.HostIP != "" || len(pod.Status.PodIPs) > 0 {
+		return false
+	}
+	if pod.Status.Reason != "" || pod.Status.Message != "" {
+		return false
+	}
+	if len(pod.Status.Conditions) > 1 {
+		return false
+	}
+	if len(pod.Status.Conditions) == 1 {
+		c := pod.Status.Conditions[0]
+		if c.Type != corev1.PodScheduled || c.Status != corev1.ConditionTrue {
+			return false
+		}
+	}
+	return true
+}
+
+func isTransientError(err error) bool {
+	return apierrors.IsServerTimeout(err) ||
+		apierrors.IsTimeout(err) ||
+		apierrors.IsTooManyRequests(err)
 }
 
 func (c *Controller) setPodWaiting(pod *corev1.Pod, reason error) {

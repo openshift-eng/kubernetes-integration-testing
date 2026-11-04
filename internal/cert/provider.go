@@ -30,15 +30,16 @@ type Provider struct {
 	leafCerts map[string]*LeafCert
 	clientset kubernetes.Interface
 	namespace string
-	OnNewCA   func(name string, ca *CA)
+	onNewCA   func(name string, ca *CA)
 }
 
-func NewProvider(clientset kubernetes.Interface, namespace string) *Provider {
+func NewProvider(clientset kubernetes.Interface, namespace string, onNewCA func(name string, ca *CA)) *Provider {
 	return &Provider{
 		cas:       make(map[string]*CA),
 		leafCerts: make(map[string]*LeafCert),
 		clientset: clientset,
 		namespace: namespace,
+		onNewCA:   onNewCA,
 	}
 }
 
@@ -111,8 +112,8 @@ func (p *Provider) getOrCreateCA(name string) (*CA, error) {
 		return nil, err
 	}
 
-	if p.OnNewCA != nil {
-		p.OnNewCA(name, ca)
+	if p.onNewCA != nil {
+		p.onNewCA(name, ca)
 	}
 
 	p.cas[name] = ca

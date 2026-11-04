@@ -16,7 +16,7 @@ import (
 )
 
 func newTestProvider() *Provider {
-	return NewProvider(fake.NewSimpleClientset(), "test-ns")
+	return NewProvider(fake.NewSimpleClientset(), "test-ns", nil)
 }
 
 func TestProviderCACertAutoGenerates(t *testing.T) {

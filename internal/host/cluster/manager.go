@@ -64,6 +64,11 @@ func (cm *ClusterManager) recover(ctx context.Context) {
 				cm.log.Warn("could not launch controller on recover", "cluster", name, "error", err)
 				continue
 			}
+			if err := cm.launcher.WaitHealthy(ctx, name); err != nil {
+				cm.log.Warn("controller not healthy after recover", "cluster", name, "error", err)
+				stop()
+				continue
+			}
 			cm.mu.Lock()
 			cm.clusters[name] = &managedCluster{Cluster: c, stopController: stop}
 			cm.mu.Unlock()
@@ -143,7 +148,7 @@ func (cm *ClusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 		return nil, errors.Join(fmt.Errorf("launching controller: %w", err), destroyErr)
 	}
 
-	if err := cm.waitForController(ctx, clusterKC, kc.Name); err != nil {
+	if err := cm.launcher.WaitHealthy(ctx, kc.Name); err != nil {
 		stop()
 		destroyErr := p.Destroy(ctx, kc.Name)
 		return nil, errors.Join(fmt.Errorf("waiting for controller readiness: %w", err), destroyErr)
@@ -232,27 +237,6 @@ var kitClusterGVR = schema.GroupVersionResource{
 	Group:    v1alpha1.GroupVersion.Group,
 	Version:  v1alpha1.GroupVersion.Version,
 	Resource: "kitclusters",
-}
-
-func (cm *ClusterManager) waitForController(ctx context.Context, kc *kube.KubeConfig, crName string) error {
-	cfg, err := kc.RestConfig()
-	if err != nil {
-		return fmt.Errorf("building kubeconfig: %w", err)
-	}
-
-	dynClient, err := dynamic.NewForConfig(cfg)
-	if err != nil {
-		return err
-	}
-	if err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
-		_, err := dynClient.Resource(kitClusterGVR).Get(ctx, crName, metav1.GetOptions{})
-		return err == nil, nil
-	}); err != nil {
-		return fmt.Errorf("waiting for KitCluster CR %q: %w", crName, err)
-	}
-
-	cm.log.Info("controller ready", "cluster", crName)
-	return nil
 }
 
 var dnsLabelRegexp = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)

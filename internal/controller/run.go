@@ -16,14 +16,7 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/pullsecret"
 )
 
-type Config struct {
-	KubeConfig     *kube.KubeConfig
-	CacheDir       string
-	CollectionsDir string
-	PodmanSocket   string
-}
-
-func Run(ctx context.Context, log *slog.Logger, cfg Config) error {
+func Run(ctx context.Context, log *slog.Logger, cfg common.Config) error {
 	bd, err := bootstrap.Load(ctx, cfg.KubeConfig)
 	if err != nil {
 		return fmt.Errorf("loading bootstrap config: %w", err)
@@ -44,10 +37,10 @@ func Run(ctx context.Context, log *slog.Logger, cfg Config) error {
 		return fmt.Errorf("creating kube clients: %w", err)
 	}
 
-	certProvider := cert.NewProvider(clients.Clientset, bootstrap.Namespace)
+	certProvider := cert.NewProvider(clients.Clientset, bootstrap.Namespace, reconciler.NewCACallback(clients.Client, log))
 
 	shutdowner := common.NewDeferredShutdowner(ctx)
-	if err := reconciler.Start(shutdowner.Context(), log, bd, clients, cfg.KubeConfig, cfg.CacheDir, cfg.CollectionsDir, registry, certProvider, shutdowner); err != nil {
+	if err := reconciler.Start(shutdowner.Context(), log, bd, clients, cfg, registry, certProvider, shutdowner); err != nil {
 		return fmt.Errorf("starting reconciler: %w", err)
 	}
 
@@ -71,7 +64,7 @@ func Run(ctx context.Context, log *slog.Logger, cfg Config) error {
 	return nil
 }
 
-func runPodController(ctx context.Context, log *slog.Logger, cfg Config, clusterCfg *bootstrap.ClusterConfig, ps *pullsecret.PullSecret, clients *kube.Clients) (pod.PodRunner, error) {
+func runPodController(ctx context.Context, log *slog.Logger, cfg common.Config, clusterCfg *bootstrap.ClusterConfig, ps *pullsecret.PullSecret, clients *kube.Clients) (pod.PodRunner, error) {
 	var podmanClient podman.Client
 	if cfg.PodmanSocket != "" {
 		podmanClient = podman.NewRemoteClient(cfg.PodmanSocket)

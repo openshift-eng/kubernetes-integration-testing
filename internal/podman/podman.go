@@ -14,6 +14,7 @@ type Client interface {
 	Remove(ctx context.Context, name string, force bool) error
 	Wait(ctx context.Context, name string) (int, error)
 	Restart(ctx context.Context, name string) error
+	HealthCheckRun(ctx context.Context, name string) error
 	PodCreate(ctx context.Context, opts PodCreateOpts) (string, error)
 	PodStop(ctx context.Context, name string, timeout int) error
 	PodRemove(ctx context.Context, name string, force bool) error
@@ -42,6 +43,7 @@ type RunOpts struct {
 	LogOpts     map[string]string
 	AuthFile    string
 	SecurityOpt []string
+	HealthCmd   string
 }
 
 type PodCreateOpts struct {
@@ -137,6 +139,9 @@ func (c *client) Run(ctx context.Context, opts RunOpts) (string, error) {
 	for _, opt := range opts.SecurityOpt {
 		args = append(args, "--security-opt", opt)
 	}
+	if opts.HealthCmd != "" {
+		args = append(args, "--health-cmd", opts.HealthCmd)
+	}
 	if len(opts.Entrypoint) > 0 {
 		args = append(args, "--entrypoint", opts.Entrypoint[0])
 	}
@@ -183,6 +188,10 @@ func (c *client) Wait(ctx context.Context, name string) (int, error) {
 
 func (c *client) Restart(ctx context.Context, name string) error {
 	return c.run(ctx, "restart", name)
+}
+
+func (c *client) HealthCheckRun(ctx context.Context, name string) error {
+	return c.run(ctx, "healthcheck", "run", name)
 }
 
 func (c *client) PodCreate(ctx context.Context, opts PodCreateOpts) (string, error) {

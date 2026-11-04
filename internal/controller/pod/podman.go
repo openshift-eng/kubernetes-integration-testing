@@ -15,6 +15,7 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/podman"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/pullsecret"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/workload/override"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -94,6 +95,10 @@ func (r *podmanRunner) recoverPods(ctx context.Context) {
 
 func (r *podmanRunner) RunPod(ctx context.Context, pod *corev1.Pod) error {
 	if r.stopped.Load() {
+		return nil
+	}
+
+	if override.IsNoOp(pod) {
 		return nil
 	}
 

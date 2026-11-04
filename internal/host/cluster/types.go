@@ -25,6 +25,7 @@ type Cluster interface {
 
 type ControllerLauncher interface {
 	Launch(ctx context.Context, name string, c Cluster) (stop func(), err error)
+	WaitHealthy(ctx context.Context, name string) error
 }
 
 type Provider interface {
