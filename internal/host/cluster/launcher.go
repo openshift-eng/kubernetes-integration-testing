@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/naming"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/podman"
 )
 
@@ -24,7 +25,7 @@ func NewPodmanControllerLauncher(client podman.Client, image, cacheDir, collecti
 }
 
 func (l *PodmanControllerLauncher) Launch(ctx context.Context, name string, c Cluster) (func(), error) {
-	containerName := "kit-controller-" + name
+	containerName := naming.ContainerName(name)
 	cfg := c.ControllerConfig()
 
 	kc, err := kube.New(c.KubeConfig(), "")
@@ -110,7 +111,7 @@ func (l *PodmanControllerLauncher) Launch(ctx context.Context, name string, c Cl
 const controllerHealthTimeout = 2 * time.Minute
 
 func (l *PodmanControllerLauncher) WaitHealthy(ctx context.Context, name string) error {
-	containerName := "kit-controller-" + name
+	containerName := naming.ContainerName(name)
 	ctx, cancel := context.WithTimeout(ctx, controllerHealthTimeout)
 	defer cancel()
 	ticker := time.NewTicker(250 * time.Millisecond)

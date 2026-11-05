@@ -11,6 +11,7 @@ import (
 	pb "github.com/openshift-eng/kubernetes-integration-testing/api/grpc"
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/cluster"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/naming"
 )
 
 type server struct {
@@ -27,7 +28,7 @@ func (s *server) CreateCluster(ctx context.Context, req *pb.CreateClusterRequest
 		return nil, fmt.Errorf("parsing KitCluster manifest: %w", err)
 	}
 
-	if err := cluster.ValidateClusterName(kc.Name); err != nil {
+	if err := naming.ValidateClusterName(kc.Name); err != nil {
 		return nil, err
 	}
 
@@ -47,7 +48,7 @@ func (s *server) CreateCluster(ctx context.Context, req *pb.CreateClusterRequest
 
 func (s *server) DestroyCluster(ctx context.Context, req *pb.DestroyClusterRequest) (*pb.DestroyClusterResponse, error) {
 	name := req.GetName()
-	if err := cluster.ValidateClusterName(name); err != nil {
+	if err := naming.ValidateClusterName(name); err != nil {
 		return nil, err
 	}
 	s.log.Info("destroying cluster", "name", name)

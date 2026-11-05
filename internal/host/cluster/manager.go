@@ -5,13 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"sync"
 	"time"
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/bootstrap"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/naming"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/pullsecret"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -50,7 +50,7 @@ func NewClusterManager(ctx context.Context, log *slog.Logger, defaultProvider st
 	return cm
 }
 
-// TODO: check if kit-controller-<name> is already running before re-launching;
+// TODO: check if the controller container is already running before re-launching;
 // --replace kills a healthy controller unnecessarily on daemon restart.
 func (cm *ClusterManager) recover(ctx context.Context) {
 	for _, p := range cm.providers {
@@ -88,7 +88,7 @@ func (cm *ClusterManager) clusterLock(name string) *sync.Mutex {
 }
 
 func (cm *ClusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, pullSecretPath string) (Cluster, error) {
-	if err := ValidateClusterName(kc.Name); err != nil {
+	if err := naming.ValidateClusterName(kc.Name); err != nil {
 		return nil, err
 	}
 
@@ -162,7 +162,7 @@ func (cm *ClusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 }
 
 func (cm *ClusterManager) Destroy(ctx context.Context, name string) error {
-	if err := ValidateClusterName(name); err != nil {
+	if err := naming.ValidateClusterName(name); err != nil {
 		return err
 	}
 
@@ -237,21 +237,6 @@ var kitClusterGVR = schema.GroupVersionResource{
 	Group:    v1alpha1.GroupVersion.Group,
 	Version:  v1alpha1.GroupVersion.Version,
 	Resource: "kitclusters",
-}
-
-var dnsLabelRegexp = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
-
-// ValidateClusterName enforces RFC 1123 DNS label rules on cluster names.
-// This prevents path-traversal attacks (the name is used in filesystem paths)
-// and ensures the name is safe as a Kubernetes resource name.
-func ValidateClusterName(name string) error {
-	if len(name) == 0 || len(name) > 63 {
-		return fmt.Errorf("invalid cluster name: must be 1-63 characters")
-	}
-	if !dnsLabelRegexp.MatchString(name) {
-		return fmt.Errorf("invalid cluster name %q: must be a valid DNS label (lowercase alphanumeric and hyphens)", name)
-	}
-	return nil
 }
 
 func (cm *ClusterManager) provider(name string) (Provider, error) {
