@@ -11,6 +11,7 @@ DEFAULT_ARCH="${DEFAULT_ARCH:-amd64}"
 GOFLAGS="${GOFLAGS:--mod=vendor}"
 GCFLAGS=""
 LDFLAGS="${LDFLAGS} -X ${GO_PKG}/pkg/version.Raw=${GIT_TAG} -X ${GO_PKG}/pkg/version.Commit=${GIT_COMMIT} -X ${GO_PKG}/pkg/version.BuildDate=${BUILD_DATE} -X ${GO_PKG}/pkg/version.DefaultArch=${DEFAULT_ARCH}"
+[ -n "${DEFAULT_CONTROLLER_IMAGE:-}" ] && LDFLAGS="${LDFLAGS} -X ${GO_PKG}/pkg/version.DefaultControllerImage=${DEFAULT_CONTROLLER_IMAGE}"
 
 case "${MODE}" in
 release)
@@ -23,6 +24,8 @@ dev)
 esac
 
 TARGETS="${TARGETS:-kit kit-controller}"
+
+echo "Go version: $(go version)"
 
 for target in ${TARGETS}; do
     case "${target}" in

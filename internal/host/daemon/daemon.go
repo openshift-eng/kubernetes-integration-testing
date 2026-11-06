@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/openshift-eng/kubernetes-integration-testing/pkg/version"
 	"io"
 	"log/slog"
 	"net"
@@ -17,8 +18,6 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/podman"
 	"google.golang.org/grpc"
 )
-
-const defaultControllerImage = "registry.ci.openshift.org/ci/kubernetes-integration-testing:latest"
 
 type ProviderFactory func(ctx context.Context, log *slog.Logger) cluster.Provider
 
@@ -106,7 +105,7 @@ func Start(ctx context.Context, paths Paths, appStore store.Store, factories map
 
 	controllerImage := os.Getenv("KIT_CONTROLLER_IMAGE")
 	if controllerImage == "" {
-		controllerImage = defaultControllerImage
+		controllerImage = version.DefaultControllerImage
 	}
 	launcher := cluster.NewPodmanControllerLauncher(
 		podman.NewLocalClient(),

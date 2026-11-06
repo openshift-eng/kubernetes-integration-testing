@@ -1,6 +1,6 @@
 all: build
 
-.PHONY: all build build-kit build-controller test lint clean verify verify-generate generate go-deps image image-dev
+.PHONY: all build build-kit build-controller test lint clean verify verify-generate generate go-deps image image-dev release-gh
 
 build:
 	hack/build.sh
@@ -34,6 +34,9 @@ go-deps:
 	go mod tidy
 	go mod vendor
 	go mod verify
+
+release-gh:
+	hack/release-gh.sh
 
 image:
 	podman build -t localhost/kit-controller:latest .
