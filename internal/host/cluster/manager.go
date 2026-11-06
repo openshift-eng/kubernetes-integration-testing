@@ -5,13 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"sync"
 	"time"
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/bootstrap"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/naming"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/pullsecret"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -50,7 +50,7 @@ func NewClusterManager(ctx context.Context, log *slog.Logger, defaultProvider st
 	return cm
 }
 
-// TODO: check if kit-controller-<name> is already running before re-launching;
+// TODO: check if the controller container is already running before re-launching;
 // --replace kills a healthy controller unnecessarily on daemon restart.
 func (cm *ClusterManager) recover(ctx context.Context) {
 	for _, p := range cm.providers {
@@ -88,16 +88,17 @@ func (cm *ClusterManager) clusterLock(name string) *sync.Mutex {
 }
 
 func (cm *ClusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, pullSecretPath string) (Cluster, error) {
-	if err := ValidateClusterName(kc.Name); err != nil {
+	name := kc.Spec.ClusterName
+	if err := naming.ValidateClusterName(name); err != nil {
 		return nil, err
 	}
 
-	mu := cm.clusterLock(kc.Name)
+	mu := cm.clusterLock(name)
 	mu.Lock()
 	defer mu.Unlock()
 
-	if _, _, ok := cm.Get(kc.Name); ok {
-		return nil, fmt.Errorf("cluster %q already exists", kc.Name)
+	if _, _, ok := cm.Get(name); ok {
+		return nil, fmt.Errorf("cluster %q already exists", name)
 	}
 
 	p, err := cm.provider(kc.Spec.Provider)
@@ -119,7 +120,7 @@ func (cm *ClusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 
 	clusterKC, err := kube.New(c.KubeConfig(), "")
 	if err != nil {
-		destroyErr := p.Destroy(ctx, kc.Name)
+		destroyErr := p.Destroy(ctx, name)
 		return nil, errors.Join(fmt.Errorf("loading cluster kubeconfig: %w", err), destroyErr)
 	}
 
@@ -138,31 +139,31 @@ func (cm *ClusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 		APIServerHost: ccfg.APIServerHost,
 		APIServerPort: ccfg.APIServerPort,
 	}, kc, ps.Data(), caCertPEM, caKeyPEM); err != nil {
-		destroyErr := p.Destroy(ctx, kc.Name)
+		destroyErr := p.Destroy(ctx, name)
 		return nil, errors.Join(fmt.Errorf("storing bootstrap config: %w", err), destroyErr)
 	}
 
-	stop, err := cm.launcher.Launch(cm.ctx, kc.Name, c)
+	stop, err := cm.launcher.Launch(cm.ctx, name, c)
 	if err != nil {
-		destroyErr := p.Destroy(ctx, kc.Name)
+		destroyErr := p.Destroy(ctx, name)
 		return nil, errors.Join(fmt.Errorf("launching controller: %w", err), destroyErr)
 	}
 
-	if err := cm.launcher.WaitHealthy(ctx, kc.Name); err != nil {
+	if err := cm.launcher.WaitHealthy(ctx, name); err != nil {
 		stop()
-		destroyErr := p.Destroy(ctx, kc.Name)
+		destroyErr := p.Destroy(ctx, name)
 		return nil, errors.Join(fmt.Errorf("waiting for controller readiness: %w", err), destroyErr)
 	}
 
 	mc := &managedCluster{Cluster: c, stopController: stop}
 	cm.mu.Lock()
-	cm.clusters[kc.Name] = mc
+	cm.clusters[name] = mc
 	cm.mu.Unlock()
 	return mc, nil
 }
 
 func (cm *ClusterManager) Destroy(ctx context.Context, name string) error {
-	if err := ValidateClusterName(name); err != nil {
+	if err := naming.ValidateClusterName(name); err != nil {
 		return err
 	}
 
@@ -210,13 +211,13 @@ func (cm *ClusterManager) deleteKitCluster(ctx context.Context, c Cluster, name 
 		return err
 	}
 
-	if err := dynClient.Resource(kitClusterGVR).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+	if err := dynClient.Resource(kitClusterGVR).Delete(ctx, "cluster", metav1.DeleteOptions{}); err != nil {
 		return fmt.Errorf("deleting KitCluster CR: %w", err)
 	}
 
 	cm.log.Info("waiting for KitCluster deletion (finalizer teardown)", "cluster", name)
 	return wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 30*time.Second, true, func(ctx context.Context) (bool, error) {
-		_, err := dynClient.Resource(kitClusterGVR).Get(ctx, name, metav1.GetOptions{})
+		_, err := dynClient.Resource(kitClusterGVR).Get(ctx, "cluster", metav1.GetOptions{})
 		if err != nil {
 			return true, nil
 		}
@@ -237,21 +238,6 @@ var kitClusterGVR = schema.GroupVersionResource{
 	Group:    v1alpha1.GroupVersion.Group,
 	Version:  v1alpha1.GroupVersion.Version,
 	Resource: "kitclusters",
-}
-
-var dnsLabelRegexp = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
-
-// ValidateClusterName enforces RFC 1123 DNS label rules on cluster names.
-// This prevents path-traversal attacks (the name is used in filesystem paths)
-// and ensures the name is safe as a Kubernetes resource name.
-func ValidateClusterName(name string) error {
-	if len(name) == 0 || len(name) > 63 {
-		return fmt.Errorf("invalid cluster name: must be 1-63 characters")
-	}
-	if !dnsLabelRegexp.MatchString(name) {
-		return fmt.Errorf("invalid cluster name %q: must be a valid DNS label (lowercase alphanumeric and hyphens)", name)
-	}
-	return nil
 }
 
 func (cm *ClusterManager) provider(name string) (Provider, error) {

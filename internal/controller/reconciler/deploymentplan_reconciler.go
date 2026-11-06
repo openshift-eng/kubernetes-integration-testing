@@ -210,9 +210,9 @@ func (r *deploymentPlanReconciler) collectionToPlan(ctx context.Context, obj cli
 	return requests
 }
 
-func (r *deploymentPlanReconciler) SetupWithManager(mgr ctrl.Manager, clusterName string) error {
+func (r *deploymentPlanReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		Named("deploymentplan-"+clusterName).
+		Named("deploymentplan").
 		For(&v1alpha1.DeploymentPlan{}).
 		Watches(&v1alpha1.ResourceCollection{}, handler.EnqueueRequestsFromMapFunc(r.collectionToPlan)).
 		Complete(r)

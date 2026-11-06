@@ -2,12 +2,12 @@ package v1alpha1
 
 import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-// KitCluster is a cluster-scoped singleton that holds global configuration
-// for the testing cluster.
+// KitCluster is the singleton cluster configuration.
 //
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
+// +kubebuilder:validation:XValidation:rule="self.metadata.name == 'cluster'",message="metadata.name must be 'cluster'"
 type KitCluster struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -16,6 +16,14 @@ type KitCluster struct {
 }
 
 type KitClusterSpec struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=30
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="clusterName is immutable"
+	// +kubebuilder:validation:XValidation:rule="!self.startsWith('kit-')",message="clusterName must not start with 'kit-'"
+	ClusterName string `json:"clusterName"`
+
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=kwok;kind
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="provider is immutable"

@@ -29,7 +29,6 @@ type caReconciler struct {
 	client       client.Client
 	clientset    kubernetes.Interface
 	certProvider *cert.Provider
-	clusterName  string
 	log          *slog.Logger
 }
 
@@ -192,7 +191,7 @@ func (r *caReconciler) handleDeletion(ctx context.Context, ca *v1alpha1.Certific
 
 func (r *caReconciler) isDefaultCA(ctx context.Context, name string) (bool, error) {
 	var kc v1alpha1.KitCluster
-	if err := r.client.Get(ctx, client.ObjectKey{Name: r.clusterName}, &kc); err != nil {
+	if err := r.client.Get(ctx, client.ObjectKey{Name: "cluster"}, &kc); err != nil {
 		return false, err
 	}
 	return kc.Status.DefaultCA == name, nil
@@ -228,9 +227,9 @@ func (r *caReconciler) secretToCA(ctx context.Context, obj client.Object) []reco
 	return []reconcile.Request{{NamespacedName: client.ObjectKey{Name: caName}}}
 }
 
-func (r *caReconciler) SetupWithManager(mgr ctrl.Manager, clusterName string) error {
+func (r *caReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		Named("certificateauthority-"+clusterName).
+		Named("certificateauthority").
 		For(&v1alpha1.CertificateAuthority{}).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.secretToCA)).
 		Complete(r)

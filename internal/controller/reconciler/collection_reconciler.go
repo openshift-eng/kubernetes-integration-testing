@@ -340,9 +340,9 @@ func (r *collectionReconciler) isRequested(ctx context.Context, name string) (bo
 	return false, nil
 }
 
-func (r *collectionReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, clusterName string) error {
+func (r *collectionReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 	builder := ctrl.NewControllerManagedBy(mgr).
-		Named("resourcecollection-"+clusterName).
+		Named("resourcecollection").
 		For(&v1alpha1.ResourceCollection{}).
 		Watches(&v1alpha1.DeploymentPlan{}, handler.EnqueueRequestsFromMapFunc(r.planToCollections))
 

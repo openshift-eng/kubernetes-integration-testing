@@ -265,9 +265,9 @@ func (r *kitClusterReconciler) caToCluster(ctx context.Context, obj client.Objec
 	return requests
 }
 
-func (r *kitClusterReconciler) SetupWithManager(mgr ctrl.Manager, clusterName string) error {
+func (r *kitClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		Named("kitcluster-"+clusterName).
+		Named("kitcluster").
 		For(&v1alpha1.KitCluster{}).
 		Watches(&v1alpha1.CertificateAuthority{}, handler.EnqueueRequestsFromMapFunc(r.caToCluster)).
 		Complete(r)

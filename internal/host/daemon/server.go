@@ -11,6 +11,7 @@ import (
 	pb "github.com/openshift-eng/kubernetes-integration-testing/api/grpc"
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/cluster"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/naming"
 )
 
 type server struct {
@@ -27,18 +28,18 @@ func (s *server) CreateCluster(ctx context.Context, req *pb.CreateClusterRequest
 		return nil, fmt.Errorf("parsing KitCluster manifest: %w", err)
 	}
 
-	if err := cluster.ValidateClusterName(kc.Name); err != nil {
+	if err := naming.ValidateClusterName(kc.Spec.ClusterName); err != nil {
 		return nil, err
 	}
 
 	// TODO: validate full KitCluster spec (provider, featureSet, workers, image, defaultCA)
 	// against the CRD OpenAPI schema once the daemon accepts KIT CRs at startup.
 
-	s.log.Info("creating cluster", "name", kc.Name, "provider", kc.Spec.Provider)
+	s.log.Info("creating cluster", "name", kc.Spec.ClusterName, "provider", kc.Spec.Provider)
 
 	c, err := s.clusterManager.Create(ctx, &kc, req.GetPullSecret())
 	if err != nil {
-		s.log.Error("cluster creation failed", "name", kc.Name, "error", err)
+		s.log.Error("cluster creation failed", "name", kc.Spec.ClusterName, "error", err)
 		return nil, err
 	}
 
@@ -47,7 +48,7 @@ func (s *server) CreateCluster(ctx context.Context, req *pb.CreateClusterRequest
 
 func (s *server) DestroyCluster(ctx context.Context, req *pb.DestroyClusterRequest) (*pb.DestroyClusterResponse, error) {
 	name := req.GetName()
-	if err := cluster.ValidateClusterName(name); err != nil {
+	if err := naming.ValidateClusterName(name); err != nil {
 		return nil, err
 	}
 	s.log.Info("destroying cluster", "name", name)

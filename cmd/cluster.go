@@ -52,12 +52,13 @@ var clusterCreateCmd = &cobra.Command{
 				APIVersion: v1alpha1.GroupVersion.String(),
 				Kind:       "KitCluster",
 			},
-			ObjectMeta: metav1.ObjectMeta{Name: args[0]},
+			ObjectMeta: metav1.ObjectMeta{Name: "cluster"},
 			Spec: v1alpha1.KitClusterSpec{
-				Provider:   clusterProvider,
-				Image:      clusterImage,
-				FeatureSet: clusterFeatureSet,
-				Workers:    clusterWorkers,
+				ClusterName: args[0],
+				Provider:    clusterProvider,
+				Image:       clusterImage,
+				FeatureSet:  clusterFeatureSet,
+				Workers:     clusterWorkers,
 			},
 		}
 		manifest, err := json.Marshal(kc)

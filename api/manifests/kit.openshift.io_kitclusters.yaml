@@ -17,9 +17,7 @@ spec:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: |-
-          KitCluster is a cluster-scoped singleton that holds global configuration
-          for the testing cluster.
+        description: KitCluster is the singleton cluster configuration.
         properties:
           apiVersion:
             description: |-
@@ -40,6 +38,16 @@ spec:
             type: object
           spec:
             properties:
+              clusterName:
+                maxLength: 30
+                minLength: 1
+                pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                type: string
+                x-kubernetes-validations:
+                - message: clusterName is immutable
+                  rule: self == oldSelf
+                - message: clusterName must not start with 'kit-'
+                  rule: '!self.startsWith(''kit-'')'
               defaultCA:
                 type: string
               featureSet:
@@ -64,6 +72,7 @@ spec:
                 minimum: 0
                 type: integer
             required:
+            - clusterName
             - provider
             type: object
           status:
@@ -134,6 +143,9 @@ spec:
         required:
         - spec
         type: object
+        x-kubernetes-validations:
+        - message: metadata.name must be 'cluster'
+          rule: self.metadata.name == 'cluster'
     served: true
     storage: true
     subresources:
