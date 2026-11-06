@@ -116,9 +116,10 @@ func (p *provider) List() []string {
 
 func (p *provider) Create(ctx context.Context, kc *v1alpha1.KitCluster, ps *pullsecret.PullSecret) (cluster.Cluster, error) {
 	p.mu.Lock()
-	if _, exists := p.clusters[kc.Name]; exists {
+	name := kc.Spec.ClusterName
+	if _, exists := p.clusters[name]; exists {
 		p.mu.Unlock()
-		return nil, fmt.Errorf("cluster %q already exists", kc.Name)
+		return nil, fmt.Errorf("cluster %q already exists", name)
 	}
 	p.mu.Unlock()
 
@@ -127,13 +128,13 @@ func (p *provider) Create(ctx context.Context, kc *v1alpha1.KitCluster, ps *pull
 		return nil, err
 	}
 
-	dir, err := p.store.ClusterDir(kc.Name)
+	dir, err := p.store.ClusterDir(name)
 	if err != nil {
 		return nil, err
 	}
 	kubeconfigPath := filepath.Join(dir, "kubeconfig")
 
-	toolName := prefixed(kc.Name)
+	toolName := prefixed(name)
 	args := []string{"create", "cluster", "--name", toolName, "--kubeconfig", kubeconfigPath}
 
 	cfgPath := filepath.Join(dir, "kind-config.yaml")
@@ -148,10 +149,10 @@ func (p *provider) Create(ctx context.Context, kc *v1alpha1.KitCluster, ps *pull
 
 	_ = labelNodes(ctx, p.log, kubeconfigPath)
 
-	c := &kindCluster{name: kc.Name, kubeconfigPath: kubeconfigPath, bin: bin, store: p.store, log: p.log}
+	c := &kindCluster{name: name, kubeconfigPath: kubeconfigPath, bin: bin, store: p.store, log: p.log}
 
 	p.mu.Lock()
-	p.clusters[kc.Name] = c
+	p.clusters[name] = c
 	p.mu.Unlock()
 
 	return c, nil

@@ -85,10 +85,19 @@ func Start(ctx context.Context, log *slog.Logger, bd *bootstrap.BootstrapData, c
 }
 
 func ensureBootstrapResources(ctx context.Context, clients *kube.Clients, bd *bootstrap.BootstrapData, log *slog.Logger) error {
-	if err := clients.Client.Create(ctx, bd.KitCluster); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("creating KitCluster CR: %w", err)
+	if err := clients.Client.Create(ctx, bd.KitCluster); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("creating KitCluster CR: %w", err)
+		}
+		var existing v1alpha1.KitCluster
+		if err := clients.Client.Get(ctx, client.ObjectKeyFromObject(bd.KitCluster), &existing); err != nil {
+			return fmt.Errorf("reading existing KitCluster CR: %w", err)
+		}
+		if existing.Spec.ClusterName != bd.KitCluster.Spec.ClusterName {
+			return fmt.Errorf("KitCluster CR already exists with clusterName %q, expected %q", existing.Spec.ClusterName, bd.KitCluster.Spec.ClusterName)
+		}
 	}
-	log.Info("ensured KitCluster CR", "name", bd.KitCluster.Name)
+	log.Info("ensured KitCluster CR", "clusterName", bd.KitCluster.Spec.ClusterName)
 	return nil
 }
 
@@ -109,7 +118,7 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 				apiServerExternalURL: cfg.KubeConfig.OriginalServerURL(),
 				shutdowner:           shutdowner,
 				log:                  log,
-			}).SetupWithManager(mgr, bd.KitCluster.Name)
+			}).SetupWithManager(mgr)
 		}},
 		{"ResourceCollection", func() error {
 			return (&collectionReconciler{
@@ -121,7 +130,7 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 				pullSecret:     string(bd.PullSecret),
 				certProvider:   certProvider,
 				log:            log,
-			}).SetupWithManager(ctx, mgr, bd.KitCluster.Name)
+			}).SetupWithManager(ctx, mgr)
 		}},
 		{"DeploymentPlan", func() error {
 			return (&deploymentPlanReconciler{
@@ -130,25 +139,23 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 				discovery: clients.Discovery,
 				release:   rel,
 				log:       log,
-			}).SetupWithManager(mgr, bd.KitCluster.Name)
+			}).SetupWithManager(mgr)
 		}},
 		{"ServiceCert", func() error {
 			return (&serviceReconciler{
 				client:       mgr.GetClient(),
 				clientset:    clients.Clientset,
 				certProvider: certProvider,
-				clusterName:  bd.KitCluster.Name,
 				log:          log,
-			}).SetupWithManager(mgr, bd.KitCluster.Name)
+			}).SetupWithManager(mgr)
 		}},
 		{"CertificateAuthority", func() error {
 			return (&caReconciler{
 				client:       mgr.GetClient(),
 				clientset:    clients.Clientset,
 				certProvider: certProvider,
-				clusterName:  bd.KitCluster.Name,
 				log:          log,
-			}).SetupWithManager(mgr, bd.KitCluster.Name)
+			}).SetupWithManager(mgr)
 		}},
 	}
 

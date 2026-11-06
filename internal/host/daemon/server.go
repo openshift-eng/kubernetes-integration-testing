@@ -28,18 +28,18 @@ func (s *server) CreateCluster(ctx context.Context, req *pb.CreateClusterRequest
 		return nil, fmt.Errorf("parsing KitCluster manifest: %w", err)
 	}
 
-	if err := naming.ValidateClusterName(kc.Name); err != nil {
+	if err := naming.ValidateClusterName(kc.Spec.ClusterName); err != nil {
 		return nil, err
 	}
 
 	// TODO: validate full KitCluster spec (provider, featureSet, workers, image, defaultCA)
 	// against the CRD OpenAPI schema once the daemon accepts KIT CRs at startup.
 
-	s.log.Info("creating cluster", "name", kc.Name, "provider", kc.Spec.Provider)
+	s.log.Info("creating cluster", "name", kc.Spec.ClusterName, "provider", kc.Spec.Provider)
 
 	c, err := s.clusterManager.Create(ctx, &kc, req.GetPullSecret())
 	if err != nil {
-		s.log.Error("cluster creation failed", "name", kc.Name, "error", err)
+		s.log.Error("cluster creation failed", "name", kc.Spec.ClusterName, "error", err)
 		return nil, err
 	}
 

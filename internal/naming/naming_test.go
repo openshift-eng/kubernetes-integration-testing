@@ -35,6 +35,13 @@ func TestValidateClusterName(t *testing.T) {
 		}
 	})
 
+	t.Run("max length name fits kwok worst case", func(t *testing.T) {
+		name := strings.Repeat("a", MaxClusterNameLength)
+		require.NoError(t, ValidateClusterName(name))
+		worstCase := "kwok-kit-" + name + "-kube-controller-manager"
+		assert.LessOrEqual(t, len(worstCase), 63, "kwok container name %q exceeds DNS label limit (len=%d)", worstCase, len(worstCase))
+	})
+
 	t.Run("invalid names", func(t *testing.T) {
 		cases := []struct {
 			name string
@@ -45,8 +52,9 @@ func TestValidateClusterName(t *testing.T) {
 			{"has.dot", "dot"},
 			{"-leading-hyphen", "leading hyphen"},
 			{"trailing-hyphen-", "trailing hyphen"},
-			{strings.Repeat("a", MaxClusterNameLength + 1), "too long"},
+			{strings.Repeat("a", MaxClusterNameLength+1), "too long"},
 			{"", "empty"},
+			{"kit-foo", "kit prefix"},
 		}
 		for _, tc := range cases {
 			t.Run(tc.desc, func(t *testing.T) {

@@ -148,9 +148,10 @@ func (p *provider) Destroy(ctx context.Context, name string) error {
 
 func (p *provider) Create(ctx context.Context, kc *v1alpha1.KitCluster, ps *pullsecret.PullSecret) (cluster.Cluster, error) {
 	p.mu.Lock()
-	if _, exists := p.clusters[kc.Name]; exists {
+	name := kc.Spec.ClusterName
+	if _, exists := p.clusters[name]; exists {
 		p.mu.Unlock()
-		return nil, fmt.Errorf("cluster %q already exists", kc.Name)
+		return nil, fmt.Errorf("cluster %q already exists", name)
 	}
 	p.mu.Unlock()
 
@@ -159,7 +160,7 @@ func (p *provider) Create(ctx context.Context, kc *v1alpha1.KitCluster, ps *pull
 		return nil, err
 	}
 
-	dir, err := p.store.ClusterDir(kc.Name)
+	dir, err := p.store.ClusterDir(name)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +181,7 @@ func (p *provider) Create(ctx context.Context, kc *v1alpha1.KitCluster, ps *pull
 	}
 
 	p.mu.Lock()
-	p.clusters[kc.Name] = c
+	p.clusters[name] = c
 	p.mu.Unlock()
 
 	return c, nil
@@ -193,7 +194,7 @@ func (p *provider) createCluster(ctx context.Context, bin string, kc *v1alpha1.K
 	}
 
 	c := &kwokCluster{
-		name:           kc.Name,
+		name:           kc.Spec.ClusterName,
 		kubeconfigPath: filepath.Join(dir, "kubeconfig"),
 		bin:            bin,
 		apiPort:        apiPort,
@@ -202,7 +203,7 @@ func (p *provider) createCluster(ctx context.Context, bin string, kc *v1alpha1.K
 		log:            p.log,
 	}
 
-	toolName := prefixed(kc.Name)
+	toolName := prefixed(kc.Spec.ClusterName)
 	// Force kubeconfig to the cluster-local path to avoid writing ~/.kube/config,
 	// which causes lock contention when creating multiple clusters concurrently.
 	args := []string{"create", "cluster", "--name", toolName, "--runtime", "podman", "--config", kwokCfgPath,

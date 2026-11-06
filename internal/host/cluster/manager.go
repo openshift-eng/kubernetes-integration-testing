@@ -88,16 +88,17 @@ func (cm *ClusterManager) clusterLock(name string) *sync.Mutex {
 }
 
 func (cm *ClusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, pullSecretPath string) (Cluster, error) {
-	if err := naming.ValidateClusterName(kc.Name); err != nil {
+	name := kc.Spec.ClusterName
+	if err := naming.ValidateClusterName(name); err != nil {
 		return nil, err
 	}
 
-	mu := cm.clusterLock(kc.Name)
+	mu := cm.clusterLock(name)
 	mu.Lock()
 	defer mu.Unlock()
 
-	if _, _, ok := cm.Get(kc.Name); ok {
-		return nil, fmt.Errorf("cluster %q already exists", kc.Name)
+	if _, _, ok := cm.Get(name); ok {
+		return nil, fmt.Errorf("cluster %q already exists", name)
 	}
 
 	p, err := cm.provider(kc.Spec.Provider)
@@ -119,7 +120,7 @@ func (cm *ClusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 
 	clusterKC, err := kube.New(c.KubeConfig(), "")
 	if err != nil {
-		destroyErr := p.Destroy(ctx, kc.Name)
+		destroyErr := p.Destroy(ctx, name)
 		return nil, errors.Join(fmt.Errorf("loading cluster kubeconfig: %w", err), destroyErr)
 	}
 
@@ -138,25 +139,25 @@ func (cm *ClusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 		APIServerHost: ccfg.APIServerHost,
 		APIServerPort: ccfg.APIServerPort,
 	}, kc, ps.Data(), caCertPEM, caKeyPEM); err != nil {
-		destroyErr := p.Destroy(ctx, kc.Name)
+		destroyErr := p.Destroy(ctx, name)
 		return nil, errors.Join(fmt.Errorf("storing bootstrap config: %w", err), destroyErr)
 	}
 
-	stop, err := cm.launcher.Launch(cm.ctx, kc.Name, c)
+	stop, err := cm.launcher.Launch(cm.ctx, name, c)
 	if err != nil {
-		destroyErr := p.Destroy(ctx, kc.Name)
+		destroyErr := p.Destroy(ctx, name)
 		return nil, errors.Join(fmt.Errorf("launching controller: %w", err), destroyErr)
 	}
 
-	if err := cm.launcher.WaitHealthy(ctx, kc.Name); err != nil {
+	if err := cm.launcher.WaitHealthy(ctx, name); err != nil {
 		stop()
-		destroyErr := p.Destroy(ctx, kc.Name)
+		destroyErr := p.Destroy(ctx, name)
 		return nil, errors.Join(fmt.Errorf("waiting for controller readiness: %w", err), destroyErr)
 	}
 
 	mc := &managedCluster{Cluster: c, stopController: stop}
 	cm.mu.Lock()
-	cm.clusters[kc.Name] = mc
+	cm.clusters[name] = mc
 	cm.mu.Unlock()
 	return mc, nil
 }
@@ -210,13 +211,13 @@ func (cm *ClusterManager) deleteKitCluster(ctx context.Context, c Cluster, name 
 		return err
 	}
 
-	if err := dynClient.Resource(kitClusterGVR).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+	if err := dynClient.Resource(kitClusterGVR).Delete(ctx, "cluster", metav1.DeleteOptions{}); err != nil {
 		return fmt.Errorf("deleting KitCluster CR: %w", err)
 	}
 
 	cm.log.Info("waiting for KitCluster deletion (finalizer teardown)", "cluster", name)
 	return wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 30*time.Second, true, func(ctx context.Context) (bool, error) {
-		_, err := dynClient.Resource(kitClusterGVR).Get(ctx, name, metav1.GetOptions{})
+		_, err := dynClient.Resource(kitClusterGVR).Get(ctx, "cluster", metav1.GetOptions{})
 		if err != nil {
 			return true, nil
 		}

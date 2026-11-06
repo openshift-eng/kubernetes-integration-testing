@@ -27,7 +27,6 @@ type serviceReconciler struct {
 	client       client.Client
 	clientset    kubernetes.Interface
 	certProvider *cert.Provider
-	clusterName  string
 	log          *slog.Logger
 }
 
@@ -101,7 +100,7 @@ func (r *serviceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 func (r *serviceReconciler) resolveCA(ctx context.Context) (string, bool) {
 	var kc v1alpha1.KitCluster
-	if err := r.client.Get(ctx, client.ObjectKey{Name: r.clusterName}, &kc); err != nil {
+	if err := r.client.Get(ctx, client.ObjectKey{Name: "cluster"}, &kc); err != nil {
 		return cert.DefaultCAName, false
 	}
 	caName := kc.Status.DefaultCA
@@ -127,13 +126,13 @@ func serviceDNSNames(svc *corev1.Service) []string {
 	return names
 }
 
-func (r *serviceReconciler) SetupWithManager(mgr ctrl.Manager, clusterName string) error {
+func (r *serviceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	hasAnnotation := predicate.NewPredicateFuncs(func(obj client.Object) bool {
 		_, ok := obj.GetAnnotations()[servingCertAnnotation]
 		return ok
 	})
 	return ctrl.NewControllerManagedBy(mgr).
-		Named("servicecert-"+clusterName).
+		Named("servicecert").
 		For(&corev1.Service{}, builder.WithPredicates(hasAnnotation)).
 		Owns(&corev1.Secret{}).
 		Complete(r)
