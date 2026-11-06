@@ -1,0 +1,21 @@
+name: Release Latest Image
+
+on:
+  schedule:
+    - cron: "5 * * * *"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: make release-gh
