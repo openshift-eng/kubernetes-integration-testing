@@ -1,6 +1,7 @@
 #!/bin/sh
 set -ex
 
+export GOTOOLCHAIN="${GOTOOLCHAIN:-auto}"
 GO_PKG="github.com/openshift-eng/kubernetes-integration-testing"
 MODE="${MODE:-release}"
 

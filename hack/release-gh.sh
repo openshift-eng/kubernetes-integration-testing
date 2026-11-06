@@ -43,17 +43,6 @@ trap cleanup EXIT
 echo "Creating worktree at ${WORKTREE} for commit ${COMMIT_SHA}..."
 git worktree add --detach "$WORKTREE" "$COMMIT_SHA"
 
-REQUIRED_GO=$(grep '^go ' "$WORKTREE/go.mod" | awk '{print $2}')
-CURRENT_GO=$(go env GOVERSION 2>/dev/null | sed 's/^go//')
-if [ "$CURRENT_GO" != "$REQUIRED_GO" ]; then
-    echo "Installed go${CURRENT_GO}, need go${REQUIRED_GO}. Installing..."
-    go install "golang.org/dl/go${REQUIRED_GO}@latest"
-    "go${REQUIRED_GO}" download
-    export GOROOT="$("go${REQUIRED_GO}" env GOROOT)"
-    export PATH="$GOROOT/bin:$PATH"
-fi
-echo "Using $(go version)"
-
 echo "Running go-deps..."
 pushd "$WORKTREE" >/dev/null
 make go-deps
