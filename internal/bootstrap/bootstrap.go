@@ -85,7 +85,7 @@ func Store(ctx context.Context, kc *kube.KubeConfig, cfg ClusterConfig, kitClust
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      cert.CASecretName(caName),
 				Namespace: Namespace,
-				Labels:    map[string]string{cert.CALabel: caName},
+				Labels:    map[string]string{cert.CALabel: caName, cert.TypeLabel: cert.TypeLabelValueCA},
 			},
 			Type: corev1.SecretTypeTLS,
 			Data: map[string][]byte{

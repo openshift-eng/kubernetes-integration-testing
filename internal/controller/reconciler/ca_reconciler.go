@@ -91,7 +91,7 @@ func (r *caReconciler) provisionCA(ctx context.Context, ca *v1alpha1.Certificate
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
 			Namespace: bootstrap.Namespace,
-			Labels:    map[string]string{cert.CALabel: ca.Name},
+			Labels:    map[string]string{cert.CALabel: ca.Name, cert.TypeLabel: cert.TypeLabelValueCA},
 		},
 		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
@@ -210,6 +210,10 @@ func (r *caReconciler) secretToCA(ctx context.Context, obj client.Object) []reco
 	var ca v1alpha1.CertificateAuthority
 	if err := r.client.Get(ctx, client.ObjectKey{Name: caName}, &ca); err == nil {
 		return []reconcile.Request{{NamespacedName: client.ObjectKey{Name: caName}}}
+	}
+
+	if secret.Labels[cert.TypeLabel] != cert.TypeLabelValueCA {
+		return nil
 	}
 
 	cr := &v1alpha1.CertificateAuthority{
