@@ -23,15 +23,15 @@ if [ -z "$COMMIT_SHA" ] || [ "$COMMIT_SHA" = "null" ]; then
     exit 1
 fi
 
-DIGEST=$(echo "$INSPECT" | jq -r '.Digest')
-IMAGE_REF="$(echo "$INSPECT" | jq -r '.Name')@${DIGEST}"
-echo "Image digest: ${DIGEST}"
+LIST_DIGEST=$(skopeo inspect --raw "docker://${IMAGE}" | skopeo manifest-digest /dev/stdin)
+IMAGE_NAME=$(echo "$INSPECT" | jq -r '.Name')
+IMAGE_REF="${IMAGE_NAME}@${LIST_DIGEST}"
+echo "Image digest: ${LIST_DIGEST}"
 echo "Image ref: ${IMAGE_REF}"
 echo "Image commit: ${COMMIT_SHA}"
 
-CURRENT_DIGEST=$(gh release view "$RELEASE_TAG" --repo "$REPO" --json body --jq '.body' 2>/dev/null \
-    | grep -oP '(?<=Digest: `)[^`]+' || true)
-if [ "$CURRENT_DIGEST" = "$DIGEST" ]; then
+TAG_SHA=$(git rev-parse "refs/tags/${RELEASE_TAG}" 2>/dev/null || echo "none")
+if [ "$TAG_SHA" = "$COMMIT_SHA" ]; then
     echo "Release is already up to date, nothing to do."
     exit 0
 fi
@@ -77,7 +77,7 @@ gh release create "$RELEASE_TAG" \
     --title "Latest" \
     --notes "Automated release tracking \`${IMAGE}\`.
 
-**Digest:** \`${DIGEST}\`
+**Digest:** \`${LIST_DIGEST}\`
 **Commit:** \`${COMMIT_SHA}\`" \
     "${WORKTREE}"/bin/kit-*
 
