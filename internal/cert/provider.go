@@ -21,7 +21,10 @@ const (
 	DefaultValidity = 10 * 365 * 24 * time.Hour
 	DefaultCAName   = "cluster-ca"
 	CASecretPrefix  = "kit-ca-"
-	CALabel         = "kit.openshift.io/certificate-authority"
+	CALabel        = "kit.openshift.io/certificate-authority"
+	TypeLabel  = "kit.openshift.io/cert-type"
+	TypeLabelValueCA     = "ca"
+	TypeLabelValueLeaf   = "leaf"
 )
 
 type Provider struct {
@@ -142,7 +145,7 @@ func (p *Provider) persistOrLoadCA(name string, ca *CA) (*CA, error) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
 			Namespace: p.namespace,
-			Labels:    map[string]string{CALabel: name},
+			Labels:    map[string]string{CALabel: name, TypeLabel: TypeLabelValueCA},
 		},
 		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{
@@ -239,7 +242,7 @@ func (p *Provider) persistOrLoadLeaf(caName, cn string, leaf *LeafCert) (*LeafCe
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
 			Namespace: p.namespace,
-			Labels:    map[string]string{CALabel: caName},
+			Labels:    map[string]string{CALabel: caName, TypeLabel: TypeLabelValueLeaf},
 		},
 		Type: corev1.SecretTypeTLS,
 		Data: map[string][]byte{

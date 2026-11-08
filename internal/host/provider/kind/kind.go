@@ -73,7 +73,9 @@ func (p *provider) recover(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, bin, "get", "clusters").Output()
+	cmd := exec.CommandContext(ctx, bin, "get", "clusters")
+	cmd.Env = kindEnv()
+	out, err := cmd.Output()
 	if err != nil {
 		p.log.Warn("could not list existing kind clusters", "error", err)
 		return
@@ -229,7 +231,9 @@ func ensureKubeConfig(ctx context.Context, bin, name, path string) error {
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	}
-	out, err := exec.CommandContext(ctx, bin, "get", "kubeconfig", "--name", name).Output()
+	cmd := exec.CommandContext(ctx, bin, "get", "kubeconfig", "--name", name)
+	cmd.Env = kindEnv()
+	out, err := cmd.Output()
 	if err != nil {
 		return err
 	}
@@ -332,8 +336,13 @@ func labelNodes(ctx context.Context, log *slog.Logger, kubeconfigPath string) er
 	return nil
 }
 
+func kindEnv() []string {
+	return append(os.Environ(), "KIND_EXPERIMENTAL_PROVIDER=podman")
+}
+
 func run(ctx context.Context, log *slog.Logger, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = kindEnv()
 	out, err := cmd.CombinedOutput()
 	if len(out) > 0 {
 		log.Info(string(out))

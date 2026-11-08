@@ -19,6 +19,14 @@ func newTestProvider() *Provider {
 	return NewProvider(fake.NewSimpleClientset(), "test-ns", nil)
 }
 
+func assertSecretLabels(t *testing.T, p *Provider, secretName, caName, certType string) {
+	t.Helper()
+	secret, err := p.clientset.CoreV1().Secrets(p.namespace).Get(context.TODO(), secretName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, caName, secret.Labels[CALabel])
+	assert.Equal(t, certType, secret.Labels[TypeLabel])
+}
+
 func TestProviderCACertAutoGenerates(t *testing.T) {
 	p := newTestProvider()
 
@@ -29,6 +37,8 @@ func TestProviderCACertAutoGenerates(t *testing.T) {
 	pem2, err := p.CACert("test-ca")
 	require.NoError(t, err)
 	assert.Equal(t, pem1, pem2, "same CA name should return same cert")
+
+	assertSecretLabels(t, p, CASecretName("test-ca"), "test-ca", TypeLabelValueCA)
 }
 
 func TestProviderSetCA(t *testing.T) {
@@ -57,6 +67,9 @@ func TestProviderSignedCertAndKey(t *testing.T) {
 	certPEM2, err := p.SignedCert("my-ca", "my-service.ns.svc")
 	require.NoError(t, err)
 	assert.Equal(t, certPEM, certPEM2, "same ca+cn should return cached leaf")
+
+	assertSecretLabels(t, p, CASecretName("my-ca"), "my-ca", TypeLabelValueCA)
+	assertSecretLabels(t, p, leafSecretName("my-ca", "my-service.ns.svc"), "my-ca", TypeLabelValueLeaf)
 }
 
 func TestProviderSANChangeRegenerates(t *testing.T) {
