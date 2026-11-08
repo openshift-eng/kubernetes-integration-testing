@@ -157,6 +157,9 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 				log:          log,
 			}).SetupWithManager(mgr)
 		}},
+		{"WorkloadOverride", func() error {
+			return NewWorkloadOverrideReconciler(mgr.GetClient(), log).SetupWithManager(mgr)
+		}},
 	}
 
 	for _, r := range reconcilers {
