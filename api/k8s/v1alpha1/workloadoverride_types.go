@@ -15,8 +15,8 @@ type WorkloadOverride struct {
 	Status            WorkloadOverrideStatus `json:"status,omitempty"`
 }
 
-// +kubebuilder:validation:XValidation:rule="!(self.noOp && has(self.containers) && size(self.containers) > 0)",message="noOp is mutually exclusive with containers"
-// +kubebuilder:validation:XValidation:rule="self.noOp || (has(self.containers) && size(self.containers) > 0)",message="noOp or at least one container override must be set"
+// +kubebuilder:validation:XValidation:rule="(self.noOp ? 1 : 0) + (has(self.containers) && size(self.containers) > 0 ? 1 : 0) + (has(self.replacePod) ? 1 : 0) <= 1",message="noOp, containers, and replacePod are mutually exclusive"
+// +kubebuilder:validation:XValidation:rule="self.noOp || (has(self.containers) && size(self.containers) > 0) || has(self.replacePod)",message="one of noOp, containers, or replacePod must be set"
 type WorkloadOverrideSpec struct {
 	// Match selects the Pods affected by this override. The runtime selector is
 	// evaluated against the admitted Pod object, not against its owning
@@ -35,6 +35,33 @@ type WorkloadOverrideSpec struct {
 	// +listType=map
 	// +listMapKey=name
 	Containers []ContainerOverride `json:"containers,omitempty"`
+
+	// ReplacePod replaces the entire Pod workload with a single container.
+	// All original regular and init containers are removed.
+	ReplacePod *PodReplacement `json:"replacePod,omitempty"`
+
+	// ServiceAccountName overrides the pod-level service account.
+	// Composable with any mode (noOp, containers, or replacePod).
+	// +kubebuilder:validation:XValidation:rule="!format.dns1123Subdomain().validate(self).hasValue()",message="serviceAccountName must be a valid DNS subdomain"
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+}
+
+type PodReplacement struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	Name string `json:"name"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Image string `json:"image"`
+
+	// +kubebuilder:validation:Enum=Always;IfNotPresent;Never
+	PullPolicy corev1.PullPolicy `json:"pullPolicy,omitempty"`
+	Command    []string          `json:"command,omitempty"`
+	Args       []string          `json:"args,omitempty"`
+	// +listType=map
+	// +listMapKey=name
+	Env []corev1.EnvVar `json:"env,omitempty"`
 }
 
 // WorkloadOverrideMatch is a conjunction of exact Pod match fields.

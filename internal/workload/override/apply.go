@@ -25,18 +25,27 @@ type Result struct {
 }
 
 // Apply selects the most specific matching WorkloadOverride and mutates the pod
-// in place. Outcome is Applied when mutations were satisfied, Invalid when the
-// override matched but could not be applied (non-remove targeting a missing
-// container, or removes that would leave zero containers), and NoMatch when no
-// override matched.
+// in place. Outcome is Applied when mutations were satisfied (noOp, replacePod,
+// or container overrides), Invalid when a container override matched but could
+// not be applied (non-remove targeting a missing container, or removes that
+// would leave zero containers), and NoMatch when no override matched.
 func Apply(pod *corev1.Pod, overrides []v1alpha1.WorkloadOverride, podNamespace string) Result {
 	wo := SelectMatch(overrides, pod, podNamespace)
 	if wo == nil {
 		return Result{Outcome: NoMatch}
 	}
 
+	if wo.Spec.ServiceAccountName != "" {
+		pod.Spec.ServiceAccountName = wo.Spec.ServiceAccountName
+	}
+
 	if wo.Spec.NoOp {
 		ApplyNoOp(pod)
+		return Result{Override: wo, Outcome: Applied}
+	}
+
+	if wo.Spec.ReplacePod != nil {
+		ApplyReplacePod(pod, wo.Spec.ReplacePod)
 		return Result{Override: wo, Outcome: Applied}
 	}
 
@@ -76,6 +85,21 @@ func IsNoOp(pod *corev1.Pod) bool {
 		c.LivenessProbe == nil &&
 		c.ReadinessProbe == nil &&
 		c.StartupProbe == nil
+}
+
+func ApplyReplacePod(pod *corev1.Pod, rp *v1alpha1.PodReplacement) {
+	pod.Spec.InitContainers = nil
+	c := corev1.Container{
+		Name:    rp.Name,
+		Image:   rp.Image,
+		Command: rp.Command,
+		Args:    rp.Args,
+		Env:     rp.Env,
+	}
+	if rp.PullPolicy != "" {
+		c.ImagePullPolicy = rp.PullPolicy
+	}
+	pod.Spec.Containers = []corev1.Container{c}
 }
 
 func ApplyContainerOverrides(pod *corev1.Pod, overrides []v1alpha1.ContainerOverride) (Outcome, string) {
