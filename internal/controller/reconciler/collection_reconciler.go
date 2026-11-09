@@ -18,6 +18,7 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 	collcel "github.com/openshift-eng/kubernetes-integration-testing/internal/collection/cel"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/dynutil"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/release"
 
 	"github.com/fsnotify/fsnotify"
@@ -26,8 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/client-go/discovery"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/restmapper"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,13 +40,24 @@ const collectionFinalizer = "kit.openshift.io/collection-protection"
 
 type collectionReconciler struct {
 	client         client.Client
-	dynClient      dynamic.Interface
-	discovery      discovery.DiscoveryInterface
+	clients        *kube.Clients
 	release        *release.ReleaseManifests
 	collectionsDir string
 	pullSecret     string
 	certProvider   *cert.Provider
 	log            *slog.Logger
+}
+
+func NewCollectionReconciler(c client.Client, log *slog.Logger, clients *kube.Clients, release *release.ReleaseManifests, collectionsDir string, pullSecret string, certProvider *cert.Provider) *collectionReconciler {
+	return &collectionReconciler{
+		client:         c,
+		clients:        clients,
+		release:        release,
+		collectionsDir: collectionsDir,
+		pullSecret:     pullSecret,
+		certProvider:   certProvider,
+		log:            log,
+	}
 }
 
 func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -174,7 +184,7 @@ func (r *collectionReconciler) render(rc *v1alpha1.ResourceCollection, kc *v1alp
 }
 
 func (r *collectionReconciler) newMapper() (meta.RESTMapper, error) {
-	groupResources, err := restmapper.GetAPIGroupResources(r.discovery)
+	groupResources, err := restmapper.GetAPIGroupResources(r.clients.Discovery)
 	if err != nil {
 		return nil, fmt.Errorf("discovering API resources: %w", err)
 	}
@@ -199,7 +209,7 @@ func (r *collectionReconciler) apply(ctx context.Context, result *collection.Ren
 	}
 
 	for _, obj := range append(namespaces, rest...) {
-		applied, err := dynutil.ApplyWithMapper(ctx, r.dynClient, mapper, obj)
+		applied, err := dynutil.ApplyWithMapper(ctx, r.clients.Dynamic, mapper, obj)
 		if err != nil {
 			return fmt.Errorf("applying %s %s: %w", obj.GetKind(), obj.GetName(), err)
 		}
@@ -256,7 +266,7 @@ func (r *collectionReconciler) applyStatusPatches(ctx context.Context, rc *v1alp
 		if target == nil {
 			return fmt.Errorf("status patch target %s/%s not found in rendered objects", sr.Kind, sr.Name)
 		}
-		if err := dynutil.UpdateStatus(ctx, r.dynClient, mapper, target, sr.Status); err != nil {
+		if err := dynutil.UpdateStatus(ctx, r.clients.Dynamic, mapper, target, sr.Status); err != nil {
 			return fmt.Errorf("status patch %s/%s: %w", sr.Kind, sr.Name, err)
 		}
 		r.log.Info("applied status patch", "kind", sr.Kind, "name", sr.Name)
@@ -315,11 +325,39 @@ func (r *collectionReconciler) handleDeletion(ctx context.Context, rc *v1alpha1.
 		return ctrl.Result{}, nil
 	}
 
+	referenced, err := r.isReferencedByCollection(ctx, rc.Name)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if referenced {
+		r.log.Info("collection still referenced by another ResourceCollection via scriptCollections, blocking deletion", "name", rc.Name)
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
 	controllerutil.RemoveFinalizer(rc, collectionFinalizer)
 	if err := r.client.Update(ctx, rc); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
+}
+
+func (r *collectionReconciler) isReferencedByCollection(ctx context.Context, name string) (bool, error) {
+	var list v1alpha1.ResourceCollectionList
+	if err := r.client.List(ctx, &list); err != nil {
+		return false, fmt.Errorf("listing ResourceCollections: %w", err)
+	}
+	for _, other := range list.Items {
+		// Collections that are flagged to be deleted are not considered
+		if other.Name == name || !other.DeletionTimestamp.IsZero() {
+			continue
+		}
+		for _, ref := range other.Spec.ScriptCollections {
+			if ref == name {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func (r *collectionReconciler) isRequested(ctx context.Context, name string) (bool, error) {
@@ -344,7 +382,8 @@ func (r *collectionReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Ma
 	builder := ctrl.NewControllerManagedBy(mgr).
 		Named("resourcecollection").
 		For(&v1alpha1.ResourceCollection{}).
-		Watches(&v1alpha1.DeploymentPlan{}, handler.EnqueueRequestsFromMapFunc(r.planToCollections))
+		Watches(&v1alpha1.DeploymentPlan{}, handler.EnqueueRequestsFromMapFunc(r.planToCollections)).
+		Watches(&v1alpha1.ResourceCollection{}, handler.EnqueueRequestsFromMapFunc(r.collectionToScriptDeps))
 
 	for _, name := range collection.BuiltinNames() {
 		fsys, err := collection.BuiltinFS(name)
@@ -386,6 +425,19 @@ func (r *collectionReconciler) planToCollections(ctx context.Context, obj client
 		if i < len(plan.Spec.Steps) && plan.Spec.Steps[i].Collection != nil {
 			requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKey{Name: plan.Spec.Steps[i].Collection.Source}})
 		}
+	}
+	return requests
+}
+
+// collectionToScriptDeps reconciles referenced collections so they can release finalizers promptly.
+func (r *collectionReconciler) collectionToScriptDeps(_ context.Context, obj client.Object) []ctrl.Request {
+	rc, ok := obj.(*v1alpha1.ResourceCollection)
+	if !ok {
+		return nil
+	}
+	var requests []ctrl.Request
+	for _, ref := range rc.Spec.ScriptCollections {
+		requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKey{Name: ref}})
 	}
 	return requests
 }

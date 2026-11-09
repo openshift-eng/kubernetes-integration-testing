@@ -121,16 +121,8 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 			}).SetupWithManager(mgr)
 		}},
 		{"ResourceCollection", func() error {
-			return (&collectionReconciler{
-				client:         mgr.GetClient(),
-				dynClient:      clients.Dynamic,
-				discovery:      clients.Discovery,
-				release:        rel,
-				collectionsDir: cfg.CollectionsDir,
-				pullSecret:     string(bd.PullSecret),
-				certProvider:   certProvider,
-				log:            log,
-			}).SetupWithManager(ctx, mgr)
+			return NewCollectionReconciler(mgr.GetClient(), log, clients, rel, cfg.CollectionsDir, string(bd.PullSecret), certProvider).
+				SetupWithManager(ctx, mgr)
 		}},
 		{"DeploymentPlan", func() error {
 			return (&deploymentPlanReconciler{
