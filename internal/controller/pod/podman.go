@@ -331,23 +331,13 @@ func (r *podmanRunner) startContainer(ctx context.Context, pod *corev1.Pod, podI
 
 	const saMountPath = "/var/run/secrets/kubernetes.io/serviceaccount"
 
-	env := make(map[string]string)
-	for _, e := range container.Env {
-		if e.ValueFrom != nil {
-			continue
-		}
-		env[e.Name] = e.Value
-	}
 	apiHost := saToken.Host
 	apiPort := saToken.Port
 	if r.apiServerHost != "" {
 		apiHost = r.apiServerHost
 		apiPort = r.apiServerPort
 	}
-	env["POD_NAME"] = pod.Name
-	env["POD_NAMESPACE"] = pod.Namespace
-	env["KUBERNETES_SERVICE_HOST"] = apiHost
-	env["KUBERNETES_SERVICE_PORT"] = apiPort
+	env := r.buildEnv(pod, container, apiHost, apiPort)
 
 	runMounts := []podman.Mount{
 		{Source: saToken.MountDir, Target: saMountPath, Options: "ro,z"},
@@ -449,4 +439,27 @@ func (r *podmanRunner) waitContainer(ctx context.Context, uid, podName, namespac
 	}:
 	case <-ctx.Done():
 	}
+}
+
+func (r *podmanRunner) buildEnv(pod *corev1.Pod, container corev1.Container, apiHost, apiPort string) map[string]string {
+	env := make(map[string]string)
+	for _, e := range container.Env {
+		if e.ValueFrom != nil {
+			if e.ValueFrom.FieldRef != nil {
+				val, err := ResolveFieldRef(pod, e.ValueFrom.FieldRef.FieldPath)
+				if err != nil {
+					r.log.Warn("skipping unresolvable fieldRef env var", "name", e.Name, "fieldPath", e.ValueFrom.FieldRef.FieldPath, "error", err)
+				} else {
+					env[e.Name] = val
+				}
+			}
+			continue
+		}
+		env[e.Name] = e.Value
+	}
+	env["POD_NAME"] = pod.Name
+	env["POD_NAMESPACE"] = pod.Namespace
+	env["KUBERNETES_SERVICE_HOST"] = apiHost
+	env["KUBERNETES_SERVICE_PORT"] = apiPort
+	return env
 }
