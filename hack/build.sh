@@ -36,5 +36,8 @@ for target in ${TARGETS}; do
     kit-controller)
         GO_COMPLIANCE_POLICY="exempt_all" go build ${GOFLAGS} -gcflags "${GCFLAGS}" -ldflags "${LDFLAGS}" -o "bin/kit-controller" ./cmd/controller
         ;;
+    kit-agent)
+        GO_COMPLIANCE_POLICY="exempt_all" go build ${GOFLAGS} -gcflags "${GCFLAGS}" -ldflags "${LDFLAGS}" -o "bin/kit-agent" ./cmd/agent
+        ;;
     esac
 done

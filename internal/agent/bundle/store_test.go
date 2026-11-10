@@ -20,7 +20,7 @@ func testBundle(t *testing.T, name string, content string) *Bundle {
 		Entrypoint: "main.js",
 		Files:      []collection.ScriptFile{{Path: "main.js", Content: []byte(content)}},
 	}
-	b, err := Build([]collection.ScriptPackageContent{pkg}, name, nil)
+	b, err := Build([]collection.ScriptPackageContent{pkg}, name, nil, "js", "longRunning", "")
 	require.NoError(t, err)
 	return b
 }

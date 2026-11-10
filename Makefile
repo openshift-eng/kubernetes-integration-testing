@@ -1,6 +1,6 @@
 all: build
 
-.PHONY: all build build-kit build-controller test lint clean verify verify-generate generate go-deps image image-dev release-gh
+.PHONY: all build build-kit build-controller build-agent test lint clean verify verify-generate generate go-deps image image-dev release-gh
 
 build:
 	hack/build.sh
@@ -10,6 +10,9 @@ build-kit:
 
 build-controller:
 	TARGETS=kit-controller hack/build.sh
+
+build-agent:
+	TARGETS=kit-agent hack/build.sh
 
 test:
 	hack/go-test.sh
@@ -41,5 +44,5 @@ release-gh:
 image:
 	podman build -t localhost/kit-controller:latest .
 
-image-dev: build-controller
+image-dev: build-controller build-agent
 	podman build -f Dockerfile.dev -t localhost/kit-controller:latest .

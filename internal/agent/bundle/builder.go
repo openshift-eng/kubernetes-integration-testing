@@ -15,6 +15,9 @@ import (
 )
 
 type Manifest struct {
+	Runtime    string            `json:"runtime"`
+	Lifecycle  string            `json:"lifecycle"`
+	Timeout    string            `json:"timeout,omitempty"`
 	Entrypoint string            `json:"entrypoint"`
 	Packages   []PackageManifest `json:"packages"`
 }
@@ -34,13 +37,13 @@ type Bundle struct {
 func (b *Bundle) Reader() io.Reader { return bytes.NewReader(b.data) }
 func (b *Bundle) Size() int         { return len(b.data) }
 
-func Build(packages []collection.ScriptPackageContent, entrypointPackage string, values map[string]json.RawMessage) (*Bundle, error) {
+func Build(packages []collection.ScriptPackageContent, entrypointPackage string, values map[string]json.RawMessage, runtime string, lifecycle string, timeout string) (*Bundle, error) {
 	sorted, err := validateAndSort(packages)
 	if err != nil {
 		return nil, err
 	}
 
-	manifest, err := buildManifest(sorted, entrypointPackage)
+	manifest, err := buildManifest(sorted, entrypointPackage, runtime, lifecycle, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +85,7 @@ func validateAndSort(packages []collection.ScriptPackageContent) ([]collection.S
 	return sorted, nil
 }
 
-func buildManifest(packages []collection.ScriptPackageContent, entrypointPackage string) (*Manifest, error) {
+func buildManifest(packages []collection.ScriptPackageContent, entrypointPackage string, runtime string, lifecycle string, timeout string) (*Manifest, error) {
 	var entrypointFile string
 	for _, pkg := range packages {
 		if pkg.Name == entrypointPackage {
@@ -95,6 +98,9 @@ func buildManifest(packages []collection.ScriptPackageContent, entrypointPackage
 	}
 
 	manifest := &Manifest{
+		Runtime:    runtime,
+		Lifecycle:  lifecycle,
+		Timeout:    timeout,
 		Entrypoint: entrypointPackage + "/" + entrypointFile,
 		Packages:   make([]PackageManifest, len(packages)),
 	}
