@@ -363,6 +363,7 @@ func (r *podmanRunner) startContainer(ctx context.Context, pod *corev1.Pod, podI
 			Name:       containerName,
 			Image:      container.Image,
 			Pod:        podID,
+			Hostname:   pod.Name,
 			Detach:     true,
 			Replace:    true,
 			LogDriver:  "k8s-file",

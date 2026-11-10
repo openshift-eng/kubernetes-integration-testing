@@ -49,6 +49,7 @@ type RunOpts struct {
 	Image       string
 	Network     string
 	Pod         string
+	Hostname    string
 	Labels      map[string]string
 	Env         map[string]string
 	Mounts      []Mount
@@ -144,6 +145,9 @@ func (c *client) Run(ctx context.Context, opts RunOpts) (string, error) {
 	}
 	if opts.Network != "" {
 		args = append(args, "--network", opts.Network)
+	}
+	if opts.Hostname != "" {
+		args = append(args, "--hostname", opts.Hostname)
 	}
 	if opts.Replace {
 		args = append(args, "--replace")
