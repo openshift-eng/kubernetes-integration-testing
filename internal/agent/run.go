@@ -17,7 +17,9 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/agent/download"
 )
 
-func Run(ctx context.Context, log *slog.Logger, fs afero.Fs, cfg Config) (err error) {
+type RuntimeFactory func(name string) (Runtime, error)
+
+func Run(ctx context.Context, log *slog.Logger, fs afero.Fs, cfg Config, runtimeFactory RuntimeFactory) (err error) {
 	bundleDir, err := afero.TempDir(fs, "", "kit-agent-*")
 	if err != nil {
 		return fmt.Errorf("creating temp directory: %w", err)
@@ -52,6 +54,13 @@ func Run(ctx context.Context, log *slog.Logger, fs afero.Fs, cfg Config) (err er
 		Pod:        pod,
 	}
 
+	rt, err := runtimeFactory(manifest.Runtime)
+	if err != nil {
+		return err
+	}
+
+	h := newHost(log, nil)
+
 	log.Info("agent ready",
 		"runtime", manifest.Runtime,
 		"lifecycle", manifest.Lifecycle,
@@ -60,7 +69,16 @@ func Run(ctx context.Context, log *slog.Logger, fs afero.Fs, cfg Config) (err er
 		"namespace", req.Pod.Namespace,
 	)
 
-	_ = req
+	result, err := rt.Run(ctx, req, h)
+	if err != nil {
+		return fmt.Errorf("runtime %s: %w", rt.Name(), err)
+	}
+
+	log.Info("agent finished", "exitCode", result.ExitCode, "reason", result.Reason)
+
+	if result.ExitCode != 0 {
+		return fmt.Errorf("script exited with code %d: %s", result.ExitCode, result.Reason)
+	}
 
 	return nil
 }
