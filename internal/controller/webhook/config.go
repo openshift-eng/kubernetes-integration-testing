@@ -108,7 +108,8 @@ func (c *Configurer) WaitReady(ctx context.Context) error {
 	}
 }
 
-// Ready implements healthz.Checker for the manager's readiness probe.
+func (c *Configurer) Name() string { return "workload-overrides" }
+
 func (c *Configurer) Ready(_ *http.Request) error {
 	if !c.ready.Load() {
 		return fmt.Errorf("workload override webhook is not installed")

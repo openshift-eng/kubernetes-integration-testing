@@ -25,7 +25,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
-func Start(ctx context.Context, log *slog.Logger, bd *bootstrap.BootstrapData, clients *kube.Clients, cfg common.Config, registry *image.Registry, certProvider *cert.Provider, shutdowner common.Shutdowner) error {
+func Start(ctx context.Context, log *slog.Logger, bd *bootstrap.BootstrapData, clients *kube.Clients, cfg common.Config, registry *image.Registry, certProvider *cert.Provider, shutdowner common.Shutdowner, readyzChecks []common.ReadyzChecker) error {
 	ctrl.SetLogger(logr.FromSlogHandler(log.Handler()))
 
 	installer := NewManifestInstaller(
@@ -61,8 +61,10 @@ func Start(ctx context.Context, log *slog.Logger, bd *bootstrap.BootstrapData, c
 		return fmt.Errorf("configuring webhook: %w", err)
 	}
 
-	if err := mgr.AddReadyzCheck("workload-overrides", wh.Ready); err != nil {
-		return fmt.Errorf("adding readyz check: %w", err)
+	for _, check := range append(readyzChecks, wh) {
+		if err := mgr.AddReadyzCheck(check.Name(), check.Ready); err != nil {
+			return fmt.Errorf("adding readyz check %s: %w", check.Name(), err)
+		}
 	}
 
 	if err := wh.EnsureConfiguration(ctx); err != nil {

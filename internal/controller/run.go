@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/agent/bundle"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/bootstrap"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/cert"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/common"
@@ -14,6 +16,7 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/podman"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/pullsecret"
+	"github.com/spf13/afero"
 )
 
 func Run(ctx context.Context, log *slog.Logger, cfg common.Config) error {
@@ -39,10 +42,22 @@ func Run(ctx context.Context, log *slog.Logger, cfg common.Config) error {
 
 	certProvider := cert.NewProvider(clients.Clientset, bootstrap.Namespace, reconciler.NewCACallback(clients.Client, log))
 
+	bundleStore, err := bundle.NewBundleStore(afero.NewOsFs(), filepath.Join(cfg.CacheDir, "bundles"), log)
+	if err != nil {
+		return fmt.Errorf("creating bundle store: %w", err)
+	}
+	bundleSrv := bundle.NewServer(bundleStore, cfg.BundleServerAddr, log)
+
 	shutdowner := common.NewDeferredShutdowner(ctx)
-	if err := reconciler.Start(shutdowner.Context(), log, bd, clients, cfg, registry, certProvider, shutdowner); err != nil {
+	if err := reconciler.Start(shutdowner.Context(), log, bd, clients, cfg, registry, certProvider, shutdowner, []common.ReadyzChecker{bundleSrv}); err != nil {
 		return fmt.Errorf("starting reconciler: %w", err)
 	}
+
+	go func() {
+		if err := bundleSrv.Start(ctx); err != nil && ctx.Err() == nil {
+			log.Error("bundle server stopped unexpectedly", "error", err)
+		}
+	}()
 
 	var runner pod.PodRunner
 	if bd.KitCluster.Spec.Provider == "kwok" {
