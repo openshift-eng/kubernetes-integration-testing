@@ -9,6 +9,7 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/agent/bundle"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/bootstrap"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/cert"
+	agentctl "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/common"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/pod"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/reconciler"
@@ -49,7 +50,7 @@ func Run(ctx context.Context, log *slog.Logger, cfg common.Config) error {
 	bundleSrv := bundle.NewServer(bundleStore, cfg.BundleServerAddr, log)
 
 	shutdowner := common.NewDeferredShutdowner(ctx)
-	if err := reconciler.Start(shutdowner.Context(), log, bd, clients, cfg, registry, certProvider, shutdowner, []common.ReadyzChecker{bundleSrv}); err != nil {
+	if err := reconciler.Start(shutdowner.Context(), log, bd, clients, cfg, registry, certProvider, shutdowner, bundleStore, []common.ReadyzChecker{bundleSrv}); err != nil {
 		return fmt.Errorf("starting reconciler: %w", err)
 	}
 
@@ -58,6 +59,8 @@ func Run(ctx context.Context, log *slog.Logger, cfg common.Config) error {
 			log.Error("bundle server stopped unexpectedly", "error", err)
 		}
 	}()
+
+	go bundleStore.RunGC(ctx, bundle.DefaultGCConfig(), agentctl.ProtectedBundleState(clients.Client))
 
 	var runner pod.PodRunner
 	if bd.KitCluster.Spec.Provider == "kwok" {

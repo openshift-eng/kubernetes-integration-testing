@@ -23,10 +23,8 @@ func testServer(t *testing.T) (*Server, *BundleStore) {
 	return srv, store
 }
 
-// TestServer verifies the bundle HTTP server: serving bundles, returning 404
-// for unknown agents, and setting correct response headers.
 func TestServer(t *testing.T) {
-	t.Run("serve bundle", func(t *testing.T) {
+	t.Run("serve bundle by digest", func(t *testing.T) {
 		srv, store := testServer(t)
 
 		pkg := collection.ScriptPackageContent{
@@ -38,9 +36,9 @@ func TestServer(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, store.Put("my-agent", b))
 
-		req := httptest.NewRequest("GET", "/agents/my-agent/bundle", nil)
+		req := httptest.NewRequest("GET", "/bundles/"+b.Digest, nil)
 		w := httptest.NewRecorder()
-		srv.server.Handler.ServeHTTP(w, req)
+		srv.Handler().ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
 
@@ -48,14 +46,25 @@ func TestServer(t *testing.T) {
 		assert.Equal(t, b.Size(), len(body))
 	})
 
-	t.Run("unknown agent", func(t *testing.T) {
+	t.Run("unknown digest", func(t *testing.T) {
 		srv, _ := testServer(t)
 
-		req := httptest.NewRequest("GET", "/agents/nonexistent/bundle", nil)
+		req := httptest.NewRequest("GET", "/bundles/"+
+			"0000000000000000000000000000000000000000000000000000000000000000", nil)
 		w := httptest.NewRecorder()
-		srv.server.Handler.ServeHTTP(w, req)
+		srv.Handler().ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+
+	t.Run("invalid digest returns 400", func(t *testing.T) {
+		srv, _ := testServer(t)
+
+		req := httptest.NewRequest("GET", "/bundles/not-a-valid-digest", nil)
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+
+		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
 
 	t.Run("content headers", func(t *testing.T) {
@@ -70,12 +79,30 @@ func TestServer(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, store.Put("hdr-agent", b))
 
-		req := httptest.NewRequest("GET", "/agents/hdr-agent/bundle", nil)
+		req := httptest.NewRequest("GET", "/bundles/"+b.Digest, nil)
 		w := httptest.NewRecorder()
-		srv.server.Handler.ServeHTTP(w, req)
+		srv.Handler().ServeHTTP(w, req)
 
 		assert.Equal(t, "application/gzip", w.Header().Get("Content-Type"))
 		assert.NotEmpty(t, w.Header().Get("Content-Length"))
 		assert.Equal(t, b.Digest, w.Header().Get("ETag"))
+		assert.Equal(t, "public, max-age=31536000, immutable", w.Header().Get("Cache-Control"))
+	})
+
+	t.Run("old and new digest both servable after put", func(t *testing.T) {
+		srv, store := testServer(t)
+
+		old := testBundle(t, "pkg", "old-code")
+		require.NoError(t, store.Put("agent-a", old))
+
+		updated := testBundle(t, "pkg", "new-code")
+		require.NoError(t, store.Put("agent-a", updated))
+
+		for _, b := range []*Bundle{old, updated} {
+			req := httptest.NewRequest("GET", "/bundles/"+b.Digest, nil)
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			assert.Equal(t, http.StatusOK, w.Code, "digest %s should be servable", b.Digest[:12])
+		}
 	})
 }

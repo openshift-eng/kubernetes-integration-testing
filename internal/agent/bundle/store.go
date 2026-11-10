@@ -8,12 +8,17 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 
 	"github.com/spf13/afero"
 )
 
 var digestPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+
+func IsValidDigest(s string) bool {
+	return digestPattern.MatchString(s)
+}
 
 type BundleStore struct {
 	mu     sync.RWMutex
@@ -50,38 +55,23 @@ func (s *BundleStore) Put(agentName string, b *Bundle) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	oldDigest := s.agents[agentName]
-
 	bundlePath, err := s.bundlePath(b.Digest)
 	if err != nil {
 		return err
 	}
 	if exists, _ := afero.Exists(s.fs, bundlePath); !exists {
-		if err := afero.WriteFile(s.fs, bundlePath, b.data, 0644); err != nil {
+		tmpPath := bundlePath + ".tmp"
+		if err := afero.WriteFile(s.fs, tmpPath, b.data, 0644); err != nil {
 			return fmt.Errorf("writing bundle %s: %w", b.Digest, err)
+		}
+		if err := s.fs.Rename(tmpPath, bundlePath); err != nil {
+			_ = s.fs.Remove(tmpPath)
+			return fmt.Errorf("renaming bundle %s: %w", b.Digest, err)
 		}
 	}
 
 	s.agents[agentName] = b.Digest
-
-	if oldDigest != "" && oldDigest != b.Digest && !s.isReferenced(oldDigest) {
-		oldPath, err := s.bundlePath(oldDigest)
-		if err != nil {
-			return err
-		}
-		if err := s.fs.Remove(oldPath); err != nil {
-			return fmt.Errorf("removing old bundle %s: %w", oldDigest, err)
-		}
-	}
-
 	return s.writeIndex()
-}
-
-func (s *BundleStore) Resolve(agentName string) (string, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	digest, ok := s.agents[agentName]
-	return digest, ok
 }
 
 func (s *BundleStore) Open(digest string) (io.ReadCloser, int64, error) {
@@ -103,37 +93,90 @@ func (s *BundleStore) Open(digest string) (io.ReadCloser, int64, error) {
 	return f, fi.Size(), nil
 }
 
-func (s *BundleStore) Remove(agentName string) error {
+func (s *BundleStore) activeDigests() map[string]struct{} {
+	active := make(map[string]struct{}, len(s.agents))
+	for _, d := range s.agents {
+		active[d] = struct{}{}
+	}
+	return active
+}
+
+func (s *BundleStore) listBlobs() ([]string, error) {
+	entries, err := afero.ReadDir(s.fs, s.dir)
+	if err != nil {
+		return nil, fmt.Errorf("listing bundles directory: %w", err)
+	}
+	const suffix = ".tar.gz"
+	var digests []string
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, suffix) {
+			continue
+		}
+		d := name[:len(name)-len(suffix)]
+		if digestPattern.MatchString(d) {
+			digests = append(digests, d)
+		}
+	}
+	return digests, nil
+}
+
+func (s *BundleStore) purgeStaleAgents(activeAgents map[string]struct{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	digest, ok := s.agents[agentName]
-	if !ok {
-		return nil
-	}
-
-	delete(s.agents, agentName)
-
-	if !s.isReferenced(digest) {
-		path, err := s.bundlePath(digest)
-		if err != nil {
-			return err
-		}
-		if err := s.fs.Remove(path); err != nil {
-			return fmt.Errorf("removing bundle %s: %w", digest, err)
+	dirty := false
+	for name := range s.agents {
+		if _, ok := activeAgents[name]; !ok {
+			delete(s.agents, name)
+			dirty = true
+			s.log.Info("bundle GC: purged stale agent mapping", "agent", name)
 		}
 	}
-
-	return s.writeIndex()
+	if dirty {
+		return s.writeIndex()
+	}
+	return nil
 }
 
-func (s *BundleStore) isReferenced(digest string) bool {
-	for _, d := range s.agents {
-		if d == digest {
-			return true
+func (s *BundleStore) snapshotForGC() (blobs []string, active map[string]struct{}, err error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	blobs, err = s.listBlobs()
+	if err != nil {
+		return nil, nil, err
+	}
+	return blobs, s.activeDigests(), nil
+}
+
+// deleteIfUnreferenced removes a blob only if it is not in the internal
+// agent→digest mapping and not in the externally protected set. The check
+// and the filesystem delete happen under the same lock, closing the TOCTOU
+// gap between listing active digests and removing blobs.
+func (s *BundleStore) deleteIfUnreferenced(digest string, protected map[string]struct{}) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := protected[digest]; ok {
+		return false, nil
+	}
+
+	for _, activeDigest := range s.agents {
+		if activeDigest == digest {
+			return false, nil
 		}
 	}
-	return false
+
+	path, err := s.bundlePath(digest)
+	if err != nil {
+		return false, err
+	}
+
+	if err := s.fs.Remove(path); err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("removing bundle blob %s: %w", digest, err)
+	}
+
+	return true, nil
 }
 
 func (s *BundleStore) bundlePath(digest string) (string, error) {

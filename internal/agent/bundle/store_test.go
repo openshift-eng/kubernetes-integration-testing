@@ -1,7 +1,6 @@
 package bundle
 
 import (
-	"encoding/json"
 	"io"
 	"log/slog"
 	"testing"
@@ -25,11 +24,8 @@ func testBundle(t *testing.T, name string, content string) *Bundle {
 	return b
 }
 
-// TestBundleStore verifies the store's core operations: put/resolve round-trips,
-// content-addressed dedup, self-cleaning of unreferenced digests, disk
-// persistence across restarts, and pruning of stale index entries.
 func TestBundleStore(t *testing.T) {
-	t.Run("put and resolve", func(t *testing.T) {
+	t.Run("put and open", func(t *testing.T) {
 		fs := afero.NewMemMapFs()
 		s, err := NewBundleStore(fs, "/bundles", slog.New(slog.DiscardHandler))
 		require.NoError(t, err)
@@ -37,11 +33,7 @@ func TestBundleStore(t *testing.T) {
 		b := testBundle(t, "agent-a", "code-a")
 		require.NoError(t, s.Put("agent-a", b))
 
-		digest, ok := s.Resolve("agent-a")
-		assert.True(t, ok)
-		assert.Equal(t, b.Digest, digest)
-
-		reader, size, err := s.Open(digest)
+		reader, size, err := s.Open(b.Digest)
 		require.NoError(t, err)
 		defer reader.Close()
 		assert.Greater(t, size, int64(0))
@@ -60,9 +52,9 @@ func TestBundleStore(t *testing.T) {
 		require.NoError(t, s.Put("agent-a", b))
 		require.NoError(t, s.Put("agent-a", b))
 
-		digest, ok := s.Resolve("agent-a")
-		assert.True(t, ok)
-		assert.Equal(t, b.Digest, digest)
+		reader, _, err := s.Open(b.Digest)
+		require.NoError(t, err)
+		reader.Close()
 	})
 
 	t.Run("two agents same digest", func(t *testing.T) {
@@ -85,7 +77,7 @@ func TestBundleStore(t *testing.T) {
 		assert.Equal(t, 1, tarCount, "same digest should produce one file")
 	})
 
-	t.Run("put replaces and cleans old", func(t *testing.T) {
+	t.Run("put keeps old blob", func(t *testing.T) {
 		fs := afero.NewMemMapFs()
 		s, err := NewBundleStore(fs, "/bundles", slog.New(slog.DiscardHandler))
 		require.NoError(t, err)
@@ -93,57 +85,16 @@ func TestBundleStore(t *testing.T) {
 		old := testBundle(t, "pkg", "old-code")
 		require.NoError(t, s.Put("agent-a", old))
 
-		oldPath := "/bundles/" + old.Digest + ".tar.gz"
-		exists, err := afero.Exists(fs, oldPath)
-		require.NoError(t, err)
-		assert.True(t, exists)
-
 		updated := testBundle(t, "pkg", "new-code")
 		require.NoError(t, s.Put("agent-a", updated))
 
-		exists, err = afero.Exists(fs, oldPath)
+		oldReader, _, err := s.Open(old.Digest)
+		require.NoError(t, err, "old blob must survive Put — GC handles cleanup")
+		oldReader.Close()
+
+		newReader, _, err := s.Open(updated.Digest)
 		require.NoError(t, err)
-		assert.False(t, exists)
-
-		exists, err = afero.Exists(fs, "/bundles/"+updated.Digest+".tar.gz")
-		require.NoError(t, err)
-		assert.True(t, exists)
-	})
-
-	t.Run("remove", func(t *testing.T) {
-		fs := afero.NewMemMapFs()
-		s, err := NewBundleStore(fs, "/bundles", slog.New(slog.DiscardHandler))
-		require.NoError(t, err)
-
-		b := testBundle(t, "pkg", "code")
-		require.NoError(t, s.Put("agent-a", b))
-		require.NoError(t, s.Remove("agent-a"))
-
-		_, ok := s.Resolve("agent-a")
-		assert.False(t, ok)
-
-		exists, err := afero.Exists(fs, "/bundles/"+b.Digest+".tar.gz")
-		require.NoError(t, err)
-		assert.False(t, exists)
-	})
-
-	t.Run("remove shared digest keeps file", func(t *testing.T) {
-		fs := afero.NewMemMapFs()
-		s, err := NewBundleStore(fs, "/bundles", slog.New(slog.DiscardHandler))
-		require.NoError(t, err)
-
-		b := testBundle(t, "shared", "same-code")
-		require.NoError(t, s.Put("agent-a", b))
-		require.NoError(t, s.Put("agent-b", b))
-		require.NoError(t, s.Remove("agent-a"))
-
-		exists, err := afero.Exists(fs, "/bundles/"+b.Digest+".tar.gz")
-		require.NoError(t, err)
-		assert.True(t, exists)
-
-		digest, ok := s.Resolve("agent-b")
-		assert.True(t, ok)
-		assert.Equal(t, b.Digest, digest)
+		newReader.Close()
 	})
 
 	t.Run("restart persistence", func(t *testing.T) {
@@ -157,24 +108,29 @@ func TestBundleStore(t *testing.T) {
 		s2, err := NewBundleStore(fs, "/bundles", slog.New(slog.DiscardHandler))
 		require.NoError(t, err)
 
-		digest, ok := s2.Resolve("agent-a")
-		assert.True(t, ok)
-		assert.Equal(t, b.Digest, digest)
+		reader, _, err := s2.Open(b.Digest)
+		require.NoError(t, err, "blob must survive restart")
+		reader.Close()
 	})
 
-	t.Run("startup prunes stale", func(t *testing.T) {
+	t.Run("startup prunes stale index entry", func(t *testing.T) {
 		fs := afero.NewMemMapFs()
 		require.NoError(t, fs.MkdirAll("/bundles", 0755))
 
-		idx := storeIndex{Agents: map[string]string{"stale": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}}
-		data, _ := json.Marshal(idx)
-		require.NoError(t, afero.WriteFile(fs, "/bundles/index.json", data, 0644))
+		require.NoError(t, afero.WriteFile(fs, "/bundles/index.json",
+			[]byte(`{"agents":{"stale":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}}`), 0644))
 
 		s, err := NewBundleStore(fs, "/bundles", slog.New(slog.DiscardHandler))
 		require.NoError(t, err)
 
-		_, ok := s.Resolve("stale")
-		assert.False(t, ok, "entry referencing missing tar.gz should be pruned")
+		b := testBundle(t, "pkg", "code")
+		require.NoError(t, s.Put("stale", b))
+
+		s2, err := NewBundleStore(fs, "/bundles", slog.New(slog.DiscardHandler))
+		require.NoError(t, err)
+		reader, _, err := s2.Open(b.Digest)
+		require.NoError(t, err, "new mapping for previously stale agent must persist")
+		reader.Close()
 	})
 
 	t.Run("corrupt index starts fresh", func(t *testing.T) {
@@ -187,23 +143,20 @@ func TestBundleStore(t *testing.T) {
 
 		b := testBundle(t, "pkg", "code")
 		require.NoError(t, s.Put("agent-a", b))
-		digest, ok := s.Resolve("agent-a")
-		assert.True(t, ok)
-		assert.Equal(t, b.Digest, digest)
+
+		reader, _, err := s.Open(b.Digest)
+		require.NoError(t, err)
+		reader.Close()
 	})
 
 	t.Run("invalid digest in index skipped", func(t *testing.T) {
 		fs := afero.NewMemMapFs()
 		require.NoError(t, fs.MkdirAll("/bundles", 0755))
 
-		idx := storeIndex{Agents: map[string]string{"bad": "../../etc/passwd"}}
-		data, _ := json.Marshal(idx)
-		require.NoError(t, afero.WriteFile(fs, "/bundles/index.json", data, 0644))
+		require.NoError(t, afero.WriteFile(fs, "/bundles/index.json",
+			[]byte(`{"agents":{"bad":"../../etc/passwd"}}`), 0644))
 
-		s, err := NewBundleStore(fs, "/bundles", slog.New(slog.DiscardHandler))
-		require.NoError(t, err)
-
-		_, ok := s.Resolve("bad")
-		assert.False(t, ok, "entry with traversal digest should be skipped")
+		_, err := NewBundleStore(fs, "/bundles", slog.New(slog.DiscardHandler))
+		require.NoError(t, err, "store must load despite traversal digest in index")
 	})
 }

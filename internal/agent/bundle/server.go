@@ -2,11 +2,13 @@ package bundle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"sync/atomic"
 	"time"
 )
@@ -25,7 +27,7 @@ func NewServer(store *BundleStore, addr string, log *slog.Logger) *Server {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /agents/{name}/bundle", s.serveBundle)
+	mux.HandleFunc("GET /bundles/{digest}", s.serveBundle)
 
 	s.server = &http.Server{
 		Addr:    addr,
@@ -63,6 +65,9 @@ func (s *Server) Start(ctx context.Context) error {
 	return s.server.Shutdown(shutdownCtx)
 }
 
+// Handler returns the server's HTTP handler for use in tests.
+func (s *Server) Handler() http.Handler { return s.server.Handler }
+
 func (s *Server) Name() string { return "bundle-server" }
 
 func (s *Server) Ready(_ *http.Request) error {
@@ -73,17 +78,20 @@ func (s *Server) Ready(_ *http.Request) error {
 }
 
 func (s *Server) serveBundle(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
-	digest, ok := s.store.Resolve(name)
-	if !ok {
-		http.NotFound(w, r)
+	digest := r.PathValue("digest")
+	if !digestPattern.MatchString(digest) {
+		http.Error(w, "invalid digest", http.StatusBadRequest)
 		return
 	}
 
 	reader, size, err := s.store.Open(digest)
 	if err != nil {
-		s.log.Error("opening bundle", "agent", name, "digest", digest, "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		if errors.Is(err, os.ErrNotExist) {
+			http.NotFound(w, r)
+		} else {
+			s.log.Error("opening bundle", "digest", digest[:12], "error", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+		}
 		return
 	}
 	defer reader.Close()
@@ -91,7 +99,8 @@ func (s *Server) serveBundle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/gzip")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
 	w.Header().Set("ETag", digest)
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	if _, err := io.Copy(w, reader); err != nil {
-		s.log.Warn("streaming bundle", "agent", name, "error", err)
+		s.log.Warn("streaming bundle", "digest", digest[:12], "error", err)
 	}
 }
