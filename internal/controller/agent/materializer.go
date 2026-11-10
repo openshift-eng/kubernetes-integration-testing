@@ -81,6 +81,12 @@ func (m *Materializer) Materialize(ctx context.Context, ag *v1alpha1.Agent) (*Ma
 	if err := m.ensureRoleBinding(ctx, name, ns, ownerRef); err != nil {
 		return nil, fmt.Errorf("ensuring role binding: %w", err)
 	}
+	if err := m.ensureClusterRole(ctx, name, ownerRef); err != nil {
+		return nil, fmt.Errorf("ensuring cluster role: %w", err)
+	}
+	if err := m.ensureClusterRoleBinding(ctx, name, ns, ownerRef); err != nil {
+		return nil, fmt.Errorf("ensuring cluster role binding: %w", err)
+	}
 	if err := m.ensureWorkloadOverride(ctx, ag, name, ownerRef, b.Digest); err != nil {
 		return nil, fmt.Errorf("ensuring workload override: %w", err)
 	}
@@ -170,7 +176,6 @@ func (m *Materializer) ensureRole(ctx context.Context, name, namespace string, o
 			Namespace:       namespace,
 			OwnerReferences: []metav1.OwnerReference{ownerRef},
 		},
-		// TODO: placeholder — needs ClusterRole for cluster-scoped resources (OCP CRDs, Nodes)
 		Rules: defaultPolicyRules(),
 	}
 	err := m.client.Create(ctx, role)
@@ -199,6 +204,45 @@ func (m *Materializer) ensureRoleBinding(ctx context.Context, name, namespace st
 		},
 	}
 	err := m.client.Create(ctx, rb)
+	if apierrors.IsAlreadyExists(err) {
+		return nil
+	}
+	return err
+}
+
+func (m *Materializer) ensureClusterRole(ctx context.Context, name string, ownerRef metav1.OwnerReference) error {
+	cr := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            name,
+			OwnerReferences: []metav1.OwnerReference{ownerRef},
+		},
+		Rules: clusterScopedPolicyRules(),
+	}
+	err := m.client.Create(ctx, cr)
+	if apierrors.IsAlreadyExists(err) {
+		return nil
+	}
+	return err
+}
+
+func (m *Materializer) ensureClusterRoleBinding(ctx context.Context, name, namespace string, ownerRef metav1.OwnerReference) error {
+	crb := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            name,
+			OwnerReferences: []metav1.OwnerReference{ownerRef},
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:      "ServiceAccount",
+			Name:      name,
+			Namespace: namespace,
+		}},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     name,
+		},
+	}
+	err := m.client.Create(ctx, crb)
 	if apierrors.IsAlreadyExists(err) {
 		return nil
 	}
@@ -245,6 +289,8 @@ func (m *Materializer) buildWOSpec(ag *v1alpha1.Agent, bundleURL, digest, saName
 
 	switch ag.Spec.Target.Replace {
 	case v1alpha1.AgentReplaceContainer:
+		// TODO: EnvOverride needs ValueFrom support so container override mode
+		// can declare pod identity env vars the same way ReplacePod does.
 		spec.Containers = []v1alpha1.ContainerOverride{{
 			Name:    ag.Spec.Target.Container,
 			Image:   m.agentImage,
@@ -259,10 +305,10 @@ func (m *Materializer) buildWOSpec(ag *v1alpha1.Agent, bundleURL, digest, saName
 			Name:    "kit-agent",
 			Image:   m.agentImage,
 			Command: []string{"/usr/bin/kit-agent"},
-			Env: []corev1.EnvVar{
+			Env: append(podIdentityEnvVars(), []corev1.EnvVar{
 				{Name: "KIT_AGENT_BUNDLE_URL", Value: bundleURL},
 				{Name: "KIT_AGENT_BUNDLE_SHA256", Value: digest},
-			},
+			}...),
 		}
 	}
 
@@ -323,6 +369,17 @@ func WODigest(wo *v1alpha1.WorkloadOverride) string {
 	return ""
 }
 
+func podIdentityEnvVars() []corev1.EnvVar {
+	fieldRef := func(path string) *corev1.EnvVarSource {
+		return &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: path}}
+	}
+	return []corev1.EnvVar{
+		{Name: "KIT_POD_NAME", ValueFrom: fieldRef("metadata.name")},
+		{Name: "KIT_POD_UID", ValueFrom: fieldRef("metadata.uid")},
+		{Name: "KIT_NODE_NAME", ValueFrom: fieldRef("spec.nodeName")},
+	}
+}
+
 func agentOwnerRef(ag *v1alpha1.Agent) metav1.OwnerReference {
 	return metav1.OwnerReference{
 		APIVersion: v1alpha1.GroupVersion.String(),
@@ -357,7 +414,19 @@ func defaultPolicyRules() []rbacv1.PolicyRule {
 		},
 		{APIGroups: []string{"apps"}, Resources: []string{"*"}, Verbs: allVerbs},
 		{APIGroups: []string{"batch"}, Resources: []string{"*"}, Verbs: allVerbs},
-		{APIGroups: []string{"kit.openshift.io"}, Resources: []string{"*"},
-			Verbs: []string{"get", "list", "watch"}},
+	}
+}
+
+// TODO: the OpenShift API groups below are hardcoded for the MCO smoke test.
+// This must be replaced by a per-Agent RBAC spec (e.g. Agent.spec.rbac.clusterRules)
+// so collections declare the access they need instead of granting a fixed superset.
+func clusterScopedPolicyRules() []rbacv1.PolicyRule {
+	readOnly := []string{"get", "list", "watch"}
+	return []rbacv1.PolicyRule{
+		{APIGroups: []string{""}, Resources: []string{"nodes", "nodes/status", "persistentvolumes", "namespaces"}, Verbs: readOnly},
+		{APIGroups: []string{"kit.openshift.io"}, Resources: []string{"*"}, Verbs: readOnly},
+		// TEST-ONLY: remove when Agent.spec.rbac is implemented
+		{APIGroups: []string{"machineconfiguration.openshift.io"}, Resources: []string{"*"}, Verbs: readOnly},
+		{APIGroups: []string{"config.openshift.io"}, Resources: []string{"*"}, Verbs: readOnly},
 	}
 }

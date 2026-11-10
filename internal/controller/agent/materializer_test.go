@@ -125,6 +125,16 @@ func TestMaterialize(t *testing.T) {
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-mcd-stub", Namespace: "target-ns"}, &rb))
 		assert.Equal(t, "kit-agent-mcd-stub", rb.Subjects[0].Name)
 
+		var cr rbacv1.ClusterRole
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-mcd-stub"}, &cr))
+		assert.NotEmpty(t, cr.Rules)
+
+		var crb rbacv1.ClusterRoleBinding
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-mcd-stub"}, &crb))
+		assert.Equal(t, "kit-agent-mcd-stub", crb.Subjects[0].Name)
+		assert.Equal(t, "target-ns", crb.Subjects[0].Namespace)
+		assert.Equal(t, "ClusterRole", crb.RoleRef.Kind)
+
 		var wo v1alpha1.WorkloadOverride
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-mcd-stub"}, &wo))
 		assert.Equal(t, "target-ns", wo.Spec.Match.Namespace)
@@ -197,11 +207,22 @@ func TestMaterialize(t *testing.T) {
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-my-agent"}, &wo))
 		require.NotNil(t, wo.Spec.ReplacePod)
 		env := wo.Spec.ReplacePod.Env
-		require.Len(t, env, 2)
-		assert.Equal(t, "KIT_AGENT_BUNDLE_URL", env[0].Name)
-		assert.Equal(t, fmt.Sprintf("http://controller:8082/bundles/%s", result.BundleDigest), env[0].Value)
-		assert.Equal(t, "KIT_AGENT_BUNDLE_SHA256", env[1].Name)
-		assert.Equal(t, result.BundleDigest, env[1].Value)
+		require.Len(t, env, 5)
+
+		envByName := make(map[string]corev1.EnvVar, len(env))
+		for _, e := range env {
+			envByName[e.Name] = e
+		}
+
+		assert.Equal(t, fmt.Sprintf("http://controller:8082/bundles/%s", result.BundleDigest), envByName["KIT_AGENT_BUNDLE_URL"].Value)
+		assert.Equal(t, result.BundleDigest, envByName["KIT_AGENT_BUNDLE_SHA256"].Value)
+
+		assert.NotNil(t, envByName["KIT_POD_NAME"].ValueFrom)
+		assert.Equal(t, "metadata.name", envByName["KIT_POD_NAME"].ValueFrom.FieldRef.FieldPath)
+		assert.NotNil(t, envByName["KIT_POD_UID"].ValueFrom)
+		assert.Equal(t, "metadata.uid", envByName["KIT_POD_UID"].ValueFrom.FieldRef.FieldPath)
+		assert.NotNil(t, envByName["KIT_NODE_NAME"].ValueFrom)
+		assert.Equal(t, "spec.nodeName", envByName["KIT_NODE_NAME"].ValueFrom.FieldRef.FieldPath)
 	})
 
 	t.Run("missing collection returns error", func(t *testing.T) {
@@ -287,6 +308,14 @@ func TestMaterialize(t *testing.T) {
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &rb))
 		checkOwner(&rb)
 
+		var cr rbacv1.ClusterRole
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test"}, &cr))
+		checkOwner(&cr)
+
+		var crb rbacv1.ClusterRoleBinding
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test"}, &crb))
+		checkOwner(&crb)
+
 		var wo v1alpha1.WorkloadOverride
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test"}, &wo))
 		checkOwner(&wo)
@@ -314,6 +343,49 @@ func TestMaterialize(t *testing.T) {
 		assert.Equal(t, map[string]string{"app": "mcd"}, wo.Spec.Match.Labels)
 		assert.Equal(t, "specific-pod", wo.Spec.Match.PodName)
 		assert.Equal(t, "node-1", wo.Spec.Match.NodeName)
+	})
+
+	t.Run("cluster role grants node and OCP read access", func(t *testing.T) {
+		collectionsDir := writeCollectionDir(t, map[string]string{
+			"main.js": `exports.main = function(ctx) {};`,
+		})
+		ag := testAgent("test")
+		c := fake.NewClientBuilder().
+			WithScheme(testScheme(t)).
+			WithObjects(testCollection()).
+			Build()
+
+		mat := newMaterializer(t, c, collectionsDir)
+		_, err := mat.Materialize(context.Background(), ag)
+		require.NoError(t, err)
+
+		var cr rbacv1.ClusterRole
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test"}, &cr))
+
+		hasResource := func(group, resource string) bool {
+			for _, rule := range cr.Rules {
+				for _, g := range rule.APIGroups {
+					if g != group {
+						continue
+					}
+					for _, r := range rule.Resources {
+						if r == resource || r == "*" {
+							return true
+						}
+					}
+				}
+			}
+			return false
+		}
+		assert.True(t, hasResource("", "nodes"), "should grant access to nodes")
+		assert.True(t, hasResource("kit.openshift.io", "*"), "should grant Kit read access")
+		assert.True(t, hasResource("machineconfiguration.openshift.io", "*"), "should grant MCO read access")
+
+		for _, rule := range cr.Rules {
+			for _, verb := range rule.Verbs {
+				assert.NotContains(t, []string{"create", "update", "patch", "delete"}, verb, "cluster role should be read-only")
+			}
+		}
 	})
 
 	t.Run("role excludes secrets", func(t *testing.T) {

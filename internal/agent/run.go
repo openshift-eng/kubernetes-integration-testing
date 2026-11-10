@@ -19,7 +19,11 @@ import (
 
 type RuntimeFactory func(name string) (Runtime, error)
 
-func Run(ctx context.Context, log *slog.Logger, fs afero.Fs, cfg Config, runtimeFactory RuntimeFactory) (err error) {
+func Run(ctx context.Context, log *slog.Logger, fs afero.Fs, cfg Config, runtimeFactory RuntimeFactory, kube KubeClient) (err error) {
+	if kube == nil {
+		return fmt.Errorf("kubernetes client is required")
+	}
+
 	bundleDir, err := afero.TempDir(fs, "", "kit-agent-*")
 	if err != nil {
 		return fmt.Errorf("creating temp directory: %w", err)
@@ -59,7 +63,7 @@ func Run(ctx context.Context, log *slog.Logger, fs afero.Fs, cfg Config, runtime
 		return err
 	}
 
-	h := newHost(log, nil)
+	h := newHost(log, kube)
 
 	log.Info("agent ready",
 		"runtime", manifest.Runtime,

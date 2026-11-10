@@ -21,7 +21,7 @@ func (r *gojaRuntime) Name() string { return "js" }
 func (r *gojaRuntime) Run(ctx context.Context, req agent.AgentRequest, host agent.Host) (result agent.AgentResult, err error) {
 	vm := goja.New()
 
-	loader := newModuleLoader(vm, req.BundleDir)
+	loader := newModuleLoader(vm, req.BundleDir, ctx, host)
 	vm.Set("require", loader.requireFrom(req.BundleDir))
 
 	ctxObj := newCtxObject(ctx, vm, req, host)

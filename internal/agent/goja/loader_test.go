@@ -78,11 +78,4 @@ func TestModules(t *testing.T) {
 		assert.Equal(t, 0, result.ExitCode)
 	})
 
-	t.Run("kube stub throws", func(t *testing.T) {
-		_, err := runScript(t, map[string]string{
-			"pkg/main.js": `var kube = require("kube"); exports.main = function(ctx) { kube.get(); };`,
-		}, "pkg/main.js")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not available")
-	})
 }

@@ -1,12 +1,15 @@
 package goja
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/dop251/goja"
+
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/agent"
 )
 
 type moduleLoader struct {
@@ -16,12 +19,12 @@ type moduleLoader struct {
 	natives   *nativeRegistry
 }
 
-func newModuleLoader(vm *goja.Runtime, bundleDir string) *moduleLoader {
+func newModuleLoader(vm *goja.Runtime, bundleDir string, ctx context.Context, host agent.Host) *moduleLoader {
 	return &moduleLoader{
 		bundleDir: bundleDir,
 		vm:        vm,
 		cache:     make(map[string]*goja.Object),
-		natives:   newNativeRegistry(&kubeModule{}),
+		natives:   newNativeRegistry(&kubeModule{ctx: ctx, host: host}),
 	}
 }
 
