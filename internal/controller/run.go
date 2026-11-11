@@ -47,42 +47,56 @@ func Run(ctx context.Context, log *slog.Logger, cfg common.Config) error {
 	if err != nil {
 		return fmt.Errorf("creating bundle store: %w", err)
 	}
-	bundleSrv := bundle.NewServer(bundleStore, cfg.BundleServerAddr, log)
 
 	shutdowner := common.NewDeferredShutdowner(ctx)
-	if err := reconciler.Start(shutdowner.Context(), log, bd, clients, cfg, registry, certProvider, shutdowner, bundleStore, []common.ReadyzChecker{bundleSrv}); err != nil {
-		return fmt.Errorf("starting reconciler: %w", err)
-	}
+	runCtx := shutdowner.Context()
+
+	bundleSrv := bundle.NewServer(bundleStore, cfg.BundleServerAddr, log)
 
 	go func() {
-		if err := bundleSrv.Start(ctx); err != nil && ctx.Err() == nil {
-			log.Error("bundle server stopped unexpectedly", "error", err)
+		if err := bundleSrv.Start(runCtx); err != nil && runCtx.Err() == nil {
+			shutdowner.ShutdownWithError(fmt.Errorf("bundle server: %w", err))
 		}
 	}()
 
-	go bundleStore.RunGC(ctx, bundle.DefaultGCConfig(), agentctl.ProtectedBundleState(clients.Client))
+	if err := bundleSrv.WaitReady(runCtx); err != nil {
+		return fmt.Errorf("waiting for bundle server: %w", err)
+	}
+
+	if err := reconciler.Start(runCtx, log, bd, clients, cfg, registry, certProvider, shutdowner, bundleStore, []common.ReadyzChecker{bundleSrv}); err != nil {
+		return fmt.Errorf("starting reconciler: %w", err)
+	}
+
+	go bundleStore.RunGC(runCtx, bundle.DefaultGCConfig(), agentctl.ProtectedBundleState(clients.Client))
 
 	var runner pod.PodRunner
 	if bd.KitCluster.Spec.Provider == "kwok" {
 		var err error
-		runner, err = runPodController(ctx, log, cfg, bd.ClusterConfig, &ps, clients)
+		runner, err = runPodController(runCtx, log, cfg, bd.ClusterConfig, &ps, clients, shutdowner)
 		if err != nil {
 			return fmt.Errorf("starting pod controller: %w", err)
 		}
 	}
 
 	log.Info("controller started", "cluster", bd.KitCluster.Name, "provider", bd.KitCluster.Spec.Provider)
-	<-ctx.Done()
-	log.Info("shutting down")
+	<-runCtx.Done()
+
+	if err := shutdowner.Failure(); err != nil {
+		log.Error("controller stopped by internal failure", "error", err)
+		return err
+	}
 
 	if shutdowner.IsDeleting() && runner != nil {
 		runner.Teardown()
 	}
 
+	log.Info("waiting for host termination")
+	<-ctx.Done()
+
 	return nil
 }
 
-func runPodController(ctx context.Context, log *slog.Logger, cfg common.Config, clusterCfg *bootstrap.ClusterConfig, ps *pullsecret.PullSecret, clients *kube.Clients) (pod.PodRunner, error) {
+func runPodController(ctx context.Context, log *slog.Logger, cfg common.Config, clusterCfg *bootstrap.ClusterConfig, ps *pullsecret.PullSecret, clients *kube.Clients, shutdowner common.Shutdowner) (pod.PodRunner, error) {
 	var podmanClient podman.Client
 	if cfg.PodmanSocket != "" {
 		podmanClient = podman.NewRemoteClient(cfg.PodmanSocket)
@@ -106,8 +120,9 @@ func runPodController(ctx context.Context, log *slog.Logger, cfg common.Config, 
 
 	ctrl := pod.NewController(clients, runner, log)
 	go func() {
-		if err := ctrl.Run(ctx); err != nil {
+		if err := ctrl.Run(ctx); err != nil && ctx.Err() == nil {
 			log.Error("pod controller stopped", "error", err)
+			shutdowner.ShutdownWithError(fmt.Errorf("pod controller: %w", err))
 		}
 	}()
 

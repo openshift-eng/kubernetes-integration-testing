@@ -9,51 +9,78 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/afero"
 
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
 
-func Download(ctx context.Context, client *http.Client, fs afero.Fs, url, expectedDigest, destDir string) (err error) {
+var defaultBackoff = wait.Backoff{
+	Duration: 2 * time.Second,
+	Factor:   2,
+	Cap:      30 * time.Second,
+	Steps:    6,
+}
+
+func Download(ctx context.Context, client *http.Client, fs afero.Fs, url, expectedDigest, destDir string) error {
+	return DownloadWithRetries(ctx, client, fs, url, expectedDigest, destDir, defaultBackoff)
+}
+
+func DownloadWithRetries(ctx context.Context, client *http.Client, fs afero.Fs, url, expectedDigest, destDir string, backoff wait.Backoff) error {
+	var data []byte
+	var lastErr error
+	err := wait.ExponentialBackoffWithContext(ctx, backoff, func(ctx context.Context) (bool, error) {
+		var fetchErr error
+		data, fetchErr = fetchBundle(ctx, client, url)
+		if fetchErr != nil {
+			lastErr = fetchErr
+			slog.Warn("bundle download failed, retrying", "error", fetchErr)
+			return false, nil
+		}
+		return true, nil
+	})
+	if err != nil {
+		return errors.Join(lastErr, err)
+	}
+
+	digest := fmt.Sprintf("%x", sha256.Sum256(data))
+	if digest != expectedDigest {
+		return fmt.Errorf("digest mismatch: got %s, expected %s", digest, expectedDigest)
+	}
+	return extract(fs, data, destDir)
+}
+
+func fetchBundle(ctx context.Context, client *http.Client, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
+		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("fetching bundle: %w", err)
+		return nil, err
 	}
-	defer func() {
-		closeErr := resp.Body.Close()
-		err = errors.Join(err, closeErr)
-	}()
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("fetching bundle: %s", resp.Status)
+		return nil, fmt.Errorf("HTTP %s", resp.Status)
 	}
 
-	hasher := sha256.New()
-	limited := io.LimitReader(resp.Body, int64(collection.MaxBundleSize)+1)
-	data, err := io.ReadAll(io.TeeReader(limited, hasher))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(collection.MaxBundleSize)+1))
 	if err != nil {
-		return fmt.Errorf("reading bundle: %w", err)
+		return nil, fmt.Errorf("reading body: %w", err)
 	}
 	if len(data) > collection.MaxBundleSize {
-		return fmt.Errorf("bundle size exceeds maximum %d", collection.MaxBundleSize)
+		return nil, fmt.Errorf("bundle exceeds maximum size %d", collection.MaxBundleSize)
 	}
-
-	digest := fmt.Sprintf("%x", hasher.Sum(nil))
-	if digest != expectedDigest {
-		return fmt.Errorf("digest mismatch: got %s, expected %s", digest, expectedDigest)
-	}
-
-	return extract(fs, data, destDir)
+	return data, nil
 }
 
 func extract(fs afero.Fs, data []byte, destDir string) (err error) {

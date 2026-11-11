@@ -250,6 +250,10 @@ func (m *Materializer) ensureWorkloadOverride(ctx context.Context, ag *v1alpha1.
 	saName := name
 
 	desired := &v1alpha1.WorkloadOverride{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: v1alpha1.GroupVersion.String(),
+			Kind:       "WorkloadOverride",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            name,
 			OwnerReferences: []metav1.OwnerReference{ownerRef},
@@ -257,17 +261,10 @@ func (m *Materializer) ensureWorkloadOverride(ctx context.Context, ag *v1alpha1.
 		Spec: m.buildWOSpec(ag, bundleURL, digest, saName),
 	}
 
-	err := m.client.Create(ctx, desired)
-	if apierrors.IsAlreadyExists(err) {
-		var existing v1alpha1.WorkloadOverride
-		if err := m.client.Get(ctx, client.ObjectKey{Name: name}, &existing); err != nil {
-			return err
-		}
-		existing.Spec = desired.Spec
-		existing.OwnerReferences = desired.OwnerReferences
-		return m.client.Update(ctx, &existing)
-	}
-	return err
+	// Server-side apply makes concurrent webhook and reconciler materialization
+	// conflict-safe without a read/update resourceVersion race. Force ownership
+	// because Kit owns every field of this generated WorkloadOverride.
+	return m.client.Patch(ctx, desired, client.Apply, client.FieldOwner("kit-agent-materializer"), client.ForceOwnership)
 }
 
 func (m *Materializer) buildWOSpec(ag *v1alpha1.Agent, bundleURL, digest, saName string) v1alpha1.WorkloadOverrideSpec {

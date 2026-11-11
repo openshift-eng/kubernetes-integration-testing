@@ -14,16 +14,18 @@ import (
 )
 
 type Server struct {
-	store  *BundleStore
-	server *http.Server
-	log    *slog.Logger
-	ready  atomic.Bool
+	store   *BundleStore
+	server  *http.Server
+	log     *slog.Logger
+	ready   atomic.Bool
+	readyCh chan struct{}
 }
 
 func NewServer(store *BundleStore, addr string, log *slog.Logger) *Server {
 	s := &Server{
-		store: store,
-		log:   log,
+		store:   store,
+		log:     log,
+		readyCh: make(chan struct{}),
 	}
 
 	mux := http.NewServeMux()
@@ -40,10 +42,12 @@ func NewServer(store *BundleStore, addr string, log *slog.Logger) *Server {
 func (s *Server) Start(ctx context.Context) error {
 	lis, err := net.Listen("tcp", s.server.Addr)
 	if err != nil {
+		close(s.readyCh)
 		return fmt.Errorf("listening on %s: %w", s.server.Addr, err)
 	}
 
 	s.ready.Store(true)
+	close(s.readyCh)
 	s.log.Info("bundle server listening", "addr", lis.Addr().String())
 
 	errCh := make(chan error, 1)
@@ -54,10 +58,16 @@ func (s *Server) Start(ctx context.Context) error {
 		close(errCh)
 	}()
 
+	var serveErr error
 	select {
-	case err := <-errCh:
-		return err
+	case serveErr = <-errCh:
 	case <-ctx.Done():
+	}
+
+	s.ready.Store(false)
+
+	if serveErr != nil {
+		return serveErr
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -75,6 +85,18 @@ func (s *Server) Ready(_ *http.Request) error {
 		return fmt.Errorf("bundle server not ready")
 	}
 	return nil
+}
+
+func (s *Server) WaitReady(ctx context.Context) error {
+	select {
+	case <-s.readyCh:
+		if !s.ready.Load() {
+			return fmt.Errorf("bundle server failed to start")
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Server) serveBundle(w http.ResponseWriter, r *http.Request) {

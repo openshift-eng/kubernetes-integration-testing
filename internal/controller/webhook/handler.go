@@ -75,10 +75,6 @@ func (m *PodMutator) Handle(ctx context.Context, req admission.Request) admissio
 // TODO: IsWOFresh is a reconciliation watermark (owner + generation + digest).
 // It does not detect manual spec edits that preserve the digest env var.
 // Full drift repair would require comparing the complete WO spec.
-//
-// TODO: concurrent admissions or admission+reconciler can race on WO updates,
-// causing a conflict that rejects the pod. Add retry on IsConflict or switch
-// ensureWorkloadOverride to SSA.
 func (m *PodMutator) ensureAgentOverrides(ctx context.Context, pod *corev1.Pod, namespace string) error {
 	var agents v1alpha1.AgentList
 	if err := m.Client.List(ctx, &agents); err != nil {

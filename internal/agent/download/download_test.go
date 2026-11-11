@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/agent/bundle"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 func serveBundleHandler(b *bundle.Bundle) http.Handler {
@@ -108,8 +110,11 @@ func TestDownload(t *testing.T) {
 		}))
 		defer srv.Close()
 
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+
 		fs := afero.NewMemMapFs()
-		err := Download(context.Background(), srv.Client(), fs, srv.URL, "ignored", "/bundle")
+		err := Download(ctx, srv.Client(), fs, srv.URL, "ignored", "/bundle")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "500")
 	})
@@ -135,6 +140,32 @@ func TestDownload(t *testing.T) {
 		assert.Equal(t, "ok", string(content))
 	})
 
+	t.Run("retry then succeed", func(t *testing.T) {
+		b := buildTestBundle(t)
+		failures := 3
+		var attempt int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			attempt++
+			if attempt <= failures {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			w.Header().Set("Content-Type", "application/gzip")
+			io.Copy(w, b.Reader())
+		}))
+		defer srv.Close()
+
+		fast := wait.Backoff{Duration: time.Millisecond, Factor: 1, Steps: 6}
+		fs := afero.NewMemMapFs()
+		err := DownloadWithRetries(context.Background(), srv.Client(), fs, srv.URL, b.Digest, "/bundle", fast)
+		require.NoError(t, err)
+		assert.Equal(t, failures+1, attempt)
+
+		data, err := afero.ReadFile(fs, "/bundle/test-pkg/main.js")
+		require.NoError(t, err)
+		assert.Equal(t, "function main() {}", string(data))
+	})
+
 	t.Run("bundle too large", func(t *testing.T) {
 		if testing.Short() {
 			t.Skip("serves >64 MiB of data")
@@ -145,8 +176,11 @@ func TestDownload(t *testing.T) {
 		}))
 		defer srv.Close()
 
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+
 		fs := afero.NewMemMapFs()
-		err := Download(context.Background(), srv.Client(), fs, srv.URL, "ignored", "/bundle")
+		err := Download(ctx, srv.Client(), fs, srv.URL, "ignored", "/bundle")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "exceeds maximum")
 	})

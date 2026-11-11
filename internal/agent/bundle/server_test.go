@@ -1,11 +1,14 @@
 package bundle
 
 import (
+	"context"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
@@ -87,6 +90,51 @@ func TestServer(t *testing.T) {
 		assert.NotEmpty(t, w.Header().Get("Content-Length"))
 		assert.Equal(t, b.Digest, w.Header().Get("ETag"))
 		assert.Equal(t, "public, max-age=31536000, immutable", w.Header().Get("Cache-Control"))
+	})
+
+	t.Run("WaitReady succeeds after Start", func(t *testing.T) {
+		srv, _ := testServer(t)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			srv.Start(ctx)
+		}()
+
+		require.NoError(t, srv.WaitReady(ctx))
+		require.NoError(t, srv.Ready(nil))
+
+		cancel()
+		<-done
+
+		assert.Error(t, srv.Ready(nil), "ready must be false after Stop")
+		assert.Error(t, srv.WaitReady(context.Background()), "WaitReady must fail after Stop")
+	})
+
+	t.Run("WaitReady fails on listener error", func(t *testing.T) {
+		lis, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		defer lis.Close()
+
+		blocked := NewServer(nil, lis.Addr().String(), slog.New(slog.DiscardHandler))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		done := make(chan error, 1)
+		go func() {
+			done <- blocked.Start(ctx)
+		}()
+
+		err = blocked.WaitReady(ctx)
+		assert.Error(t, err)
+		assert.Error(t, blocked.Ready(nil))
+
+		startErr := <-done
+		assert.Error(t, startErr)
 	})
 
 	t.Run("old and new digest both servable after put", func(t *testing.T) {

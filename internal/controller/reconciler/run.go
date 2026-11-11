@@ -88,8 +88,8 @@ func Start(ctx context.Context, log *slog.Logger, bd *bootstrap.BootstrapData, c
 
 	go func() {
 		if err := mgr.Start(ctx); err != nil && ctx.Err() == nil {
-			log.Error("controller manager stopped unexpectedly, shutting down", "error", err)
-			shutdowner.Shutdown()
+			log.Error("controller manager stopped unexpectedly", "error", err)
+			shutdowner.ShutdownWithError(fmt.Errorf("controller manager: %w", err))
 		}
 	}()
 
