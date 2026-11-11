@@ -1,0 +1,14 @@
+apiVersion: kit.openshift.io/v1alpha1
+kind: Agent
+metadata:
+  name: mcd-agent
+spec:
+  target:
+    namespace: openshift-machine-config-operator
+    replace: pod
+    labels:
+      k8s-app: machine-config-daemon
+  runtime: js
+  script:
+    collection: openshift-mco
+    package: mcd-agent

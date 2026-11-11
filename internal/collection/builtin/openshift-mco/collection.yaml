@@ -4,3 +4,7 @@ metadata:
   name: openshift-mco
 spec:
   source: openshift-mco
+  scripts:
+    - name: mcd-agent
+      root: scripts/mcd-agent
+      entrypoint: main.js

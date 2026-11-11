@@ -419,7 +419,8 @@ func defaultPolicyRules() []rbacv1.PolicyRule {
 func clusterScopedPolicyRules() []rbacv1.PolicyRule {
 	readOnly := []string{"get", "list", "watch"}
 	return []rbacv1.PolicyRule{
-		{APIGroups: []string{""}, Resources: []string{"nodes", "nodes/status", "persistentvolumes", "namespaces"}, Verbs: readOnly},
+		{APIGroups: []string{""}, Resources: []string{"nodes"}, Verbs: []string{"get", "list", "watch", "patch"}},
+		{APIGroups: []string{""}, Resources: []string{"nodes/status", "persistentvolumes", "namespaces"}, Verbs: readOnly},
 		{APIGroups: []string{"kit.openshift.io"}, Resources: []string{"*"}, Verbs: readOnly},
 		// TEST-ONLY: remove when Agent.spec.rbac is implemented
 		{APIGroups: []string{"machineconfiguration.openshift.io"}, Resources: []string{"*"}, Verbs: readOnly},
