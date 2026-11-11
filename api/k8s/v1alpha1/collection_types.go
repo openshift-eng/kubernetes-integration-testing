@@ -40,6 +40,7 @@ type ResourceCollectionSpec struct {
 	// libraries available to runnable packages via require("<package>/<file>").
 	// +listType=map
 	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=16
 	Scripts []ScriptPackage `json:"scripts,omitempty"`
 
 	// ScriptCollections lists the names of other ResourceCollections whose
@@ -62,11 +63,14 @@ type ResourceCollectionSpec struct {
 type ScriptPackage struct {
 	// Name identifies this script package within the collection.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:XValidation:rule="!format.dns1123Label().validate(self).hasValue()",message="name must be a valid DNS label"
 	Name string `json:"name"`
 
 	// Root is a directory path relative to the collection root.
 	// All files under root are included unless filtered by include globs.
+	// +kubebuilder:validation:MaxLength=256
 	Root string `json:"root,omitempty"`
 
 	// Include restricts which files under root are part of the package.
@@ -78,12 +82,14 @@ type ScriptPackage struct {
 	// Inline provides the script content directly in the CR.
 	// Inline packages are always runnable with the inline content as the
 	// entrypoint.
+	// +kubebuilder:validation:MaxLength=1048576
 	Inline string `json:"inline,omitempty"`
 
 	// Entrypoint is the path to the main script file, relative to the
 	// package root. Only valid with root. Packages with an entrypoint are
 	// runnable (Agent CRs can reference them); packages without are
 	// libraries available via require("<package-name>/<file>").
+	// +kubebuilder:validation:MaxLength=256
 	Entrypoint string `json:"entrypoint,omitempty"`
 }
 

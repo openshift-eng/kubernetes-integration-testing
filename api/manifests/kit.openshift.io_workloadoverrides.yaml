@@ -126,6 +126,7 @@ spec:
                     description: |-
                       Namespace restricts the match to Pods in this namespace. An empty value
                       does not constrain the namespace.
+                    maxLength: 63
                     type: string
                   nodeName:
                     description: |-
@@ -134,12 +135,14 @@ spec:
                       assigned a node to an ordinary Pod. This field is therefore most useful
                       for Pods created with an explicit node assignment, such as DaemonSet
                       Pods.
+                    maxLength: 253
                     type: string
                   podName:
                     description: |-
                       PodName restricts the match to one exact Pod name. Generated Pod names
                       change on recreation, so labels are usually more stable for controller-
                       owned workloads.
+                    maxLength: 253
                     type: string
                 type: object
                 x-kubernetes-validations:
@@ -348,6 +351,7 @@ spec:
                 description: |-
                   ServiceAccountName overrides the pod-level service account.
                   Composable with any mode (noOp, containers, or replacePod).
+                maxLength: 253
                 type: string
                 x-kubernetes-validations:
                 - message: serviceAccountName must be a valid DNS subdomain

@@ -60,6 +60,9 @@ type AgentTarget struct {
 	// Namespace is the target namespace where the agent identity and generated
 	// WorkloadOverride will take effect. Does not need to exist when the Agent
 	// is created.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:XValidation:rule="!format.dns1123Label().validate(self).hasValue()",message="namespace must be a valid DNS label"
 	Namespace string `json:"namespace"`
 
@@ -81,6 +84,7 @@ type AgentTarget struct {
 
 	// Container is the regular container name to replace with the agent binary.
 	// Required when replace is "container", must not be set when replace is "pod".
+	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:XValidation:rule="!format.dns1123Label().validate(self).hasValue()",message="container must be a valid DNS label"
 	Container string `json:"container,omitempty"`
 }
@@ -88,11 +92,15 @@ type AgentTarget struct {
 type AgentScriptRef struct {
 	// Collection is the name of the cluster-scoped ResourceCollection.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:XValidation:rule="!format.dns1123Subdomain().validate(self).hasValue()",message="collection must be a valid DNS subdomain"
 	Collection string `json:"collection"`
 
 	// Package is the name of the script package within the collection.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
 	// +kubebuilder:validation:XValidation:rule="!format.dns1123Label().validate(self).hasValue()",message="package must be a valid DNS label"
 	Package string `json:"package"`
 }

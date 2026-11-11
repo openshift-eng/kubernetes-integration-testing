@@ -47,6 +47,8 @@ spec:
                 properties:
                   collection:
                     description: Collection is the name of the cluster-scoped ResourceCollection.
+                    maxLength: 253
+                    minLength: 1
                     type: string
                     x-kubernetes-validations:
                     - message: collection must be a valid DNS subdomain
@@ -54,6 +56,8 @@ spec:
                   package:
                     description: Package is the name of the script package within
                       the collection.
+                    maxLength: 63
+                    minLength: 1
                     type: string
                     x-kubernetes-validations:
                     - message: package must be a valid DNS label
@@ -70,6 +74,7 @@ spec:
                     description: |-
                       Container is the regular container name to replace with the agent binary.
                       Required when replace is "container", must not be set when replace is "pod".
+                    maxLength: 63
                     type: string
                     x-kubernetes-validations:
                     - message: container must be a valid DNS label
@@ -86,6 +91,8 @@ spec:
                       Namespace is the target namespace where the agent identity and generated
                       WorkloadOverride will take effect. Does not need to exist when the Agent
                       is created.
+                    maxLength: 63
+                    minLength: 1
                     type: string
                     x-kubernetes-validations:
                     - message: namespace must be a valid DNS label

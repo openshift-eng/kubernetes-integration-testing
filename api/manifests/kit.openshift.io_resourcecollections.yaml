@@ -79,6 +79,7 @@ spec:
                         package root. Only valid with root. Packages with an entrypoint are
                         runnable (Agent CRs can reference them); packages without are
                         libraries available via require("<package-name>/<file>").
+                      maxLength: 256
                       type: string
                     include:
                       description: |-
@@ -94,10 +95,13 @@ spec:
                         Inline provides the script content directly in the CR.
                         Inline packages are always runnable with the inline content as the
                         entrypoint.
+                      maxLength: 1048576
                       type: string
                     name:
                       description: Name identifies this script package within the
                         collection.
+                      maxLength: 63
+                      minLength: 1
                       type: string
                       x-kubernetes-validations:
                       - message: name must be a valid DNS label
@@ -106,6 +110,7 @@ spec:
                       description: |-
                         Root is a directory path relative to the collection root.
                         All files under root are included unless filtered by include globs.
+                      maxLength: 256
                       type: string
                   required:
                   - name
@@ -120,6 +125,7 @@ spec:
                   - message: entrypoint is only valid with root
                     rule: '!(has(self.entrypoint) && size(self.entrypoint) > 0) ||
                       (has(self.root) && size(self.root) > 0)'
+                maxItems: 16
                 type: array
                 x-kubernetes-list-map-keys:
                 - name

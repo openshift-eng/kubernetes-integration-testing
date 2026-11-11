@@ -42,6 +42,7 @@ type WorkloadOverrideSpec struct {
 
 	// ServiceAccountName overrides the pod-level service account.
 	// Composable with any mode (noOp, containers, or replacePod).
+	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:XValidation:rule="!format.dns1123Subdomain().validate(self).hasValue()",message="serviceAccountName must be a valid DNS subdomain"
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
 }
@@ -76,6 +77,7 @@ type PodReplacement struct {
 type WorkloadOverrideMatch struct {
 	// Namespace restricts the match to Pods in this namespace. An empty value
 	// does not constrain the namespace.
+	// +kubebuilder:validation:MaxLength=63
 	Namespace string `json:"namespace,omitempty"`
 
 	// Labels requires every key and value to be present on the Pod with the
@@ -86,6 +88,7 @@ type WorkloadOverrideMatch struct {
 	// PodName restricts the match to one exact Pod name. Generated Pod names
 	// change on recreation, so labels are usually more stable for controller-
 	// owned workloads.
+	// +kubebuilder:validation:MaxLength=253
 	PodName string `json:"podName,omitempty"`
 
 	// NodeName restricts the match to Pods assigned to this exact node. The
@@ -93,6 +96,7 @@ type WorkloadOverrideMatch struct {
 	// assigned a node to an ordinary Pod. This field is therefore most useful
 	// for Pods created with an explicit node assignment, such as DaemonSet
 	// Pods.
+	// +kubebuilder:validation:MaxLength=253
 	NodeName string `json:"nodeName,omitempty"`
 }
 
