@@ -13,15 +13,6 @@ const (
 	AgentRuntimeJS AgentRuntime = "js"
 )
 
-// +kubebuilder:validation:Enum=bounded;longRunning
-// +enum
-type AgentLifecycle string
-
-const (
-	AgentLifecycleBounded     AgentLifecycle = "bounded"
-	AgentLifecycleLongRunning AgentLifecycle = "longRunning"
-)
-
 // +kubebuilder:validation:Enum=pod;container
 // +enum
 type AgentReplaceMode string
@@ -41,7 +32,6 @@ type Agent struct {
 	Status            AgentStatus `json:"status,omitempty"`
 }
 
-// +kubebuilder:validation:XValidation:rule="!has(self.timeout) || self.lifecycle == 'bounded'",message="timeout is only valid for bounded lifecycle"
 // +kubebuilder:validation:XValidation:rule="!has(self.timeout) || duration(self.timeout) > duration('0s')",message="timeout must be positive"
 type AgentSpec struct {
 	// Target selects the pods and container to replace with the agent.
@@ -52,11 +42,6 @@ type AgentSpec struct {
 	// +kubebuilder:validation:Required
 	Runtime AgentRuntime `json:"runtime"`
 
-	// Lifecycle controls how the agent runs. "bounded" runs once and exits;
-	// "longRunning" enters a host event loop and stays alive until shutdown.
-	// +kubebuilder:validation:Required
-	Lifecycle AgentLifecycle `json:"lifecycle"`
-
 	// Script references a package in a ResourceCollection.
 	// +kubebuilder:validation:Required
 	Script AgentScriptRef `json:"script"`
@@ -64,7 +49,7 @@ type AgentSpec struct {
 	// Values are user-defined variables passed to the script as ctx.values.
 	Values map[string]apiextensionsv1.JSON `json:"values,omitempty"`
 
-	// Timeout limits the total execution time for bounded agents.
+	// Timeout limits the total execution time of the agent script.
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
 }
 

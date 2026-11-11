@@ -36,7 +36,6 @@ type KubeClient interface {
 type AgentRequest struct {
 	BundleDir  string
 	Entrypoint string
-	Lifecycle  Lifecycle
 	Values     map[string]any
 	Pod        PodReference
 }
@@ -53,9 +52,3 @@ type PodReference struct {
 	NodeName  string
 }
 
-type Lifecycle string
-
-const (
-	LifecycleBounded     Lifecycle = "bounded"
-	LifecycleLongRunning Lifecycle = "longRunning"
-)

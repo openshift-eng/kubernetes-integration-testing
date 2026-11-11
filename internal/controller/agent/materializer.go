@@ -59,7 +59,7 @@ func (m *Materializer) Materialize(ctx context.Context, ag *v1alpha1.Agent) (*Ma
 		timeout = ag.Spec.Timeout.Duration.String()
 	}
 
-	b, err := bundle.Build(packages, entrypointPkg, values, string(ag.Spec.Runtime), string(ag.Spec.Lifecycle), timeout)
+	b, err := bundle.Build(packages, entrypointPkg, values, string(ag.Spec.Runtime), timeout)
 	if err != nil {
 		return nil, fmt.Errorf("building bundle: %w", err)
 	}

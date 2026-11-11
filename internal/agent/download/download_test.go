@@ -40,7 +40,7 @@ func buildTestBundle(t *testing.T) *bundle.Bundle {
 			{Path: "lib/util.js", Content: []byte("exports.util = {}")},
 		},
 	}
-	b, err := bundle.Build([]collection.ScriptPackageContent{pkg}, "test-pkg", nil, "js", "bounded", "")
+	b, err := bundle.Build([]collection.ScriptPackageContent{pkg}, "test-pkg", nil, "js", "")
 	require.NoError(t, err)
 	return b
 }

@@ -63,7 +63,6 @@ func runScript(t *testing.T, files map[string]string, entrypoint string) (agent.
 	req := agent.AgentRequest{
 		BundleDir:  dir,
 		Entrypoint: entrypoint,
-		Lifecycle:  agent.LifecycleBounded,
 		Values:     map[string]any{"key": "value", "count": float64(3)},
 		Pod: agent.PodReference{
 			Name:      "test-pod",

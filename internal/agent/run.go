@@ -53,7 +53,6 @@ func Run(ctx context.Context, log *slog.Logger, fs afero.Fs, cfg Config, runtime
 	req := AgentRequest{
 		BundleDir:  bundleDir,
 		Entrypoint: manifest.Entrypoint,
-		Lifecycle:  Lifecycle(manifest.Lifecycle),
 		Values:     values,
 		Pod:        pod,
 	}
@@ -67,7 +66,6 @@ func Run(ctx context.Context, log *slog.Logger, fs afero.Fs, cfg Config, runtime
 
 	log.Info("agent ready",
 		"runtime", manifest.Runtime,
-		"lifecycle", manifest.Lifecycle,
 		"entrypoint", req.Entrypoint,
 		"pod", req.Pod.Name,
 		"namespace", req.Pod.Namespace,

@@ -77,7 +77,6 @@ func runWithKube(t *testing.T, files map[string]string, entrypoint string, host 
 	req := agent.AgentRequest{
 		BundleDir:  dir,
 		Entrypoint: entrypoint,
-		Lifecycle:  agent.LifecycleBounded,
 		Values:     map[string]any{},
 		Pod: agent.PodReference{
 			Name:      "test-pod",

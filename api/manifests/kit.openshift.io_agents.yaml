@@ -37,14 +37,6 @@ spec:
             type: object
           spec:
             properties:
-              lifecycle:
-                description: |-
-                  Lifecycle controls how the agent runs. "bounded" runs once and exits;
-                  "longRunning" enters a host event loop and stays alive until shutdown.
-                enum:
-                - bounded
-                - longRunning
-                type: string
               runtime:
                 description: Runtime selects the script engine.
                 enum:
@@ -131,7 +123,8 @@ spec:
                     > 0) || (has(self.podName) && size(self.podName) > 0) || (has(self.nodeName)
                     && size(self.nodeName) > 0)
               timeout:
-                description: Timeout limits the total execution time for bounded agents.
+                description: Timeout limits the total execution time of the agent
+                  script.
                 type: string
               values:
                 additionalProperties:
@@ -140,14 +133,11 @@ spec:
                   as ctx.values.
                 type: object
             required:
-            - lifecycle
             - runtime
             - script
             - target
             type: object
             x-kubernetes-validations:
-            - message: timeout is only valid for bounded lifecycle
-              rule: '!has(self.timeout) || self.lifecycle == ''bounded'''
             - message: timeout must be positive
               rule: '!has(self.timeout) || duration(self.timeout) > duration(''0s'')'
           status:

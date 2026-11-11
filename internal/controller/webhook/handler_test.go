@@ -67,8 +67,7 @@ func testAgent() *v1alpha1.Agent {
 				Replace:   v1alpha1.AgentReplacePod,
 				Labels:    map[string]string{"app": "mcd"},
 			},
-			Runtime:   v1alpha1.AgentRuntimeJS,
-			Lifecycle: v1alpha1.AgentLifecycleBounded,
+			Runtime: v1alpha1.AgentRuntimeJS,
 			Script: v1alpha1.AgentScriptRef{
 				Collection: "test-collection",
 				Package:    "test-pkg",
