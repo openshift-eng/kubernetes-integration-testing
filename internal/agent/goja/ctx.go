@@ -1,7 +1,7 @@
 package goja
 
 import (
-	"context"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -16,7 +16,7 @@ type exitSignal struct {
 	reason string
 }
 
-func newCtxObject(ctx context.Context, vm *goja.Runtime, req agent.AgentRequest, host agent.Host) goja.Value {
+func newCtxObject(active *ctxHolder, vm *goja.Runtime, req agent.AgentRequest, host agent.Host, loop *agent.EventLoop, log *slog.Logger, shutdownGrace time.Duration, shutdown *agent.ShutdownHandler) goja.Value {
 	obj := vm.NewObject()
 
 	obj.Set("log", func(call goja.FunctionCall) goja.Value {
@@ -28,8 +28,7 @@ func newCtxObject(ctx context.Context, vm *goja.Runtime, req agent.AgentRequest,
 		ms := call.Argument(0).ToInteger()
 		select {
 		case <-time.After(time.Duration(ms) * time.Millisecond):
-		case <-ctx.Done():
-			vm.Interrupt(ctx.Err())
+		case <-active.ctx.Done():
 		}
 		return goja.Undefined()
 	})
@@ -58,6 +57,31 @@ func newCtxObject(ctx context.Context, vm *goja.Runtime, req agent.AgentRequest,
 			reason = call.Argument(1).String()
 		}
 		panic(exitSignal{code: code, reason: reason})
+	})
+
+	obj.Set("run", func(call goja.FunctionCall) goja.Value {
+		rr := loop.Run()
+		switch rr.Outcome {
+		case agent.OutcomeCanceled, agent.OutcomeWatchError:
+			panic(exitSignal{code: rr.Result.ExitCode, reason: rr.Result.Reason})
+		case agent.OutcomeNone:
+			return goja.Undefined()
+		case agent.OutcomeTerminal:
+			ret := vm.NewObject()
+			ret.Set("exitCode", rr.Result.ExitCode)
+			ret.Set("reason", rr.Result.Reason)
+			return ret
+		}
+		return goja.Undefined()
+	})
+
+	obj.Set("onShutdown", func(call goja.FunctionCall) goja.Value {
+		cb, ok := goja.AssertFunction(call.Argument(0))
+		if !ok {
+			panic(vm.NewTypeError("onShutdown callback must be a function"))
+		}
+		*shutdown = &gojaShutdownHandler{vm: vm, cb: cb, log: log, gracePeriod: shutdownGrace}
+		return goja.Undefined()
 	})
 
 	return obj

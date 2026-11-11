@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -71,5 +72,5 @@ func runScript(t *testing.T, files map[string]string, entrypoint string) (agent.
 			NodeName:  "node-1",
 		},
 	}
-	return New().Run(context.Background(), req, newMockHost())
+	return New(5*time.Second).Run(context.Background(), req, newMockHost())
 }

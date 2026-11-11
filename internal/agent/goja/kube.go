@@ -1,9 +1,9 @@
 package goja
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	"github.com/dop251/goja"
 
@@ -16,8 +16,10 @@ import (
 )
 
 type kubeModule struct {
-	ctx  context.Context
-	host agent.Host
+	active *ctxHolder
+	host   agent.Host
+	loop   *agent.EventLoop
+	log    *slog.Logger
 }
 
 func (k *kubeModule) Name() string { return "kube" }
@@ -32,6 +34,7 @@ func (k *kubeModule) Instantiate(vm *goja.Runtime) goja.Value {
 	obj.Set("patch", k.patchFunc(vm, kc))
 	obj.Set("apply", k.applyFunc(vm, kc))
 	obj.Set("delete", k.deleteFunc(vm, kc))
+	obj.Set("watch", k.watchFunc(vm, kc))
 	obj.Set("resolveGVR", k.resolveGVRFunc(vm, kc))
 	return obj
 }
@@ -39,7 +42,7 @@ func (k *kubeModule) Instantiate(vm *goja.Runtime) goja.Value {
 func (k *kubeModule) getFunc(vm *goja.Runtime, kc agent.KubeClient) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
 		ref := exportRef(vm, call.Argument(0))
-		result, err := kc.Get(k.ctx, ref.gvr, ref.namespace, ref.name)
+		result, err := kc.Get(k.active.ctx, ref.gvr, ref.namespace, ref.name)
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
@@ -60,7 +63,7 @@ func (k *kubeModule) listFunc(vm *goja.Runtime, kc agent.KubeClient) func(goja.F
 				opts.FieldSelector = fs
 			}
 		}
-		result, err := kc.List(k.ctx, ref.gvr, ref.namespace, opts)
+		result, err := kc.List(k.active.ctx, ref.gvr, ref.namespace, opts)
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
@@ -76,7 +79,7 @@ func (k *kubeModule) createFunc(vm *goja.Runtime, kc agent.KubeClient) func(goja
 	return func(call goja.FunctionCall) goja.Value {
 		obj := toUnstructured(vm, call.Argument(0))
 		gvr := gvrFromObj(vm, kc, obj)
-		result, err := kc.Create(k.ctx, gvr, obj)
+		result, err := kc.Create(k.active.ctx, gvr, obj)
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
@@ -88,7 +91,7 @@ func (k *kubeModule) replaceFunc(vm *goja.Runtime, kc agent.KubeClient) func(goj
 	return func(call goja.FunctionCall) goja.Value {
 		obj := toUnstructured(vm, call.Argument(0))
 		gvr := gvrFromObj(vm, kc, obj)
-		result, err := kc.Update(k.ctx, gvr, obj)
+		result, err := kc.Update(k.active.ctx, gvr, obj)
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
@@ -119,7 +122,7 @@ func (k *kubeModule) patchFunc(vm *goja.Runtime, kc agent.KubeClient) func(goja.
 				pt = resolved
 			}
 		}
-		result, err := kc.Patch(k.ctx, ref.gvr, ref.namespace, ref.name, pt, patchData, subresource)
+		result, err := kc.Patch(k.active.ctx, ref.gvr, ref.namespace, ref.name, pt, patchData, subresource)
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
@@ -138,7 +141,7 @@ func (k *kubeModule) applyFunc(vm *goja.Runtime, kc agent.KubeClient) func(goja.
 				fieldManager = fm
 			}
 		}
-		result, err := kc.Apply(k.ctx, gvr, obj, fieldManager)
+		result, err := kc.Apply(k.active.ctx, gvr, obj, fieldManager)
 		if err != nil {
 			panic(vm.NewGoError(err))
 		}
@@ -149,8 +152,39 @@ func (k *kubeModule) applyFunc(vm *goja.Runtime, kc agent.KubeClient) func(goja.
 func (k *kubeModule) deleteFunc(vm *goja.Runtime, kc agent.KubeClient) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
 		ref := exportRef(vm, call.Argument(0))
-		if err := kc.Delete(k.ctx, ref.gvr, ref.namespace, ref.name); err != nil {
+		if err := kc.Delete(k.active.ctx, ref.gvr, ref.namespace, ref.name); err != nil {
 			panic(vm.NewGoError(err))
+		}
+		return goja.Undefined()
+	}
+}
+
+func (k *kubeModule) watchFunc(vm *goja.Runtime, kc agent.KubeClient) func(goja.FunctionCall) goja.Value {
+	return func(call goja.FunctionCall) goja.Value {
+		ref := exportRef(vm, call.Argument(0))
+
+		cb, ok := goja.AssertFunction(call.Argument(1))
+		if !ok {
+			panic(vm.NewTypeError("watch callback must be a function"))
+		}
+
+		opts := metav1.ListOptions{}
+		if len(call.Arguments) > 2 && !goja.IsUndefined(call.Argument(2)) {
+			optsMap := exportMap(vm, call.Argument(2))
+			if ls, ok := optsMap["labelSelector"].(string); ok {
+				opts.LabelSelector = ls
+			}
+			if fs, ok := optsMap["fieldSelector"].(string); ok {
+				opts.FieldSelector = fs
+			}
+		}
+
+		if k.loop.Stopped() {
+			panic(vm.NewTypeError("cannot register watch: event loop is stopped"))
+		}
+		lw := agent.NewListWatcher(k.active.ctx, kc, ref.gvr, ref.namespace, opts, k.log)
+		if err := k.loop.AddWatch(lw, &gojaEventHandler{vm: vm, cb: cb}); err != nil {
+			panic(vm.NewTypeError(fmt.Sprintf("cannot register watch: %v", err)))
 		}
 		return goja.Undefined()
 	}

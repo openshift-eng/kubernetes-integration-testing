@@ -11,12 +11,14 @@ import (
 	"sort"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 )
 
 type Manifest struct {
 	Runtime    string            `json:"runtime"`
-	Timeout    string            `json:"timeout,omitempty"`
+	Timeout    *metav1.Duration  `json:"timeout,omitempty"`
 	Entrypoint string            `json:"entrypoint"`
 	Packages   []PackageManifest `json:"packages"`
 }
@@ -36,7 +38,7 @@ type Bundle struct {
 func (b *Bundle) Reader() io.Reader { return bytes.NewReader(b.data) }
 func (b *Bundle) Size() int         { return len(b.data) }
 
-func Build(packages []collection.ScriptPackageContent, entrypointPackage string, values map[string]json.RawMessage, runtime string, timeout string) (*Bundle, error) {
+func Build(packages []collection.ScriptPackageContent, entrypointPackage string, values map[string]json.RawMessage, runtime string, timeout *metav1.Duration) (*Bundle, error) {
 	sorted, err := validateAndSort(packages)
 	if err != nil {
 		return nil, err
@@ -84,7 +86,7 @@ func validateAndSort(packages []collection.ScriptPackageContent) ([]collection.S
 	return sorted, nil
 }
 
-func buildManifest(packages []collection.ScriptPackageContent, entrypointPackage string, runtime string, timeout string) (*Manifest, error) {
+func buildManifest(packages []collection.ScriptPackageContent, entrypointPackage string, runtime string, timeout *metav1.Duration) (*Manifest, error) {
 	var entrypointFile string
 	for _, pkg := range packages {
 		if pkg.Name == entrypointPackage {

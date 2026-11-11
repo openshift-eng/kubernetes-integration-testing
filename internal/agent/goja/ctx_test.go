@@ -22,7 +22,7 @@ func TestCtx(t *testing.T) {
 			Entrypoint: "pkg/main.js",
 			Pod:        agent.PodReference{Name: "p"},
 		}
-		_, err := New().Run(context.Background(), req, host)
+		_, err := New(5*time.Second).Run(context.Background(), req, host)
 		require.NoError(t, err)
 		assert.Equal(t, []string{"hello", "world"}, host.getLogs())
 	})
@@ -48,7 +48,7 @@ func TestCtx(t *testing.T) {
 			Entrypoint: "pkg/main.js",
 			Pod:        agent.PodReference{Name: "p"},
 		}
-		_, err := New().Run(ctx, req, &mockHost{})
+		_, err := New(5*time.Second).Run(ctx, req, &mockHost{})
 		require.Error(t, err)
 		assert.ErrorIs(t, err, context.DeadlineExceeded)
 	})

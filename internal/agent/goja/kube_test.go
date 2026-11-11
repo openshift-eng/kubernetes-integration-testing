@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -85,7 +86,7 @@ func runWithKube(t *testing.T, files map[string]string, entrypoint string, host 
 			NodeName:  "node-1",
 		},
 	}
-	return New().Run(context.Background(), req, host)
+	return New(5*time.Second).Run(context.Background(), req, host)
 }
 
 func TestKubeCreateAndGet(t *testing.T) {

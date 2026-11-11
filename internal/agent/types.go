@@ -51,4 +51,3 @@ type PodReference struct {
 	UID       types.UID
 	NodeName  string
 }
-

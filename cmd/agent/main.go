@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/afero"
 	"k8s.io/client-go/discovery"
@@ -67,7 +68,7 @@ func main() {
 func runtimeFactory(name string) (agent.Runtime, error) {
 	switch name {
 	case "js":
-		return gojaruntime.New(), nil
+		return gojaruntime.New(5 * time.Second), nil
 	default:
 		return nil, fmt.Errorf("unsupported runtime: %q", name)
 	}

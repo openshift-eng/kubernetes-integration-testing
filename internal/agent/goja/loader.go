@@ -1,8 +1,8 @@
 package goja
 
 import (
-	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,12 +19,12 @@ type moduleLoader struct {
 	natives   *nativeRegistry
 }
 
-func newModuleLoader(vm *goja.Runtime, bundleDir string, ctx context.Context, host agent.Host) *moduleLoader {
+func newModuleLoader(vm *goja.Runtime, bundleDir string, active *ctxHolder, host agent.Host, loop *agent.EventLoop, log *slog.Logger) *moduleLoader {
 	return &moduleLoader{
 		bundleDir: bundleDir,
 		vm:        vm,
 		cache:     make(map[string]*goja.Object),
-		natives:   newNativeRegistry(&kubeModule{ctx: ctx, host: host}),
+		natives:   newNativeRegistry(&kubeModule{active: active, host: host, loop: loop, log: log}),
 	}
 }
 

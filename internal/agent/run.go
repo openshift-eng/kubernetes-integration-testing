@@ -64,14 +64,25 @@ func Run(ctx context.Context, log *slog.Logger, fs afero.Fs, cfg Config, runtime
 
 	h := newHost(log, kube)
 
+	runCtx := ctx
+	cancelRun := context.CancelFunc(func() {})
+	if manifest.Timeout != nil {
+		if manifest.Timeout.Duration <= 0 {
+			return fmt.Errorf("agent timeout must be positive, got %s", manifest.Timeout.Duration)
+		}
+		runCtx, cancelRun = context.WithTimeout(ctx, manifest.Timeout.Duration)
+	}
+	defer cancelRun()
+
 	log.Info("agent ready",
 		"runtime", manifest.Runtime,
 		"entrypoint", req.Entrypoint,
 		"pod", req.Pod.Name,
 		"namespace", req.Pod.Namespace,
+		"timeout", manifest.Timeout,
 	)
 
-	result, err := rt.Run(ctx, req, h)
+	result, err := rt.Run(runCtx, req, h)
 	if err != nil {
 		return fmt.Errorf("runtime %s: %w", rt.Name(), err)
 	}

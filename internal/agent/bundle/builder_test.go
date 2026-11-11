@@ -8,9 +8,12 @@ import (
 	"math/rand"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 )
@@ -72,11 +75,11 @@ func TestBuild(t *testing.T) {
 			"lib/state.js": "exports.state = {}",
 		}, "main.js")
 
-		b, err := Build([]collection.ScriptPackageContent{pkg}, "mcd-stub", nil, "js", "")
+		b, err := Build([]collection.ScriptPackageContent{pkg}, "mcd-stub", nil, "js", nil)
 		require.NoError(t, err)
 		assert.NotEmpty(t, b.Digest)
 		assert.Equal(t, "js", b.Manifest.Runtime)
-		assert.Empty(t, b.Manifest.Timeout)
+		assert.Nil(t, b.Manifest.Timeout)
 		assert.Equal(t, "mcd-stub/main.js", b.Manifest.Entrypoint)
 		require.Len(t, b.Manifest.Packages, 1)
 		assert.Equal(t, "mcd-stub", b.Manifest.Packages[0].Name)
@@ -96,9 +99,9 @@ func TestBuild(t *testing.T) {
 			"helpers.js": "exports.help = {}",
 		})
 
-		b, err := Build([]collection.ScriptPackageContent{runnable, lib}, "mcd-stub", nil, "js", "30s")
+		b, err := Build([]collection.ScriptPackageContent{runnable, lib}, "mcd-stub", nil, "js", &metav1.Duration{Duration: 30 * time.Second})
 		require.NoError(t, err)
-		assert.Equal(t, "30s", b.Manifest.Timeout)
+		assert.Equal(t, 30*time.Second, b.Manifest.Timeout.Duration)
 		require.Len(t, b.Manifest.Packages, 2)
 		assert.Equal(t, "common", b.Manifest.Packages[0].Name)
 		assert.Equal(t, "mcd-stub", b.Manifest.Packages[1].Name)
@@ -112,9 +115,9 @@ func TestBuild(t *testing.T) {
 	t.Run("deterministic digest", func(t *testing.T) {
 		pkg := runnablePackage("pkg", map[string]string{"main.js": "code"}, "main.js")
 
-		b1, err := Build([]collection.ScriptPackageContent{pkg}, "pkg", nil, "js", "")
+		b1, err := Build([]collection.ScriptPackageContent{pkg}, "pkg", nil, "js", nil)
 		require.NoError(t, err)
-		b2, err := Build([]collection.ScriptPackageContent{pkg}, "pkg", nil, "js", "")
+		b2, err := Build([]collection.ScriptPackageContent{pkg}, "pkg", nil, "js", nil)
 		require.NoError(t, err)
 
 		assert.Equal(t, b1.Digest, b2.Digest)
@@ -124,9 +127,9 @@ func TestBuild(t *testing.T) {
 		a := runnablePackage("aaa", map[string]string{"main.js": "a"}, "main.js")
 		b := libraryPackage("bbb", map[string]string{"lib.js": "b"})
 
-		b1, err := Build([]collection.ScriptPackageContent{a, b}, "aaa", nil, "js", "")
+		b1, err := Build([]collection.ScriptPackageContent{a, b}, "aaa", nil, "js", nil)
 		require.NoError(t, err)
-		b2, err := Build([]collection.ScriptPackageContent{b, a}, "aaa", nil, "js", "")
+		b2, err := Build([]collection.ScriptPackageContent{b, a}, "aaa", nil, "js", nil)
 		require.NoError(t, err)
 
 		assert.Equal(t, b1.Digest, b2.Digest)
@@ -139,7 +142,7 @@ func TestBuild(t *testing.T) {
 			"name":     json.RawMessage(`"test"`),
 		}
 
-		b, err := Build([]collection.ScriptPackageContent{pkg}, "pkg", values, "js", "")
+		b, err := Build([]collection.ScriptPackageContent{pkg}, "pkg", values, "js", nil)
 		require.NoError(t, err)
 
 		files := extractTarGz(t, b)
@@ -152,7 +155,7 @@ func TestBuild(t *testing.T) {
 	t.Run("empty values", func(t *testing.T) {
 		pkg := runnablePackage("pkg", map[string]string{"main.js": "code"}, "main.js")
 
-		b, err := Build([]collection.ScriptPackageContent{pkg}, "pkg", nil, "js", "")
+		b, err := Build([]collection.ScriptPackageContent{pkg}, "pkg", nil, "js", nil)
 		require.NoError(t, err)
 
 		files := extractTarGz(t, b)
@@ -167,7 +170,7 @@ func TestBuildValidation(t *testing.T) {
 	t.Run("missing entrypointPackage", func(t *testing.T) {
 		pkg := runnablePackage("pkg", map[string]string{"main.js": "code"}, "main.js")
 
-		_, err := Build([]collection.ScriptPackageContent{pkg}, "nonexistent", nil, "js", "")
+		_, err := Build([]collection.ScriptPackageContent{pkg}, "nonexistent", nil, "js", nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "entrypoint package")
 	})
@@ -175,7 +178,7 @@ func TestBuildValidation(t *testing.T) {
 	t.Run("entrypointPackage no entrypoint file", func(t *testing.T) {
 		lib := libraryPackage("pkg", map[string]string{"util.js": "exports = {}"})
 
-		_, err := Build([]collection.ScriptPackageContent{lib}, "pkg", nil, "js", "")
+		_, err := Build([]collection.ScriptPackageContent{lib}, "pkg", nil, "js", nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no entrypoint")
 	})
@@ -190,7 +193,7 @@ func TestBuildValidation(t *testing.T) {
 			))
 		}
 
-		_, err := Build(packages, "p", nil, "js", "")
+		_, err := Build(packages, "p", nil, "js", nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "too many packages")
 	})
@@ -204,13 +207,13 @@ func TestBuildValidation(t *testing.T) {
 		rng.Read(data)
 		pkg := runnablePackage("pkg", map[string]string{"main.js": string(data)}, "main.js")
 
-		_, err := Build([]collection.ScriptPackageContent{pkg}, "pkg", nil, "js", "")
+		_, err := Build([]collection.ScriptPackageContent{pkg}, "pkg", nil, "js", nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "exceeds maximum")
 	})
 
 	t.Run("empty packages", func(t *testing.T) {
-		_, err := Build(nil, "pkg", nil, "js", "")
+		_, err := Build(nil, "pkg", nil, "js", nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no packages")
 	})
