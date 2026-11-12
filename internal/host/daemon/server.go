@@ -16,7 +16,7 @@ import (
 
 type server struct {
 	pb.UnimplementedDaemonServer
-	clusterManager *cluster.ClusterManager
+	clusterManager cluster.Manager
 	log            *slog.Logger
 }
 
