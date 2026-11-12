@@ -9,6 +9,8 @@ import (
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -355,6 +357,78 @@ func TestApplyReplacePod(t *testing.T) {
 	})
 }
 
+// TestApplyReplacePodIsIdempotentAfterDefaulting verifies the ownership
+// contract of ApplyReplacePod: differences limited to unmanaged fields do not
+// rebuild an already-applied replacement, while any change to a managed field
+// or to the shape of a managed collection does.
+func TestApplyReplacePodIsIdempotentAfterDefaulting(t *testing.T) {
+	rp := &v1alpha1.PodReplacement{
+		Name:    "agent",
+		Image:   "quay.io/kit-agent:latest",
+		Command: []string{"/usr/bin/kit-agent"},
+		Args:    []string{"--bundle=/tmp/bundle"},
+		Env: []corev1.EnvVar{{
+			Name:  "KIT_AGENT_BUNDLE_URL",
+			Value: "http://controller:8082/bundle",
+		}, {
+			Name: "KIT_POD_NAME",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+			},
+		}, {
+			Name: "KIT_CPU_LIMIT",
+			ValueFrom: &corev1.EnvVarSource{
+				ResourceFieldRef: &corev1.ResourceFieldSelector{
+					Resource: "limits.cpu",
+					Divisor:  resource.MustParse("1"),
+				},
+			},
+		}},
+		PullPolicy: corev1.PullAlways,
+	}
+
+	// 1. Apply once and verify that the managed fields change the Pod.
+	pod := podWithContainers("main", "main:latest")
+	originalPod := pod.DeepCopy()
+	ApplyReplacePod(pod, rp)
+
+	// The PodReplacement has been applied, so the workload must have changed.
+	assert.False(t, equality.Semantic.DeepEqual(originalPod.Spec, pod.Spec))
+
+	// 2. Add representative values to fields that the replacement does not
+	// manage. This simulates Kubernetes injecting defaults after a Pod is stored.
+	container := &pod.Spec.Containers[0]
+	container.TerminationMessagePath = "/dev/termination-log"
+	container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
+	envByName(t, container.Env, "KIT_POD_NAME").ValueFrom.FieldRef.APIVersion = "v1"
+	envByName(t, container.Env, "KIT_CPU_LIMIT").ValueFrom.ResourceFieldRef.ContainerName = "agent"
+	before := pod.DeepCopy()
+
+	// Apply again: the Pod must remain unchanged because only unmanaged fields
+	// were modified.
+	ApplyReplacePod(pod, rp)
+	assert.True(t, equality.Semantic.DeepEqual(before.Spec, pod.Spec))
+
+	// 3. An extra entry changes the shape of a managed collection and must be
+	// removed when the replacement is reapplied.
+	pod.Spec.Containers[0].Env = append(
+		pod.Spec.Containers[0].Env,
+		corev1.EnvVar{Name: "KIT_UNEXPECTED", Value: "unexpected"},
+	)
+	ApplyReplacePod(pod, rp)
+	assert.Len(t, pod.Spec.Containers[0].Env, len(rp.Env))
+	for _, env := range pod.Spec.Containers[0].Env {
+		assert.NotEqual(t, "KIT_UNEXPECTED", env.Name)
+	}
+
+	// 4. Changes to managed fields must also be repaired.
+	pod.Spec.Containers[0].Command = []string{"/hacked"}
+	envByName(t, pod.Spec.Containers[0].Env, "KIT_AGENT_BUNDLE_URL").Value = "http://hacked/bundle"
+	ApplyReplacePod(pod, rp)
+	assert.Equal(t, rp.Command, pod.Spec.Containers[0].Command)
+	assertEnv(t, pod.Spec.Containers[0].Env, "KIT_AGENT_BUNDLE_URL", "http://controller:8082/bundle")
+}
+
 func TestApplyReplacePodIntegration(t *testing.T) {
 	overrides := []v1alpha1.WorkloadOverride{
 		{
@@ -488,4 +562,15 @@ func assertEnv(t *testing.T, envs []corev1.EnvVar, name, value string) {
 		}
 	}
 	t.Errorf("env %s not found", name)
+}
+
+func envByName(t *testing.T, envs []corev1.EnvVar, name string) *corev1.EnvVar {
+	t.Helper()
+	for i := range envs {
+		if envs[i].Name == name {
+			return &envs[i]
+		}
+	}
+	t.Fatalf("env %s not found", name)
+	return nil
 }

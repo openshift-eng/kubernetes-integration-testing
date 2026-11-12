@@ -2,10 +2,12 @@ package override
 
 import (
 	"fmt"
+	"reflect"
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 )
 
 const NoOpImage = "registry.k8s.io/pause:3.10"
@@ -59,6 +61,9 @@ const NoOpContainerName = "kit-noop"
 // The pod keeps its metadata, labels, owner references, scheduling fields,
 // and restart policy — only the container list changes.
 func ApplyNoOp(pod *corev1.Pod) {
+	if IsNoOp(pod) {
+		return
+	}
 	pod.Spec.InitContainers = nil
 	pod.Spec.Containers = []corev1.Container{{
 		Name:    NoOpContainerName,
@@ -87,19 +92,146 @@ func IsNoOp(pod *corev1.Pod) bool {
 		c.StartupProbe == nil
 }
 
-func ApplyReplacePod(pod *corev1.Pod, rp *v1alpha1.PodReplacement) {
-	pod.Spec.InitContainers = nil
+// buildReplaceContainer constructs the sole desired regular container for a
+// PodReplacement. It is the single source of truth for the fields managed by
+// ReplacePod: ApplyReplacePod creates new containers from it, and
+// matchesReplacePod compares existing containers against it.
+//
+// A field left at its zero value is unmanaged rather than a request to force
+// that zero value. That distinction lets Kubernetes default fields Kit did not
+// specify without making an already-applied replacement look like drift.
+func buildReplaceContainer(rp *v1alpha1.PodReplacement) corev1.Container {
+	replacement := rp.DeepCopy()
 	c := corev1.Container{
-		Name:    rp.Name,
-		Image:   rp.Image,
-		Command: rp.Command,
-		Args:    rp.Args,
-		Env:     rp.Env,
+		Name:    replacement.Name,
+		Image:   replacement.Image,
+		Command: replacement.Command,
+		Args:    replacement.Args,
+		Env:     replacement.Env,
 	}
-	if rp.PullPolicy != "" {
-		c.ImagePullPolicy = rp.PullPolicy
+	if replacement.PullPolicy != "" {
+		c.ImagePullPolicy = replacement.PullPolicy
 	}
+	return c
+}
+
+// ApplyReplacePod replaces all init and regular containers with the single
+// container described by rp. Other PodSpec fields, metadata, ownership, and
+// scheduling information are preserved.
+//
+// The operation is idempotent. If the existing container already has every
+// field managed by rp, it is left untouched so API-server defaults in
+// unmanaged fields survive. Any difference in a managed field replaces the
+// workload with the desired replacement.
+func ApplyReplacePod(pod *corev1.Pod, rp *v1alpha1.PodReplacement) {
+	if matchesReplacePod(pod, rp) {
+		return
+	}
+	pod.Spec.InitContainers = nil
+	c := buildReplaceContainer(rp)
 	pod.Spec.Containers = []corev1.Container{c}
+}
+
+// matchesReplacePod reports whether pod already has the replacement state
+// managed by rp. It deliberately does not compare the complete Container
+// object: expected zero fields are unmanaged and may have been defaulted by
+// the API server.
+//
+// The comparison works by projecting an existing container onto the fields
+// present in expected. Defaults in unmanaged fields are removed only from the
+// temporary copy. Missing or different managed fields, mismatched collection
+// lengths, missing map keys, and extra collection entries still fail the final
+// semantic equality check.
+func matchesReplacePod(pod *corev1.Pod, rp *v1alpha1.PodReplacement) bool {
+	if len(pod.Spec.InitContainers) != 0 || len(pod.Spec.Containers) != 1 {
+		return false
+	}
+
+	expected := buildReplaceContainer(rp)
+	projected := *pod.Spec.Containers[0].DeepCopy()
+	projectManagedFields(reflect.ValueOf(&projected).Elem(), reflect.ValueOf(expected))
+	return equality.Semantic.DeepEqual(projected, expected)
+}
+
+// projectManagedFields mutates actual in place so it exposes only the fields
+// present in expected. It recurses through structs, pointers, slices, arrays,
+// and maps; scalar and other leaf values are left for the caller's equality
+// check. The function does not make actual equal to expected. Structural
+// differences such as different slice lengths or missing or extra map entries
+// are intentionally left visible to that check.
+//
+// A nil or zero expected field means the corresponding actual field is
+// unmanaged and is zeroed in the temporary copy. This is what makes
+// matchesReplacePod tolerate API-server defaults without encoding knowledge
+// about individual Kubernetes defaults.
+//
+// The function is intentionally private and scoped to ReplacePod. It is not a
+// general-purpose merge or patch implementation.
+func projectManagedFields(actual, expected reflect.Value) {
+	if isAtomicStruct(expected.Type()) {
+		return
+	}
+
+	switch expected.Kind() {
+	case reflect.Struct:
+		for i := range expected.NumField() {
+			if expected.Field(i).IsZero() {
+				actual.Field(i).SetZero()
+				continue
+			}
+			projectManagedFields(actual.Field(i), expected.Field(i))
+		}
+	case reflect.Pointer:
+		if expected.IsNil() {
+			actual.SetZero()
+		} else if !actual.IsNil() {
+			projectManagedFields(actual.Elem(), expected.Elem())
+		}
+	case reflect.Slice:
+		if expected.IsNil() {
+			actual.SetZero()
+		} else if actual.Len() == expected.Len() {
+			for i := range expected.Len() {
+				projectManagedFields(actual.Index(i), expected.Index(i))
+			}
+		}
+	case reflect.Array:
+		for i := range expected.Len() {
+			projectManagedFields(actual.Index(i), expected.Index(i))
+		}
+	case reflect.Map:
+		if expected.IsNil() {
+			actual.SetZero()
+		} else if !actual.IsNil() {
+			for _, key := range expected.MapKeys() {
+				actualValue := actual.MapIndex(key)
+				if !actualValue.IsValid() {
+					continue
+				}
+				projectedValue := reflect.New(actual.Type().Elem()).Elem()
+				projectedValue.Set(actualValue)
+				projectManagedFields(projectedValue, expected.MapIndex(key))
+				actual.SetMapIndex(key, projectedValue)
+			}
+		}
+	}
+}
+
+// isAtomicStruct reports whether t contains state that must not be projected
+// field by field with reflection. Kubernetes API values such as
+// resource.Quantity have unexported fields; recursing into them would attempt
+// to assign values obtained through unexported fields and panic. Such values
+// are compared as atomic leaves by the caller's semantic equality check.
+func isAtomicStruct(t reflect.Type) bool {
+	if t.Kind() != reflect.Struct {
+		return false
+	}
+	for i := range t.NumField() {
+		if !t.Field(i).IsExported() {
+			return true
+		}
+	}
+	return false
 }
 
 func ApplyContainerOverrides(pod *corev1.Pod, overrides []v1alpha1.ContainerOverride) (Outcome, string) {
