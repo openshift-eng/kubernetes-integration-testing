@@ -280,6 +280,43 @@ func TestWorkloadOverrideReconcileReplacePodApplied(t *testing.T) {
 	assertPodUnchanged(t, kubeClient, pod)
 }
 
+// TestWorkloadOverrideReconcileReplacePodAppliedAfterDefaulting verifies that
+// API-server defaults do not make an admitted replacement look pending.
+func TestWorkloadOverrideReconcileReplacePodAppliedAfterDefaulting(t *testing.T) {
+	wo := newWorkloadOverride("override", matchByApp("app"), nil)
+	wo.Spec.ReplacePod = &v1alpha1.PodReplacement{
+		Name:    "agent",
+		Image:   "localhost/kit-controller:latest",
+		Command: []string{"/usr/bin/kit-agent"},
+		Env: []corev1.EnvVar{{
+			Name: "KIT_POD_NAME",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+			},
+		}},
+	}
+	wo.Spec.ServiceAccountName = "kit-agent-test"
+
+	pod := newPod("pod", "default", map[string]string{"app": "app"}, "", true)
+	override.ApplyReplacePod(pod, wo.Spec.ReplacePod)
+	pod.Spec.ServiceAccountName = "kit-agent-test"
+
+	container := &pod.Spec.Containers[0]
+	container.ImagePullPolicy = corev1.PullIfNotPresent
+	container.TerminationMessagePath = "/dev/termination-log"
+	container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
+	container.Env[0].ValueFrom.FieldRef.APIVersion = "v1"
+
+	kubeClient := newWorkloadOverrideClient(t, wo, pod)
+	reconcileWorkloadOverride(t, kubeClient, wo.Name)
+
+	status := getWorkloadOverrideStatus(t, kubeClient, wo.Name)
+	assert.Equal(t, int32(1), status.MatchedPods)
+	assert.Equal(t, int32(1), status.AppliedPods)
+	assertWorkloadOverrideCondition(t, status, metav1.ConditionTrue, "Applied")
+	assertPodUnchanged(t, kubeClient, pod)
+}
+
 // TestWorkloadOverrideReconcileReplacePodPending verifies that a Pod with
 // original containers is deleted so admission can replace it.
 func TestWorkloadOverrideReconcileReplacePodPending(t *testing.T) {
