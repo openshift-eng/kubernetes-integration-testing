@@ -197,6 +197,86 @@ func (*DestroyClusterResponse) Descriptor() ([]byte, []int) {
 	return file_api_grpc_kit_proto_rawDescGZIP(), []int{3}
 }
 
+type ListClustersRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListClustersRequest) Reset() {
+	*x = ListClustersRequest{}
+	mi := &file_api_grpc_kit_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListClustersRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListClustersRequest) ProtoMessage() {}
+
+func (x *ListClustersRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_grpc_kit_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListClustersRequest.ProtoReflect.Descriptor instead.
+func (*ListClustersRequest) Descriptor() ([]byte, []int) {
+	return file_api_grpc_kit_proto_rawDescGZIP(), []int{4}
+}
+
+type ListClustersResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Names         []string               `protobuf:"bytes,1,rep,name=names,proto3" json:"names,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListClustersResponse) Reset() {
+	*x = ListClustersResponse{}
+	mi := &file_api_grpc_kit_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListClustersResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListClustersResponse) ProtoMessage() {}
+
+func (x *ListClustersResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_grpc_kit_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListClustersResponse.ProtoReflect.Descriptor instead.
+func (*ListClustersResponse) Descriptor() ([]byte, []int) {
+	return file_api_grpc_kit_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ListClustersResponse) GetNames() []string {
+	if x != nil {
+		return x.Names
+	}
+	return nil
+}
+
 type GetClusterKubeConfigRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -207,7 +287,7 @@ type GetClusterKubeConfigRequest struct {
 
 func (x *GetClusterKubeConfigRequest) Reset() {
 	*x = GetClusterKubeConfigRequest{}
-	mi := &file_api_grpc_kit_proto_msgTypes[4]
+	mi := &file_api_grpc_kit_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -219,7 +299,7 @@ func (x *GetClusterKubeConfigRequest) String() string {
 func (*GetClusterKubeConfigRequest) ProtoMessage() {}
 
 func (x *GetClusterKubeConfigRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_grpc_kit_proto_msgTypes[4]
+	mi := &file_api_grpc_kit_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -232,7 +312,7 @@ func (x *GetClusterKubeConfigRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetClusterKubeConfigRequest.ProtoReflect.Descriptor instead.
 func (*GetClusterKubeConfigRequest) Descriptor() ([]byte, []int) {
-	return file_api_grpc_kit_proto_rawDescGZIP(), []int{4}
+	return file_api_grpc_kit_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *GetClusterKubeConfigRequest) GetName() string {
@@ -259,7 +339,7 @@ type GetClusterKubeConfigResponse struct {
 
 func (x *GetClusterKubeConfigResponse) Reset() {
 	*x = GetClusterKubeConfigResponse{}
-	mi := &file_api_grpc_kit_proto_msgTypes[5]
+	mi := &file_api_grpc_kit_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -271,7 +351,7 @@ func (x *GetClusterKubeConfigResponse) String() string {
 func (*GetClusterKubeConfigResponse) ProtoMessage() {}
 
 func (x *GetClusterKubeConfigResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_grpc_kit_proto_msgTypes[5]
+	mi := &file_api_grpc_kit_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -284,7 +364,7 @@ func (x *GetClusterKubeConfigResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetClusterKubeConfigResponse.ProtoReflect.Descriptor instead.
 func (*GetClusterKubeConfigResponse) Descriptor() ([]byte, []int) {
-	return file_api_grpc_kit_proto_rawDescGZIP(), []int{5}
+	return file_api_grpc_kit_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GetClusterKubeConfigResponse) GetPath() string {
@@ -316,16 +396,20 @@ const file_api_grpc_kit_proto_rawDesc = "" +
 	"kubeconfig\"+\n" +
 	"\x15DestroyClusterRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"\x18\n" +
-	"\x16DestroyClusterResponse\"K\n" +
+	"\x16DestroyClusterResponse\"\x15\n" +
+	"\x13ListClustersRequest\",\n" +
+	"\x14ListClustersResponse\x12\x14\n" +
+	"\x05names\x18\x01 \x03(\tR\x05names\"K\n" +
 	"\x1bGetClusterKubeConfigRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\bR\acontent\"L\n" +
 	"\x1cGetClusterKubeConfigResponse\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x18\n" +
-	"\acontent\x18\x02 \x01(\tR\acontent2\xf8\x01\n" +
+	"\acontent\x18\x02 \x01(\tR\acontent2\xbd\x02\n" +
 	"\x06Daemon\x12F\n" +
 	"\rCreateCluster\x12\x19.kit.CreateClusterRequest\x1a\x1a.kit.CreateClusterResponse\x12I\n" +
-	"\x0eDestroyCluster\x12\x1a.kit.DestroyClusterRequest\x1a\x1b.kit.DestroyClusterResponse\x12[\n" +
+	"\x0eDestroyCluster\x12\x1a.kit.DestroyClusterRequest\x1a\x1b.kit.DestroyClusterResponse\x12C\n" +
+	"\fListClusters\x12\x18.kit.ListClustersRequest\x1a\x19.kit.ListClustersResponse\x12[\n" +
 	"\x14GetClusterKubeConfig\x12 .kit.GetClusterKubeConfigRequest\x1a!.kit.GetClusterKubeConfigResponseBBZ@github.com/openshift-eng/kubernetes-integration-testing/api/grpcb\x06proto3"
 
 var (
@@ -340,24 +424,28 @@ func file_api_grpc_kit_proto_rawDescGZIP() []byte {
 	return file_api_grpc_kit_proto_rawDescData
 }
 
-var file_api_grpc_kit_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_api_grpc_kit_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_api_grpc_kit_proto_goTypes = []any{
 	(*CreateClusterRequest)(nil),         // 0: kit.CreateClusterRequest
 	(*CreateClusterResponse)(nil),        // 1: kit.CreateClusterResponse
 	(*DestroyClusterRequest)(nil),        // 2: kit.DestroyClusterRequest
 	(*DestroyClusterResponse)(nil),       // 3: kit.DestroyClusterResponse
-	(*GetClusterKubeConfigRequest)(nil),  // 4: kit.GetClusterKubeConfigRequest
-	(*GetClusterKubeConfigResponse)(nil), // 5: kit.GetClusterKubeConfigResponse
+	(*ListClustersRequest)(nil),          // 4: kit.ListClustersRequest
+	(*ListClustersResponse)(nil),         // 5: kit.ListClustersResponse
+	(*GetClusterKubeConfigRequest)(nil),  // 6: kit.GetClusterKubeConfigRequest
+	(*GetClusterKubeConfigResponse)(nil), // 7: kit.GetClusterKubeConfigResponse
 }
 var file_api_grpc_kit_proto_depIdxs = []int32{
 	0, // 0: kit.Daemon.CreateCluster:input_type -> kit.CreateClusterRequest
 	2, // 1: kit.Daemon.DestroyCluster:input_type -> kit.DestroyClusterRequest
-	4, // 2: kit.Daemon.GetClusterKubeConfig:input_type -> kit.GetClusterKubeConfigRequest
-	1, // 3: kit.Daemon.CreateCluster:output_type -> kit.CreateClusterResponse
-	3, // 4: kit.Daemon.DestroyCluster:output_type -> kit.DestroyClusterResponse
-	5, // 5: kit.Daemon.GetClusterKubeConfig:output_type -> kit.GetClusterKubeConfigResponse
-	3, // [3:6] is the sub-list for method output_type
-	0, // [0:3] is the sub-list for method input_type
+	4, // 2: kit.Daemon.ListClusters:input_type -> kit.ListClustersRequest
+	6, // 3: kit.Daemon.GetClusterKubeConfig:input_type -> kit.GetClusterKubeConfigRequest
+	1, // 4: kit.Daemon.CreateCluster:output_type -> kit.CreateClusterResponse
+	3, // 5: kit.Daemon.DestroyCluster:output_type -> kit.DestroyClusterResponse
+	5, // 6: kit.Daemon.ListClusters:output_type -> kit.ListClustersResponse
+	7, // 7: kit.Daemon.GetClusterKubeConfig:output_type -> kit.GetClusterKubeConfigResponse
+	4, // [4:8] is the sub-list for method output_type
+	0, // [0:4] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
@@ -374,7 +462,7 @@ func file_api_grpc_kit_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_grpc_kit_proto_rawDesc), len(file_api_grpc_kit_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

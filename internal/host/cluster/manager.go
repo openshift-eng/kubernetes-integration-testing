@@ -16,6 +16,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 )
@@ -232,6 +233,14 @@ func (cm *ClusterManager) Get(name string) (Cluster, string, bool) {
 		}
 	}
 	return nil, "", false
+}
+
+func (cm *ClusterManager) List() []string {
+	all := sets.New[string]()
+	for _, p := range cm.providers {
+		all.Insert(p.List()...)
+	}
+	return sets.List(all)
 }
 
 var kitClusterGVR = schema.GroupVersionResource{

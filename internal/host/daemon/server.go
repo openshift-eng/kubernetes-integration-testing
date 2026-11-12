@@ -61,6 +61,10 @@ func (s *server) DestroyCluster(ctx context.Context, req *pb.DestroyClusterReque
 	return &pb.DestroyClusterResponse{}, nil
 }
 
+func (s *server) ListClusters(_ context.Context, _ *pb.ListClustersRequest) (*pb.ListClustersResponse, error) {
+	return &pb.ListClustersResponse{Names: s.clusterManager.List()}, nil
+}
+
 func (s *server) GetClusterKubeConfig(_ context.Context, req *pb.GetClusterKubeConfigRequest) (*pb.GetClusterKubeConfigResponse, error) {
 	c, _, ok := s.clusterManager.Get(req.GetName())
 	if !ok {
