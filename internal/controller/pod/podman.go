@@ -224,8 +224,9 @@ func (r *podmanRunner) ensurePod(ctx context.Context, pod *corev1.Pod) (string, 
 
 	name := "kit-" + uid[:12]
 	id, err := r.podmanClient.PodCreate(ctx, podman.PodCreateOpts{
-		Name:    name,
-		Network: r.network,
+		Name:     name,
+		Network:  r.network,
+		Hostname: pod.Name,
 		Labels: map[string]string{
 			"kit.pod-uid": uid,
 			"kit.aliases": strings.Join(aliases, ","),
@@ -353,7 +354,6 @@ func (r *podmanRunner) startContainer(ctx context.Context, pod *corev1.Pod, podI
 			Name:       containerName,
 			Image:      container.Image,
 			Pod:        podID,
-			Hostname:   pod.Name,
 			Detach:     true,
 			Replace:    true,
 			LogDriver:  "k8s-file",

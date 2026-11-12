@@ -67,6 +67,7 @@ type RunOpts struct {
 type PodCreateOpts struct {
 	Name           string
 	Network        string
+	Hostname       string
 	Labels         map[string]string
 	NetworkAliases []string
 }
@@ -133,6 +134,12 @@ func stderrFromErr(err error) string {
 }
 
 func (c *client) Run(ctx context.Context, opts RunOpts) (string, error) {
+	// TODO: add client command-construction coverage when this package gets
+	// a real test suite.
+	if opts.Hostname != "" && opts.Pod != "" {
+		return "", fmt.Errorf("podman run: hostname cannot be set for a container in pod %q; set it when creating the pod", opts.Pod)
+	}
+
 	args := []string{"run"}
 	if opts.Detach {
 		args = append(args, "-d")
@@ -316,6 +323,9 @@ func (c *client) PodCreate(ctx context.Context, opts PodCreateOpts) (string, err
 	}
 	if opts.Network != "" {
 		args = append(args, "--network", opts.Network)
+	}
+	if opts.Hostname != "" {
+		args = append(args, "--hostname", opts.Hostname)
 	}
 	for k, v := range opts.Labels {
 		args = append(args, "--label", k+"="+v)
