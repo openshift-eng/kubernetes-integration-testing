@@ -7,6 +7,7 @@ option go_package = "github.com/openshift-eng/kubernetes-integration-testing/api
 service Daemon {
   rpc CreateCluster(CreateClusterRequest) returns (CreateClusterResponse);
   rpc DestroyCluster(DestroyClusterRequest) returns (DestroyClusterResponse);
+  rpc ListClusters(ListClustersRequest) returns (ListClustersResponse);
   rpc GetClusterKubeConfig(GetClusterKubeConfigRequest) returns (GetClusterKubeConfigResponse);
 }
 
@@ -24,6 +25,12 @@ message DestroyClusterRequest {
 }
 
 message DestroyClusterResponse {}
+
+message ListClustersRequest {}
+
+message ListClustersResponse {
+  repeated string names = 1;
+}
 
 message GetClusterKubeConfigRequest {
   string name = 1;

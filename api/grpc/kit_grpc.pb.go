@@ -21,6 +21,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	Daemon_CreateCluster_FullMethodName        = "/kit.Daemon/CreateCluster"
 	Daemon_DestroyCluster_FullMethodName       = "/kit.Daemon/DestroyCluster"
+	Daemon_ListClusters_FullMethodName         = "/kit.Daemon/ListClusters"
 	Daemon_GetClusterKubeConfig_FullMethodName = "/kit.Daemon/GetClusterKubeConfig"
 )
 
@@ -30,6 +31,7 @@ const (
 type DaemonClient interface {
 	CreateCluster(ctx context.Context, in *CreateClusterRequest, opts ...grpc.CallOption) (*CreateClusterResponse, error)
 	DestroyCluster(ctx context.Context, in *DestroyClusterRequest, opts ...grpc.CallOption) (*DestroyClusterResponse, error)
+	ListClusters(ctx context.Context, in *ListClustersRequest, opts ...grpc.CallOption) (*ListClustersResponse, error)
 	GetClusterKubeConfig(ctx context.Context, in *GetClusterKubeConfigRequest, opts ...grpc.CallOption) (*GetClusterKubeConfigResponse, error)
 }
 
@@ -61,6 +63,16 @@ func (c *daemonClient) DestroyCluster(ctx context.Context, in *DestroyClusterReq
 	return out, nil
 }
 
+func (c *daemonClient) ListClusters(ctx context.Context, in *ListClustersRequest, opts ...grpc.CallOption) (*ListClustersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListClustersResponse)
+	err := c.cc.Invoke(ctx, Daemon_ListClusters_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *daemonClient) GetClusterKubeConfig(ctx context.Context, in *GetClusterKubeConfigRequest, opts ...grpc.CallOption) (*GetClusterKubeConfigResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetClusterKubeConfigResponse)
@@ -77,6 +89,7 @@ func (c *daemonClient) GetClusterKubeConfig(ctx context.Context, in *GetClusterK
 type DaemonServer interface {
 	CreateCluster(context.Context, *CreateClusterRequest) (*CreateClusterResponse, error)
 	DestroyCluster(context.Context, *DestroyClusterRequest) (*DestroyClusterResponse, error)
+	ListClusters(context.Context, *ListClustersRequest) (*ListClustersResponse, error)
 	GetClusterKubeConfig(context.Context, *GetClusterKubeConfigRequest) (*GetClusterKubeConfigResponse, error)
 	mustEmbedUnimplementedDaemonServer()
 }
@@ -93,6 +106,9 @@ func (UnimplementedDaemonServer) CreateCluster(context.Context, *CreateClusterRe
 }
 func (UnimplementedDaemonServer) DestroyCluster(context.Context, *DestroyClusterRequest) (*DestroyClusterResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DestroyCluster not implemented")
+}
+func (UnimplementedDaemonServer) ListClusters(context.Context, *ListClustersRequest) (*ListClustersResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListClusters not implemented")
 }
 func (UnimplementedDaemonServer) GetClusterKubeConfig(context.Context, *GetClusterKubeConfigRequest) (*GetClusterKubeConfigResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetClusterKubeConfig not implemented")
@@ -154,6 +170,24 @@ func _Daemon_DestroyCluster_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Daemon_ListClusters_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListClustersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DaemonServer).ListClusters(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Daemon_ListClusters_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DaemonServer).ListClusters(ctx, req.(*ListClustersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Daemon_GetClusterKubeConfig_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetClusterKubeConfigRequest)
 	if err := dec(in); err != nil {
@@ -186,6 +220,10 @@ var Daemon_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DestroyCluster",
 			Handler:    _Daemon_DestroyCluster_Handler,
+		},
+		{
+			MethodName: "ListClusters",
+			Handler:    _Daemon_ListClusters_Handler,
 		},
 		{
 			MethodName: "GetClusterKubeConfig",

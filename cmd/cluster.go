@@ -79,6 +79,32 @@ var clusterCreateCmd = &cobra.Command{
 	},
 }
 
+var clusterListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List clusters",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		client, conn, err := daemonClient()
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := conn.Close(); err != nil {
+				log.Warn("closing connection", "error", err)
+			}
+		}()
+
+		resp, err := client.ListClusters(context.Background(), &pb.ListClustersRequest{})
+		if err != nil {
+			return grpcError(err)
+		}
+		for _, name := range resp.GetNames() {
+			fmt.Println(name)
+		}
+		return nil
+	},
+}
+
 var clusterDestroyCmd = &cobra.Command{
 	Use:   "destroy [name]",
 	Short: "Destroy a cluster",
@@ -196,6 +222,7 @@ func init() {
 	clusterKubeconfigCmd.Flags().BoolVar(&kubeconfigOutput, "output", false, "print kubeconfig content instead of path")
 	clusterCmd.AddCommand(clusterCreateCmd)
 	clusterCmd.AddCommand(clusterDestroyCmd)
+	clusterCmd.AddCommand(clusterListCmd)
 	clusterCmd.AddCommand(clusterKubeconfigCmd)
 	rootCmd.AddCommand(clusterCmd)
 }
