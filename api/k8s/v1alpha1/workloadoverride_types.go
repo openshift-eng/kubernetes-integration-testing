@@ -15,8 +15,8 @@ type WorkloadOverride struct {
 	Status            WorkloadOverrideStatus `json:"status,omitempty"`
 }
 
-// +kubebuilder:validation:XValidation:rule="(self.noOp ? 1 : 0) + (has(self.containers) && size(self.containers) > 0 ? 1 : 0) + (has(self.replacePod) ? 1 : 0) <= 1",message="noOp, containers, and replacePod are mutually exclusive"
-// +kubebuilder:validation:XValidation:rule="self.noOp || (has(self.containers) && size(self.containers) > 0) || has(self.replacePod)",message="one of noOp, containers, or replacePod must be set"
+// +kubebuilder:validation:XValidation:rule="(has(self.noOp) && self.noOp ? 1 : 0) + (has(self.containers) && size(self.containers) > 0 ? 1 : 0) + (has(self.replacePod) ? 1 : 0) <= 1",message="noOp, containers, and replacePod are mutually exclusive"
+// +kubebuilder:validation:XValidation:rule="(has(self.noOp) && self.noOp) || (has(self.containers) && size(self.containers) > 0) || has(self.replacePod)",message="one of noOp, containers, or replacePod must be set"
 type WorkloadOverrideSpec struct {
 	// Match selects the Pods affected by this override. The runtime selector is
 	// evaluated against the admitted Pod object, not against its owning
@@ -100,8 +100,8 @@ type WorkloadOverrideMatch struct {
 	NodeName string `json:"nodeName,omitempty"`
 }
 
-// +kubebuilder:validation:XValidation:rule="!self.remove || (!has(self.image) && !has(self.pullPolicy) && !has(self.command) && !has(self.args) && !has(self.env))",message="remove is mutually exclusive with other container fields"
-// +kubebuilder:validation:XValidation:rule="self.remove || has(self.image) || has(self.pullPolicy) || has(self.command) || has(self.args) || (has(self.env) && size(self.env) > 0)",message="at least one override field must be set"
+// +kubebuilder:validation:XValidation:rule="!(has(self.remove) && self.remove) || (!has(self.image) && !has(self.pullPolicy) && !has(self.command) && !has(self.args) && !has(self.env))",message="remove is mutually exclusive with other container fields"
+// +kubebuilder:validation:XValidation:rule="(has(self.remove) && self.remove) || has(self.image) || has(self.pullPolicy) || has(self.command) || has(self.args) || (has(self.env) && size(self.env) > 0)",message="at least one override field must be set"
 type ContainerOverride struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
@@ -122,7 +122,7 @@ type ContainerOverride struct {
 	Env []EnvOverride `json:"env,omitempty"`
 }
 
-// +kubebuilder:validation:XValidation:rule="has(self.value) != self.remove",message="exactly one of value or remove must be set"
+// +kubebuilder:validation:XValidation:rule="has(self.value) != (has(self.remove) && self.remove)",message="exactly one of value or remove must be set"
 type EnvOverride struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Pattern=`^[-._a-zA-Z][-._a-zA-Z0-9]*$`

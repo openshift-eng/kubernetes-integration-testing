@@ -66,7 +66,7 @@ spec:
                         type: object
                         x-kubernetes-validations:
                         - message: exactly one of value or remove must be set
-                          rule: has(self.value) != self.remove
+                          rule: has(self.value) != (has(self.remove) && self.remove)
                       type: array
                       x-kubernetes-list-map-keys:
                       - name
@@ -95,12 +95,13 @@ spec:
                   type: object
                   x-kubernetes-validations:
                   - message: remove is mutually exclusive with other container fields
-                    rule: '!self.remove || (!has(self.image) && !has(self.pullPolicy)
-                      && !has(self.command) && !has(self.args) && !has(self.env))'
+                    rule: '!(has(self.remove) && self.remove) || (!has(self.image)
+                      && !has(self.pullPolicy) && !has(self.command) && !has(self.args)
+                      && !has(self.env))'
                   - message: at least one override field must be set
-                    rule: self.remove || has(self.image) || has(self.pullPolicy) ||
-                      has(self.command) || has(self.args) || (has(self.env) && size(self.env)
-                      > 0)
+                    rule: (has(self.remove) && self.remove) || has(self.image) ||
+                      has(self.pullPolicy) || has(self.command) || has(self.args)
+                      || (has(self.env) && size(self.env) > 0)
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
@@ -361,11 +362,12 @@ spec:
             type: object
             x-kubernetes-validations:
             - message: noOp, containers, and replacePod are mutually exclusive
-              rule: '(self.noOp ? 1 : 0) + (has(self.containers) && size(self.containers)
-                > 0 ? 1 : 0) + (has(self.replacePod) ? 1 : 0) <= 1'
+              rule: '(has(self.noOp) && self.noOp ? 1 : 0) + (has(self.containers)
+                && size(self.containers) > 0 ? 1 : 0) + (has(self.replacePod) ? 1
+                : 0) <= 1'
             - message: one of noOp, containers, or replacePod must be set
-              rule: self.noOp || (has(self.containers) && size(self.containers) >
-                0) || has(self.replacePod)
+              rule: (has(self.noOp) && self.noOp) || (has(self.containers) && size(self.containers)
+                > 0) || has(self.replacePod)
           status:
             properties:
               appliedPods:
