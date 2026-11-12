@@ -15,6 +15,7 @@ import (
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/agent/bundle"
 	agentctl "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -41,6 +42,9 @@ func testStore(t *testing.T) *bundle.BundleStore {
 	return store
 }
 
+// TODO: replace these collection-layout helpers with the collection-facing
+// script loading API when the materializer no longer resolves user and builtin
+// sources itself.
 func writeCollectionDir(t *testing.T, scripts map[string]string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -138,6 +142,32 @@ func TestMaterialize(t *testing.T) {
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-mcd-stub"}, &wo))
 		assert.Equal(t, "target-ns", wo.Spec.Match.Namespace)
 		assert.Equal(t, "kit-agent-mcd-stub", wo.Spec.ServiceAccountName)
+	})
+
+	t.Run("falls back to builtin script collection", func(t *testing.T) {
+		ag := testAgent("mcd-agent")
+		ag.Spec.Script.Collection = "openshift-mco"
+		ag.Spec.Script.Package = "mcd-agent"
+		collection := &v1alpha1.ResourceCollection{
+			ObjectMeta: metav1.ObjectMeta{Name: "openshift-mco"},
+			Spec: v1alpha1.ResourceCollectionSpec{
+				Source: "openshift-mco",
+				Scripts: []v1alpha1.ScriptPackage{{
+					Name:       "mcd-agent",
+					Root:       "scripts/mcd-agent",
+					Entrypoint: "main.js",
+				}},
+			},
+		}
+		c := fake.NewClientBuilder().
+			WithScheme(kube.Scheme).
+			WithObjects(collection).
+			Build()
+
+		mat := newMaterializer(t, c, t.TempDir())
+		result, err := mat.Materialize(context.Background(), ag)
+		require.NoError(t, err)
+		assert.NotEmpty(t, result.BundleDigest)
 	})
 
 	t.Run("replace pod generates ReplacePod", func(t *testing.T) {
@@ -379,6 +409,8 @@ func TestMaterialize(t *testing.T) {
 		assert.True(t, hasResource("", "nodes"), "should grant access to nodes")
 		assert.True(t, hasResource("kit.openshift.io", "*"), "should grant Kit read access")
 		assert.True(t, hasResource("machineconfiguration.openshift.io", "*"), "should grant MCO read access")
+		assert.True(t, hasResource("machineconfiguration.openshift.io", "machineconfignodes"), "should grant MCN access")
+		assert.True(t, hasResource("machineconfiguration.openshift.io", "machineconfignodes/status"), "should grant MCN status access")
 
 		// TODO: this assertion is fragile — it hardcodes which verbs are allowed
 		// per resource and breaks every time clusterScopedPolicyRules changes.
@@ -400,6 +432,55 @@ func TestMaterialize(t *testing.T) {
 				assert.NotContains(t, []string{"create", "update", "delete"}, verb, "cluster role should not grant create/update/delete (except node patch)")
 			}
 		}
+	})
+
+	t.Run("updates an existing generated cluster role", func(t *testing.T) {
+		ag := testAgent("test")
+		collectionsDir := writeCollectionDir(t, map[string]string{
+			"main.js": `exports.main = function(ctx) {};`,
+		})
+		existing := &rbacv1.ClusterRole{
+			ObjectMeta: metav1.ObjectMeta{Name: "kit-agent-test"},
+			Rules: []rbacv1.PolicyRule{{
+				APIGroups: []string{""},
+				Resources: []string{"nodes"},
+				Verbs:     []string{"get"},
+			}},
+		}
+		c := fake.NewClientBuilder().
+			WithScheme(testScheme(t)).
+			WithObjects(testCollection(), existing).
+			Build()
+
+		mat := newMaterializer(t, c, collectionsDir)
+		_, err := mat.Materialize(context.Background(), ag)
+		require.NoError(t, err)
+
+		var updated rbacv1.ClusterRole
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test"}, &updated))
+		hasRule := func(group, resource, verb string) bool {
+			for _, rule := range updated.Rules {
+				for _, apiGroup := range rule.APIGroups {
+					if apiGroup != group {
+						continue
+					}
+					for _, ruleResource := range rule.Resources {
+						if ruleResource != resource {
+							continue
+						}
+						for _, ruleVerb := range rule.Verbs {
+							if ruleVerb == verb {
+								return true
+							}
+						}
+					}
+				}
+			}
+			return false
+		}
+		assert.True(t, hasRule("", "nodes", "patch"), "existing node patch access should be retained")
+		assert.True(t, hasRule("machineconfiguration.openshift.io", "machineconfignodes", "patch"), "existing MCN access should be updated")
+		assert.True(t, hasRule("machineconfiguration.openshift.io", "machineconfignodes/status", "patch"), "existing MCN status access should be updated")
 	})
 
 	t.Run("role excludes secrets", func(t *testing.T) {

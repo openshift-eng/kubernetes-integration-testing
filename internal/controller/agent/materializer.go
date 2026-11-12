@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -96,13 +97,9 @@ func (m *Materializer) loadPackages(ctx context.Context, ag *v1alpha1.Agent) ([]
 		return nil, "", fmt.Errorf("reading collection %q: %w", ag.Spec.Script.Collection, err)
 	}
 
-	var collFS fs.FS
-	if rc.Spec.Source != "" && m.collectionsDir != "" {
-		var err error
-		collFS, err = fs.Sub(os.DirFS(m.collectionsDir), rc.Spec.Source)
-		if err != nil {
-			return nil, "", fmt.Errorf("opening collection directory %q: %w", rc.Spec.Source, err)
-		}
+	collFS, err := m.scriptFS(rc.Spec.Source)
+	if err != nil {
+		return nil, "", err
 	}
 
 	var packages []collection.ScriptPackageContent
@@ -129,13 +126,9 @@ func (m *Materializer) loadPackages(ctx context.Context, ag *v1alpha1.Agent) ([]
 		if err := m.client.Get(ctx, client.ObjectKey{Name: refName}, &ref); err != nil {
 			return nil, "", fmt.Errorf("reading referenced collection %q: %w", refName, err)
 		}
-		var refFS fs.FS
-		if ref.Spec.Source != "" && m.collectionsDir != "" {
-			var err error
-			refFS, err = fs.Sub(os.DirFS(m.collectionsDir), ref.Spec.Source)
-			if err != nil {
-				return nil, "", fmt.Errorf("opening referenced collection directory %q: %w", ref.Spec.Source, err)
-			}
+		refFS, err := m.scriptFS(ref.Spec.Source)
+		if err != nil {
+			return nil, "", err
 		}
 		for i := range ref.Spec.Scripts {
 			pkg := &ref.Spec.Scripts[i]
@@ -148,6 +141,33 @@ func (m *Materializer) loadPackages(ctx context.Context, ag *v1alpha1.Agent) ([]
 	}
 
 	return packages, entrypointPkg, nil
+}
+
+// TODO: move source resolution and package loading behind a collection-facing
+// API so the materializer does not inspect collection directories or choose
+// between user and builtin filesystems.
+func (m *Materializer) scriptFS(source string) (fs.FS, error) {
+	if source == "" {
+		return nil, nil
+	}
+	if m.collectionsDir != "" {
+		userFS, err := fs.Sub(os.DirFS(m.collectionsDir), source)
+		if err != nil {
+			return nil, fmt.Errorf("opening collection directory %q: %w", source, err)
+		}
+		entries, err := fs.ReadDir(userFS, ".")
+		if err == nil && len(entries) > 0 {
+			return userFS, nil
+		}
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("reading collection directory %q: %w", source, err)
+		}
+	}
+	builtinFS, err := collection.BuiltinFS(source)
+	if err != nil {
+		return nil, fmt.Errorf("opening builtin collection %q: %w", source, err)
+	}
+	return builtinFS, nil
 }
 
 func (m *Materializer) ensureServiceAccount(ctx context.Context, name, namespace string, ownerRef metav1.OwnerReference) error {
@@ -208,17 +228,17 @@ func (m *Materializer) ensureRoleBinding(ctx context.Context, name, namespace st
 
 func (m *Materializer) ensureClusterRole(ctx context.Context, name string, ownerRef metav1.OwnerReference) error {
 	cr := &rbacv1.ClusterRole{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: rbacv1.SchemeGroupVersion.String(),
+			Kind:       "ClusterRole",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            name,
 			OwnerReferences: []metav1.OwnerReference{ownerRef},
 		},
 		Rules: clusterScopedPolicyRules(),
 	}
-	err := m.client.Create(ctx, cr)
-	if apierrors.IsAlreadyExists(err) {
-		return nil
-	}
-	return err
+	return m.client.Patch(ctx, cr, client.Apply, client.FieldOwner("kit-agent-materializer"), client.ForceOwnership)
 }
 
 func (m *Materializer) ensureClusterRoleBinding(ctx context.Context, name, namespace string, ownerRef metav1.OwnerReference) error {
@@ -421,6 +441,7 @@ func clusterScopedPolicyRules() []rbacv1.PolicyRule {
 		{APIGroups: []string{"kit.openshift.io"}, Resources: []string{"*"}, Verbs: readOnly},
 		// TEST-ONLY: remove when Agent.spec.rbac is implemented
 		{APIGroups: []string{"machineconfiguration.openshift.io"}, Resources: []string{"*"}, Verbs: readOnly},
+		{APIGroups: []string{"machineconfiguration.openshift.io"}, Resources: []string{"machineconfignodes", "machineconfignodes/status"}, Verbs: []string{"patch"}},
 		{APIGroups: []string{"config.openshift.io"}, Resources: []string{"*"}, Verbs: readOnly},
 	}
 }
