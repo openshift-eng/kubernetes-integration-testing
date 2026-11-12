@@ -34,3 +34,11 @@ type Provider interface {
 	Get(name string) (Cluster, bool)
 	List() []string
 }
+
+type Manager interface {
+	Create(ctx context.Context, kc *v1alpha1.KitCluster, pullSecretPath string) (Cluster, error)
+	Destroy(ctx context.Context, name string) error
+	Get(name string) (Cluster, string, bool)
+	List() []string
+	Recover(ctx context.Context)
+}

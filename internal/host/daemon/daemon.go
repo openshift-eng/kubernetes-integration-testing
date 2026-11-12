@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"time"
 
 	"github.com/spf13/afero"
 
@@ -24,11 +25,11 @@ type ProviderFactory func(ctx context.Context, log *slog.Logger) cluster.Provide
 type Daemon struct {
 	paths   Paths
 	fs      afero.Fs
-	manager *cluster.ClusterManager
+	manager cluster.Manager
 	log     *slog.Logger
 }
 
-func New(paths Paths, fs afero.Fs, manager *cluster.ClusterManager, log *slog.Logger) *Daemon {
+func New(paths Paths, fs afero.Fs, manager cluster.Manager, log *slog.Logger) *Daemon {
 	return &Daemon{paths: paths, fs: fs, manager: manager, log: log}
 }
 
@@ -61,6 +62,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 	}()
 
+	d.recoverClusters(ctx)
+
 	srv := &server{
 		clusterManager: d.manager,
 		log:            d.log.With("module", "grpc"),
@@ -76,6 +79,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	d.log.Info("started", "pid", os.Getpid(), "socket", sockPath)
 	return grpcServer.Serve(lis)
+}
+
+const recoverTimeout = 3 * time.Minute
+
+func (d *Daemon) recoverClusters(ctx context.Context) {
+	d.log.Info("recovering existing clusters")
+	recoverCtx, recoverCancel := context.WithTimeout(ctx, recoverTimeout)
+	defer recoverCancel()
+	d.manager.Recover(recoverCtx)
 }
 
 func Start(ctx context.Context, paths Paths, appStore store.Store, factories map[string]ProviderFactory) error {

@@ -26,7 +26,7 @@ type managedCluster struct {
 	stopController func()
 }
 
-type ClusterManager struct {
+type clusterManager struct {
 	ctx             context.Context
 	providers       map[string]Provider
 	defaultProvider string
@@ -37,8 +37,8 @@ type ClusterManager struct {
 	log             *slog.Logger
 }
 
-func NewClusterManager(ctx context.Context, log *slog.Logger, defaultProvider string, providers map[string]Provider, launcher ControllerLauncher) *ClusterManager {
-	cm := &ClusterManager{
+func NewClusterManager(ctx context.Context, log *slog.Logger, defaultProvider string, providers map[string]Provider, launcher ControllerLauncher) Manager {
+	return &clusterManager{
 		ctx:             ctx,
 		providers:       providers,
 		defaultProvider: defaultProvider,
@@ -47,19 +47,22 @@ func NewClusterManager(ctx context.Context, log *slog.Logger, defaultProvider st
 		clusterLocks:    make(map[string]*sync.Mutex),
 		log:             log,
 	}
-	go cm.recover(ctx)
-	return cm
 }
 
 // TODO: check if the controller container is already running before re-launching;
 // --replace kills a healthy controller unnecessarily on daemon restart.
-func (cm *ClusterManager) recover(ctx context.Context) {
+func (cm *clusterManager) Recover(ctx context.Context) {
 	for _, p := range cm.providers {
 		for _, name := range p.List() {
+			if ctx.Err() != nil {
+				cm.log.Warn("recover aborted", "cluster", name, "error", ctx.Err())
+				return
+			}
 			c, ok := p.Get(name)
 			if !ok {
 				continue
 			}
+			cm.log.Info("recovering cluster", "cluster", name)
 			stop, err := cm.launcher.Launch(ctx, name, c)
 			if err != nil {
 				cm.log.Warn("could not launch controller on recover", "cluster", name, "error", err)
@@ -73,11 +76,12 @@ func (cm *ClusterManager) recover(ctx context.Context) {
 			cm.mu.Lock()
 			cm.clusters[name] = &managedCluster{Cluster: c, stopController: stop}
 			cm.mu.Unlock()
+			cm.log.Info("cluster recovered", "cluster", name)
 		}
 	}
 }
 
-func (cm *ClusterManager) clusterLock(name string) *sync.Mutex {
+func (cm *clusterManager) clusterLock(name string) *sync.Mutex {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 	mu, ok := cm.clusterLocks[name]
@@ -88,7 +92,7 @@ func (cm *ClusterManager) clusterLock(name string) *sync.Mutex {
 	return mu
 }
 
-func (cm *ClusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, pullSecretPath string) (Cluster, error) {
+func (cm *clusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, pullSecretPath string) (Cluster, error) {
 	name := kc.Spec.ClusterName
 	if err := naming.ValidateClusterName(name); err != nil {
 		return nil, err
@@ -163,7 +167,7 @@ func (cm *ClusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 	return mc, nil
 }
 
-func (cm *ClusterManager) Destroy(ctx context.Context, name string) error {
+func (cm *clusterManager) Destroy(ctx context.Context, name string) error {
 	if err := naming.ValidateClusterName(name); err != nil {
 		return err
 	}
@@ -196,7 +200,7 @@ func (cm *ClusterManager) Destroy(ctx context.Context, name string) error {
 	return fmt.Errorf("cluster %q not found", name)
 }
 
-func (cm *ClusterManager) deleteKitCluster(ctx context.Context, c Cluster, name string) error {
+func (cm *clusterManager) deleteKitCluster(ctx context.Context, c Cluster, name string) error {
 	clusterKC, err := kube.New(c.KubeConfig(), "")
 	if err != nil {
 		return fmt.Errorf("building kubeconfig: %w", err)
@@ -226,7 +230,7 @@ func (cm *ClusterManager) deleteKitCluster(ctx context.Context, c Cluster, name 
 	})
 }
 
-func (cm *ClusterManager) Get(name string) (Cluster, string, bool) {
+func (cm *clusterManager) Get(name string) (Cluster, string, bool) {
 	for pname, p := range cm.providers {
 		if c, ok := p.Get(name); ok {
 			return c, pname, true
@@ -235,7 +239,7 @@ func (cm *ClusterManager) Get(name string) (Cluster, string, bool) {
 	return nil, "", false
 }
 
-func (cm *ClusterManager) List() []string {
+func (cm *clusterManager) List() []string {
 	all := sets.New[string]()
 	for _, p := range cm.providers {
 		all.Insert(p.List()...)
@@ -249,7 +253,7 @@ var kitClusterGVR = schema.GroupVersionResource{
 	Resource: "kitclusters",
 }
 
-func (cm *ClusterManager) provider(name string) (Provider, error) {
+func (cm *clusterManager) provider(name string) (Provider, error) {
 	if name == "" {
 		name = cm.defaultProvider
 	}
