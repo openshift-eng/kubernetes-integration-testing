@@ -115,19 +115,18 @@ func Start(ctx context.Context, paths Paths, appStore store.Store, factories map
 		providers[name] = factory(ctx, slog.New(handler))
 	}
 
-	controllerImage := os.Getenv("KIT_CONTROLLER_IMAGE")
-	if controllerImage == "" {
-		controllerImage = version.DefaultControllerImage
-	}
 	launcher := cluster.NewPodmanControllerLauncher(
 		podman.NewLocalClient(),
-		controllerImage,
 		appStore.ImageCacheDir(),
 		appStore.CollectionsDir(),
 		log.With("module", "launcher"),
 	)
 
-	manager := cluster.NewClusterManager(ctx, log, "kwok", providers, launcher)
+	controllerImage := os.Getenv("KIT_CONTROLLER_IMAGE")
+	if controllerImage == "" {
+		controllerImage = version.DefaultControllerImage
+	}
+	manager := cluster.NewClusterManager(ctx, log, controllerImage, "kwok", providers, launcher)
 
 	d := New(paths, afero.NewOsFs(), manager, log)
 	return d.Run(ctx)

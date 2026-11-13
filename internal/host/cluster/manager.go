@@ -28,6 +28,7 @@ type managedCluster struct {
 
 type clusterManager struct {
 	ctx             context.Context
+	controllerImage string
 	providers       map[string]Provider
 	defaultProvider string
 	launcher        ControllerLauncher
@@ -37,9 +38,10 @@ type clusterManager struct {
 	log             *slog.Logger
 }
 
-func NewClusterManager(ctx context.Context, log *slog.Logger, defaultProvider string, providers map[string]Provider, launcher ControllerLauncher) Manager {
+func NewClusterManager(ctx context.Context, log *slog.Logger, controllerImage, defaultProvider string, providers map[string]Provider, launcher ControllerLauncher) Manager {
 	return &clusterManager{
 		ctx:             ctx,
+		controllerImage: controllerImage,
 		providers:       providers,
 		defaultProvider: defaultProvider,
 		launcher:        launcher,
@@ -49,8 +51,6 @@ func NewClusterManager(ctx context.Context, log *slog.Logger, defaultProvider st
 	}
 }
 
-// TODO: check if the controller container is already running before re-launching;
-// --replace kills a healthy controller unnecessarily on daemon restart.
 func (cm *clusterManager) Recover(ctx context.Context) {
 	for _, p := range cm.providers {
 		for _, name := range p.List() {
@@ -62,10 +62,17 @@ func (cm *clusterManager) Recover(ctx context.Context) {
 			if !ok {
 				continue
 			}
-			cm.log.Info("recovering cluster", "cluster", name)
-			stop, err := cm.launcher.Launch(ctx, name, c)
+
+			image, err := cm.loadControllerImage(ctx, c)
 			if err != nil {
-				cm.log.Warn("could not launch controller on recover", "cluster", name, "error", err)
+				cm.log.Warn("could not load bootstrap data for cluster; recreate it", "cluster", name, "error", err)
+				continue
+			}
+
+			cm.log.Info("recovering cluster", "cluster", name, "image", image)
+			stop, err := cm.launcher.Launch(ctx, name, c, image)
+			if err != nil {
+				cm.log.Warn("could not recover controller", "cluster", name, "error", err)
 				continue
 			}
 			if err := cm.launcher.WaitHealthy(ctx, name); err != nil {
@@ -79,6 +86,25 @@ func (cm *clusterManager) Recover(ctx context.Context) {
 			cm.log.Info("cluster recovered", "cluster", name)
 		}
 	}
+}
+
+func (cm *clusterManager) loadControllerImage(ctx context.Context, c Cluster) (string, error) {
+	clusterKC, err := kube.New(c.KubeConfig(), "")
+	if err != nil {
+		return "", fmt.Errorf("building kubeconfig: %w", err)
+	}
+	data, err := bootstrap.Load(ctx, clusterKC)
+	if err != nil {
+		return "", fmt.Errorf("loading bootstrap data: %w", err)
+	}
+	ref := data.ClusterConfig.ControllerImageRef
+	if ref == "" {
+		return "", fmt.Errorf("controller image not recorded in bootstrap data")
+	}
+	if _, err := extractDigest(ref); err != nil {
+		return "", fmt.Errorf("invalid controller image in bootstrap data: %w", err)
+	}
+	return ref, nil
 }
 
 func (cm *clusterManager) clusterLock(name string) *sync.Mutex {
@@ -118,6 +144,11 @@ func (cm *clusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 		}
 	}
 
+	resolvedImage, err := cm.launcher.ResolveImage(ctx, cm.controllerImage)
+	if err != nil {
+		return nil, fmt.Errorf("resolving controller image: %w", err)
+	}
+
 	c, err := p.Create(ctx, kc, &ps)
 	if err != nil {
 		return nil, err
@@ -138,17 +169,18 @@ func (cm *clusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 
 	ccfg := c.ControllerConfig()
 	if err := bootstrap.Store(ctx, clusterKC, bootstrap.ClusterConfig{
-		Network:       ccfg.Network,
-		LogsDir:       ccfg.LogsDir,
-		VolumesDir:    ccfg.VolumesDir,
-		APIServerHost: ccfg.APIServerHost,
-		APIServerPort: ccfg.APIServerPort,
+		ControllerImageRef: resolvedImage,
+		Network:            ccfg.Network,
+		LogsDir:            ccfg.LogsDir,
+		VolumesDir:         ccfg.VolumesDir,
+		APIServerHost:      ccfg.APIServerHost,
+		APIServerPort:      ccfg.APIServerPort,
 	}, kc, ps.Data(), caCertPEM, caKeyPEM); err != nil {
 		destroyErr := p.Destroy(ctx, name)
 		return nil, errors.Join(fmt.Errorf("storing bootstrap config: %w", err), destroyErr)
 	}
 
-	stop, err := cm.launcher.Launch(cm.ctx, name, c)
+	stop, err := cm.launcher.Launch(cm.ctx, name, c, resolvedImage)
 	if err != nil {
 		destroyErr := p.Destroy(ctx, name)
 		return nil, errors.Join(fmt.Errorf("launching controller: %w", err), destroyErr)

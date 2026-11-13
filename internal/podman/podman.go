@@ -3,6 +3,7 @@ package podman
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -15,10 +16,25 @@ type Client interface {
 	Wait(ctx context.Context, name string) (int, error)
 	Restart(ctx context.Context, name string) error
 	HealthCheckRun(ctx context.Context, name string) error
+	ContainerInspect(ctx context.Context, name string) (*ContainerInfo, error)
+	ImageInspect(ctx context.Context, image string) (*ImageInfo, error)
+	Pull(ctx context.Context, image string) error
 	PodCreate(ctx context.Context, opts PodCreateOpts) (string, error)
 	PodStop(ctx context.Context, name string, timeout int) error
 	PodRemove(ctx context.Context, name string, force bool) error
 	PodList(ctx context.Context, filters map[string]string) ([]PodInfo, error)
+}
+
+type ContainerInfo struct {
+	ID          string
+	Status      string
+	ImageDigest string
+	Labels      map[string]string
+}
+
+type ImageInfo struct {
+	Digest      string
+	RepoDigests []string
 }
 
 type Mount struct {
@@ -97,6 +113,23 @@ func (c *client) run(ctx context.Context, args ...string) error {
 	return nil
 }
 
+func (c *client) output(ctx context.Context, args ...string) ([]byte, error) {
+	cmd := c.cmd(ctx, args...)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("podman %s: %s: %w", args[0], stderrFromErr(err), err)
+	}
+	return out, nil
+}
+
+func stderrFromErr(err error) string {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return strings.TrimSpace(string(exitErr.Stderr))
+	}
+	return ""
+}
+
 func (c *client) Run(ctx context.Context, opts RunOpts) (string, error) {
 	args := []string{"run"}
 	if opts.Detach {
@@ -151,9 +184,9 @@ func (c *client) Run(ctx context.Context, opts RunOpts) (string, error) {
 	}
 	args = append(args, opts.Args...)
 
-	out, err := c.cmd(ctx, args...).CombinedOutput()
+	out, err := c.output(ctx, args...)
 	if err != nil {
-		return "", fmt.Errorf("podman run: %s: %w", strings.TrimSpace(string(out)), err)
+		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
 }
@@ -194,6 +227,79 @@ func (c *client) HealthCheckRun(ctx context.Context, name string) error {
 	return c.run(ctx, "healthcheck", "run", name)
 }
 
+func (c *client) ContainerInspect(ctx context.Context, name string) (*ContainerInfo, error) {
+	out, err := c.output(ctx, "container", "inspect", name)
+	if err != nil {
+		if isNotFoundErr(stderrFromErr(err)) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var results []struct {
+		ID          string `json:"Id"`
+		ImageDigest string `json:"ImageDigest"`
+		State       struct {
+			Status string `json:"Status"`
+		} `json:"State"`
+		Config struct {
+			Labels map[string]string `json:"Labels"`
+		} `json:"Config"`
+	}
+	if err := json.Unmarshal(out, &results); err != nil {
+		return nil, fmt.Errorf("parsing container inspect: %w", err)
+	}
+	if len(results) == 0 {
+		return nil, nil
+	}
+
+	r := results[0]
+	return &ContainerInfo{
+		ID:          r.ID,
+		Status:      r.State.Status,
+		ImageDigest: r.ImageDigest,
+		Labels:      r.Config.Labels,
+	}, nil
+}
+
+func (c *client) ImageInspect(ctx context.Context, image string) (*ImageInfo, error) {
+	out, err := c.output(ctx, "image", "inspect", image)
+	if err != nil {
+		if isNotFoundErr(stderrFromErr(err)) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var results []struct {
+		Digest      string   `json:"Digest"`
+		RepoDigests []string `json:"RepoDigests"`
+	}
+	if err := json.Unmarshal(out, &results); err != nil {
+		return nil, fmt.Errorf("parsing image inspect: %w", err)
+	}
+	if len(results) == 0 {
+		return nil, nil
+	}
+
+	r := results[0]
+	return &ImageInfo{
+		Digest:      r.Digest,
+		RepoDigests: r.RepoDigests,
+	}, nil
+}
+
+func (c *client) Pull(ctx context.Context, image string) error {
+	return c.run(ctx, "pull", image)
+}
+
+func isNotFoundErr(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "no such") ||
+		strings.Contains(lower, "not found") ||
+		strings.Contains(lower, "not known")
+}
+
 func (c *client) PodCreate(ctx context.Context, opts PodCreateOpts) (string, error) {
 	args := []string{"pod", "create"}
 	if opts.Name != "" {
@@ -209,9 +315,9 @@ func (c *client) PodCreate(ctx context.Context, opts PodCreateOpts) (string, err
 		args = append(args, "--network-alias", alias)
 	}
 
-	out, err := c.cmd(ctx, args...).CombinedOutput()
+	out, err := c.output(ctx, args...)
 	if err != nil {
-		return "", fmt.Errorf("podman pod create: %s: %w", strings.TrimSpace(string(out)), err)
+		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
 }
@@ -240,9 +346,9 @@ func (c *client) PodList(ctx context.Context, filters map[string]string) ([]PodI
 		args = append(args, "--filter", k+"="+v)
 	}
 
-	out, err := c.cmd(ctx, args...).CombinedOutput()
+	out, err := c.output(ctx, args...)
 	if err != nil {
-		return nil, fmt.Errorf("podman pod ps: %s: %w", strings.TrimSpace(string(out)), err)
+		return nil, err
 	}
 	if len(out) == 0 {
 		return nil, nil
