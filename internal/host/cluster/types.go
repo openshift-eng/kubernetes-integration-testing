@@ -29,6 +29,10 @@ type ControllerLauncher interface {
 	WaitHealthy(ctx context.Context, name string) error
 }
 
+type ImageLoader interface {
+	LoadImage(ctx context.Context, image imageref.Resolved) error
+}
+
 type Provider interface {
 	Create(ctx context.Context, cluster *v1alpha1.KitCluster, ps *pullsecret.PullSecret) (Cluster, error)
 	Destroy(ctx context.Context, name string) error

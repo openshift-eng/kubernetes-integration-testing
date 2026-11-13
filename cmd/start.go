@@ -13,6 +13,8 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/daemon"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/provider/kind"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/provider/kwok"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/podman"
+
 	"github.com/spf13/cobra"
 )
 
@@ -29,15 +31,16 @@ var startCmd = &cobra.Command{
 		if foreground {
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
+			podmanClient := podman.NewLocalClient()
 			factories := map[string]daemon.ProviderFactory{
 				"kwok": func(ctx context.Context, log *slog.Logger) cluster.Provider {
 					return kwok.NewProvider(ctx, appStore, log.With("module", "kwok"))
 				},
 				"kind": func(ctx context.Context, log *slog.Logger) cluster.Provider {
-					return kind.NewProvider(ctx, appStore, log.With("module", "kind"))
+					return kind.NewProvider(ctx, appStore, podmanClient, log.With("module", "kind"))
 				},
 			}
-			return daemon.Start(ctx, appPaths, appStore, factories)
+			return daemon.Start(ctx, appPaths, appStore, podmanClient, factories)
 		}
 		return runBackground()
 	},

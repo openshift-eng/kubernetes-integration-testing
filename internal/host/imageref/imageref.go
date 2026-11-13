@@ -88,6 +88,9 @@ func (r *podmanResolver) Resolve(ctx context.Context) (Resolved, error) {
 	defer r.mu.Unlock()
 
 	if r.ok {
+		if _, err := r.ensureImage(ctx, r.resolved.String()); err != nil {
+			return Resolved{}, fmt.Errorf("cached image no longer available: %w", err)
+		}
 		return r.resolved, nil
 	}
 

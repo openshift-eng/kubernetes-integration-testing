@@ -156,6 +156,13 @@ func (cm *clusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 		return nil, err
 	}
 
+	if loader, ok := c.(ImageLoader); ok {
+		if err := loader.LoadImage(ctx, controllerImage); err != nil {
+			destroyErr := p.Destroy(ctx, name)
+			return nil, errors.Join(fmt.Errorf("loading controller image: %w", err), destroyErr)
+		}
+	}
+
 	clusterKC, err := kube.New(c.KubeConfig(), "")
 	if err != nil {
 		destroyErr := p.Destroy(ctx, name)

@@ -22,6 +22,7 @@ type Client interface {
 	PodCreate(ctx context.Context, opts PodCreateOpts) (string, error)
 	PodStop(ctx context.Context, name string, timeout int) error
 	PodRemove(ctx context.Context, name string, force bool) error
+	SaveOCIArchive(ctx context.Context, image, path string) error
 	PodList(ctx context.Context, filters map[string]string) ([]PodInfo, error)
 }
 
@@ -298,6 +299,10 @@ func isNotFoundErr(output string) bool {
 	return strings.Contains(lower, "no such") ||
 		strings.Contains(lower, "not found") ||
 		strings.Contains(lower, "not known")
+}
+
+func (c *client) SaveOCIArchive(ctx context.Context, image, path string) error {
+	return c.run(ctx, "save", "--quiet", "--format", "oci-archive", "-o", path, image)
 }
 
 func (c *client) PodCreate(ctx context.Context, opts PodCreateOpts) (string, error) {

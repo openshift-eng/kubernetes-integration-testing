@@ -99,7 +99,7 @@ func controllerImageRef() (imageref.Requested, error) {
 	return imageref.ParseRequested(raw)
 }
 
-func Start(ctx context.Context, paths Paths, appStore store.Store, factories map[string]ProviderFactory) error {
+func Start(ctx context.Context, paths Paths, appStore store.Store, podmanClient podman.Client, factories map[string]ProviderFactory) error {
 	logFile, err := os.OpenFile(paths.Log(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
@@ -128,8 +128,6 @@ func Start(ctx context.Context, paths Paths, appStore store.Store, factories map
 	for name, factory := range factories {
 		providers[name] = factory(ctx, slog.New(handler))
 	}
-
-	podmanClient := podman.NewLocalClient()
 
 	launcher := cluster.NewPodmanControllerLauncher(
 		podmanClient,
