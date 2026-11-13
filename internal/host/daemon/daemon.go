@@ -15,6 +15,7 @@ import (
 
 	pb "github.com/openshift-eng/kubernetes-integration-testing/api/grpc"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/cluster"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/imageref"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/store"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/podman"
 	"google.golang.org/grpc"
@@ -90,6 +91,14 @@ func (d *Daemon) recoverClusters(ctx context.Context) {
 	d.manager.Recover(recoverCtx)
 }
 
+func controllerImageRef() (imageref.Requested, error) {
+	raw := os.Getenv("KIT_CONTROLLER_IMAGE")
+	if raw == "" {
+		raw = version.DefaultControllerImage
+	}
+	return imageref.ParseRequested(raw)
+}
+
 func Start(ctx context.Context, paths Paths, appStore store.Store, factories map[string]ProviderFactory) error {
 	logFile, err := os.OpenFile(paths.Log(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
@@ -110,23 +119,27 @@ func Start(ctx context.Context, paths Paths, appStore store.Store, factories map
 
 	log := slog.New(handler).With("module", "daemon")
 
+	controllerImage, err := controllerImageRef()
+	if err != nil {
+		return fmt.Errorf("invalid controller image: %w", err)
+	}
+
 	providers := make(map[string]cluster.Provider, len(factories))
 	for name, factory := range factories {
 		providers[name] = factory(ctx, slog.New(handler))
 	}
 
+	podmanClient := podman.NewLocalClient()
+
 	launcher := cluster.NewPodmanControllerLauncher(
-		podman.NewLocalClient(),
+		podmanClient,
 		appStore.ImageCacheDir(),
 		appStore.CollectionsDir(),
 		log.With("module", "launcher"),
 	)
 
-	controllerImage := os.Getenv("KIT_CONTROLLER_IMAGE")
-	if controllerImage == "" {
-		controllerImage = version.DefaultControllerImage
-	}
-	manager := cluster.NewClusterManager(ctx, log, controllerImage, "kwok", providers, launcher)
+	resolver := imageref.NewPodmanResolver(podmanClient, controllerImage, log)
+	manager := cluster.NewClusterManager(ctx, log, "kwok", providers, resolver, launcher)
 
 	d := New(paths, afero.NewOsFs(), manager, log)
 	return d.Run(ctx)
