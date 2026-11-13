@@ -4,6 +4,7 @@ import (
 	"context"
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/imageref"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/pullsecret"
 )
 
@@ -24,9 +25,12 @@ type Cluster interface {
 }
 
 type ControllerLauncher interface {
-	ResolveImage(ctx context.Context, requested string) (string, error)
-	Launch(ctx context.Context, name string, c Cluster, image string) (stop func(), err error)
+	Launch(ctx context.Context, name string, c Cluster, image imageref.Resolved) (stop func(), err error)
 	WaitHealthy(ctx context.Context, name string) error
+}
+
+type ImageLoader interface {
+	LoadImage(ctx context.Context, image imageref.Resolved) error
 }
 
 type Provider interface {

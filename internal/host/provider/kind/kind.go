@@ -13,8 +13,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/spf13/afero"
+
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/cluster"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/imageref"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/store"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/pullsecret"
 	"sigs.k8s.io/yaml"
@@ -26,16 +29,21 @@ const (
 	releaseBaseURL = "https://github.com/kubernetes-sigs/kind/releases/download"
 )
 
-type provider struct {
-	store    store.Store
-	log      *slog.Logger
-	mu       sync.Mutex
-	clusters map[string]*kindCluster
+type ImageSaver interface {
+	SaveOCIArchive(ctx context.Context, image, path string) error
 }
 
-func NewProvider(ctx context.Context, s store.Store, log *slog.Logger) cluster.Provider {
+type provider struct {
+	store      store.Store
+	imageSaver ImageSaver
+	log        *slog.Logger
+	mu         sync.Mutex
+	clusters   map[string]*kindCluster
+}
+
+func NewProvider(ctx context.Context, s store.Store, imageSaver ImageSaver, log *slog.Logger) cluster.Provider {
 	registerBinary(s, defaultVersion)
-	p := &provider{store: s, log: log, clusters: make(map[string]*kindCluster)}
+	p := &provider{store: s, imageSaver: imageSaver, log: log, clusters: make(map[string]*kindCluster)}
 	p.recover(ctx)
 	return p
 }
@@ -94,7 +102,7 @@ func (p *provider) recover(ctx context.Context) {
 			continue
 		}
 
-		p.clusters[name] = &kindCluster{name: name, kubeconfigPath: kubeconfigPath, bin: bin, store: p.store, log: p.log}
+		p.clusters[name] = &kindCluster{name: name, kubeconfigPath: kubeconfigPath, bin: bin, imageSaver: p.imageSaver, store: p.store, log: p.log}
 		p.log.Info("recovered cluster", "name", name)
 	}
 }
@@ -151,7 +159,7 @@ func (p *provider) Create(ctx context.Context, kc *v1alpha1.KitCluster, ps *pull
 
 	_ = labelNodes(ctx, p.log, kubeconfigPath)
 
-	c := &kindCluster{name: name, kubeconfigPath: kubeconfigPath, bin: bin, store: p.store, log: p.log}
+	c := &kindCluster{name: name, kubeconfigPath: kubeconfigPath, bin: bin, imageSaver: p.imageSaver, store: p.store, log: p.log}
 
 	p.mu.Lock()
 	p.clusters[name] = c
@@ -190,6 +198,7 @@ type kindCluster struct {
 	name           string
 	kubeconfigPath string
 	bin            string
+	imageSaver     ImageSaver
 	store          store.Store
 	log            *slog.Logger
 }
@@ -218,6 +227,35 @@ func (c *kindCluster) ControllerConfig() cluster.ControllerConfig {
 		APIServerHost: prefixed(c.name) + "-control-plane",
 		APIServerPort: "6443",
 	}
+}
+
+func (c *kindCluster) LoadImage(ctx context.Context, image imageref.Resolved) error {
+	fs := c.store.Fs()
+	dir, err := c.store.ClusterDir(c.name)
+	if err != nil {
+		return fmt.Errorf("getting cluster dir: %w", err)
+	}
+
+	archiveDir, err := afero.TempDir(fs, dir, "controller-image-*")
+	if err != nil {
+		return fmt.Errorf("creating temp dir for image archive: %w", err)
+	}
+	defer func() {
+		if err := fs.RemoveAll(archiveDir); err != nil {
+			c.log.Warn("removing controller image archive", "path", archiveDir, "error", err)
+		}
+	}()
+
+	archivePath := filepath.Join(archiveDir, "image.tar")
+	if err := c.imageSaver.SaveOCIArchive(ctx, image.String(), archivePath); err != nil {
+		return fmt.Errorf("saving image %s: %w", image, err)
+	}
+
+	if err := run(ctx, c.log, c.bin, "load", "image-archive", archivePath, "--name", prefixed(c.name)); err != nil {
+		return fmt.Errorf("loading image into kind cluster: %w", err)
+	}
+	c.log.Info("loaded controller image into kind cluster", "cluster", c.name, "image", image.String())
+	return nil
 }
 
 func (c *kindCluster) Teardown(ctx context.Context) error {

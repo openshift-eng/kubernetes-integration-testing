@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/distribution/reference"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/imageref"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/naming"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/podman"
@@ -26,84 +26,7 @@ func NewPodmanControllerLauncher(client podman.Client, cacheDir, collectionsDir 
 	return &PodmanControllerLauncher{client: client, cacheDir: cacheDir, collectionsDir: collectionsDir, log: log}
 }
 
-func (l *PodmanControllerLauncher) ResolveImage(ctx context.Context, requested string) (string, error) {
-	parsed, err := reference.ParseAnyReference(requested)
-	if err != nil {
-		return "", fmt.Errorf("parsing image reference %s: %w", requested, err)
-	}
-
-	if canonical, ok := parsed.(reference.Canonical); ok {
-		normalized, err := reference.WithDigest(reference.TrimNamed(canonical), canonical.Digest())
-		if err != nil {
-			return "", fmt.Errorf("normalizing canonical reference %s: %w", requested, err)
-		}
-		ref := normalized.String()
-		l.log.Info("resolved controller image", "requested", requested, "ref", ref)
-		return ref, nil
-	}
-
-	info, err := l.client.ImageInspect(ctx, requested)
-	if err != nil {
-		return "", fmt.Errorf("inspecting image %s: %w", requested, err)
-	}
-	if info == nil {
-		if err := l.client.Pull(ctx, requested); err != nil {
-			return "", fmt.Errorf("pulling image %s: %w", requested, err)
-		}
-		info, err = l.client.ImageInspect(ctx, requested)
-		if err != nil {
-			return "", fmt.Errorf("inspecting image %s after pull: %w", requested, err)
-		}
-		if info == nil {
-			return "", fmt.Errorf("image %s not found after pull", requested)
-		}
-	}
-
-	if info.Digest == "" {
-		return "", fmt.Errorf("image %s has no manifest digest", requested)
-	}
-
-	ref := matchRepoDigest(parsed, info.RepoDigests, info.Digest)
-	if ref == "" {
-		return "", fmt.Errorf("could not resolve digest for %s: no matching repo digest found", requested)
-	}
-
-	l.log.Info("resolved controller image", "requested", requested, "ref", ref)
-	return ref, nil
-}
-
-func matchRepoDigest(parsed reference.Reference, repoDigests []string, imageDigest string) string {
-	named, ok := parsed.(reference.Named)
-	if !ok {
-		return ""
-	}
-	requestedDomain := reference.Domain(named)
-	requestedPath := reference.Path(named)
-	for _, d := range repoDigests {
-		digestRef, err := reference.ParseAnyReference(d)
-		if err != nil {
-			continue
-		}
-		dn, ok := digestRef.(reference.Named)
-		if !ok {
-			continue
-		}
-		if reference.Domain(dn) != requestedDomain || reference.Path(dn) != requestedPath {
-			continue
-		}
-		canonical, ok := digestRef.(reference.Canonical)
-		if !ok {
-			continue
-		}
-		if canonical.Digest().String() != imageDigest {
-			continue
-		}
-		return d
-	}
-	return ""
-}
-
-func (l *PodmanControllerLauncher) Launch(ctx context.Context, name string, c Cluster, image string) (func(), error) {
+func (l *PodmanControllerLauncher) Launch(ctx context.Context, name string, c Cluster, image imageref.Resolved) (func(), error) {
 	containerName := naming.ContainerName(name)
 
 	var containerID string
@@ -113,12 +36,12 @@ func (l *PodmanControllerLauncher) Launch(ctx context.Context, name string, c Cl
 		return nil, fmt.Errorf("inspecting controller container %s: %w", containerName, err)
 	}
 	if existing != nil {
-		if err := l.handleExisting(existing, containerName, name, image); err != nil {
+		if err := l.handleExisting(existing, containerName, name, image.Digest()); err != nil {
 			return nil, err
 		}
 		containerID = existing.ID
 	} else {
-		containerID, err = l.create(ctx, name, c, image, containerName)
+		containerID, err = l.create(ctx, name, c, image.String(), containerName)
 		if err != nil {
 			return nil, err
 		}
@@ -132,15 +55,11 @@ func (l *PodmanControllerLauncher) Launch(ctx context.Context, name string, c Cl
 	return stop, nil
 }
 
-func (l *PodmanControllerLauncher) handleExisting(info *podman.ContainerInfo, containerName, clusterName, image string) error {
+func (l *PodmanControllerLauncher) handleExisting(info *podman.ContainerInfo, containerName, clusterName, expectedDigest string) error {
 	if info.Labels["kit.role"] != "controller" || info.Labels["kit.cluster"] != clusterName {
 		return fmt.Errorf("container %s exists but belongs to a different cluster or role", containerName)
 	}
 
-	expectedDigest, err := extractDigest(image)
-	if err != nil {
-		return fmt.Errorf("extracting digest from stored image ref: %w", err)
-	}
 	if info.ImageDigest != expectedDigest {
 		return fmt.Errorf(
 			"controller container %s has digest %s but expected %s; recreate the cluster to use the new image",
@@ -157,18 +76,6 @@ func (l *PodmanControllerLauncher) handleExisting(info *podman.ContainerInfo, co
 
 	l.log.Info("adopting existing controller container", "name", containerName, "digest", expectedDigest)
 	return nil
-}
-
-func extractDigest(imageRef string) (string, error) {
-	parsed, err := reference.ParseAnyReference(imageRef)
-	if err != nil {
-		return "", err
-	}
-	canonical, ok := parsed.(reference.Canonical)
-	if !ok {
-		return "", fmt.Errorf("%s is not a canonical digest reference", imageRef)
-	}
-	return canonical.Digest().String(), nil
 }
 
 func (l *PodmanControllerLauncher) create(ctx context.Context, name string, c Cluster, image, containerName string) (string, error) {

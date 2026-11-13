@@ -10,6 +10,7 @@ import (
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/bootstrap"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/imageref"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/naming"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/pullsecret"
@@ -28,7 +29,7 @@ type managedCluster struct {
 
 type clusterManager struct {
 	ctx             context.Context
-	controllerImage string
+	imageResolver   imageref.Resolver
 	providers       map[string]Provider
 	defaultProvider string
 	launcher        ControllerLauncher
@@ -38,10 +39,10 @@ type clusterManager struct {
 	log             *slog.Logger
 }
 
-func NewClusterManager(ctx context.Context, log *slog.Logger, controllerImage, defaultProvider string, providers map[string]Provider, launcher ControllerLauncher) Manager {
+func NewClusterManager(ctx context.Context, log *slog.Logger, defaultProvider string, providers map[string]Provider, imageResolver imageref.Resolver, launcher ControllerLauncher) Manager {
 	return &clusterManager{
 		ctx:             ctx,
-		controllerImage: controllerImage,
+		imageResolver:   imageResolver,
 		providers:       providers,
 		defaultProvider: defaultProvider,
 		launcher:        launcher,
@@ -88,23 +89,24 @@ func (cm *clusterManager) Recover(ctx context.Context) {
 	}
 }
 
-func (cm *clusterManager) loadControllerImage(ctx context.Context, c Cluster) (string, error) {
+func (cm *clusterManager) loadControllerImage(ctx context.Context, c Cluster) (imageref.Resolved, error) {
 	clusterKC, err := kube.New(c.KubeConfig(), "")
 	if err != nil {
-		return "", fmt.Errorf("building kubeconfig: %w", err)
+		return imageref.Resolved{}, fmt.Errorf("building kubeconfig: %w", err)
 	}
 	data, err := bootstrap.Load(ctx, clusterKC)
 	if err != nil {
-		return "", fmt.Errorf("loading bootstrap data: %w", err)
+		return imageref.Resolved{}, fmt.Errorf("loading bootstrap data: %w", err)
 	}
 	ref := data.ClusterConfig.ControllerImageRef
 	if ref == "" {
-		return "", fmt.Errorf("controller image not recorded in bootstrap data")
+		return imageref.Resolved{}, fmt.Errorf("controller image not recorded in bootstrap data")
 	}
-	if _, err := extractDigest(ref); err != nil {
-		return "", fmt.Errorf("invalid controller image in bootstrap data: %w", err)
+	resolved, err := imageref.Parse(ref)
+	if err != nil {
+		return imageref.Resolved{}, fmt.Errorf("invalid controller image in bootstrap data: %w", err)
 	}
-	return ref, nil
+	return resolved, nil
 }
 
 func (cm *clusterManager) clusterLock(name string) *sync.Mutex {
@@ -144,7 +146,7 @@ func (cm *clusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 		}
 	}
 
-	resolvedImage, err := cm.launcher.ResolveImage(ctx, cm.controllerImage)
+	controllerImage, err := cm.imageResolver.Resolve(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolving controller image: %w", err)
 	}
@@ -152,6 +154,13 @@ func (cm *clusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 	c, err := p.Create(ctx, kc, &ps)
 	if err != nil {
 		return nil, err
+	}
+
+	if loader, ok := c.(ImageLoader); ok {
+		if err := loader.LoadImage(ctx, controllerImage); err != nil {
+			destroyErr := p.Destroy(ctx, name)
+			return nil, errors.Join(fmt.Errorf("loading controller image: %w", err), destroyErr)
+		}
 	}
 
 	clusterKC, err := kube.New(c.KubeConfig(), "")
@@ -169,7 +178,7 @@ func (cm *clusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 
 	ccfg := c.ControllerConfig()
 	if err := bootstrap.Store(ctx, clusterKC, bootstrap.ClusterConfig{
-		ControllerImageRef: resolvedImage,
+		ControllerImageRef: controllerImage.String(),
 		Network:            ccfg.Network,
 		LogsDir:            ccfg.LogsDir,
 		VolumesDir:         ccfg.VolumesDir,
@@ -180,7 +189,7 @@ func (cm *clusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 		return nil, errors.Join(fmt.Errorf("storing bootstrap config: %w", err), destroyErr)
 	}
 
-	stop, err := cm.launcher.Launch(cm.ctx, name, c, resolvedImage)
+	stop, err := cm.launcher.Launch(cm.ctx, name, c, controllerImage)
 	if err != nil {
 		destroyErr := p.Destroy(ctx, name)
 		return nil, errors.Join(fmt.Errorf("launching controller: %w", err), destroyErr)
