@@ -107,11 +107,13 @@ type WorkloadOverrideStatus struct {
 	// MatchedPods is the number of live Pods matching spec.match at the last
 	// observation. It is a point-in-time observation, not the expected replica
 	// count or the number of Pods that have ever matched.
+	// +optional
 	// +kubebuilder:validation:Minimum=0
 	MatchedPods int32 `json:"matchedPods"`
 
 	// AppliedPods is the number of matched live Pods whose effective admitted
 	// specification contains this override. It is a point-in-time observation.
+	// +optional
 	// +kubebuilder:validation:Minimum=0
 	AppliedPods int32 `json:"appliedPods"`
 
