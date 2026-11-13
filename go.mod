@@ -9,6 +9,7 @@ tool (
 )
 
 require (
+	github.com/distribution/reference v0.6.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-logr/logr v1.4.3
 	github.com/google/cel-go v0.29.2

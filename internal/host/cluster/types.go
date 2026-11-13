@@ -24,7 +24,8 @@ type Cluster interface {
 }
 
 type ControllerLauncher interface {
-	Launch(ctx context.Context, name string, c Cluster) (stop func(), err error)
+	ResolveImage(ctx context.Context, requested string) (string, error)
+	Launch(ctx context.Context, name string, c Cluster, image string) (stop func(), err error)
 	WaitHealthy(ctx context.Context, name string) error
 }
 

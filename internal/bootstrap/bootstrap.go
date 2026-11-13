@@ -27,11 +27,12 @@ const (
 // ClusterConfig holds infrastructure plumbing that the controller needs
 // to operate but that does not belong on the KitCluster CR.
 type ClusterConfig struct {
-	Network       string `json:"network,omitempty"`
-	LogsDir       string `json:"logsDir,omitempty"`
-	VolumesDir    string `json:"volumesDir,omitempty"`
-	APIServerHost string `json:"apiServerHost,omitempty"`
-	APIServerPort string `json:"apiServerPort,omitempty"`
+	ControllerImageRef string `json:"controllerImageRef,omitempty"`
+	Network            string `json:"network,omitempty"`
+	LogsDir            string `json:"logsDir,omitempty"`
+	VolumesDir         string `json:"volumesDir,omitempty"`
+	APIServerHost      string `json:"apiServerHost,omitempty"`
+	APIServerPort      string `json:"apiServerPort,omitempty"`
 }
 
 func Store(ctx context.Context, kc *kube.KubeConfig, cfg ClusterConfig, kitCluster *v1alpha1.KitCluster, pullSecret, caCertPEM, caKeyPEM []byte) error {
