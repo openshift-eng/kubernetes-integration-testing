@@ -78,6 +78,9 @@ func validateAndSort(packages []collection.ScriptPackageContent) ([]collection.S
 	copy(sorted, packages)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
 	for i := range sorted {
+		if i > 0 && sorted[i].Name == sorted[i-1].Name {
+			return nil, fmt.Errorf("duplicate package name %q", sorted[i].Name)
+		}
 		files := make([]collection.ScriptFile, len(sorted[i].Files))
 		copy(files, sorted[i].Files)
 		sort.Slice(files, func(a, b int) bool { return files[a].Path < files[b].Path })

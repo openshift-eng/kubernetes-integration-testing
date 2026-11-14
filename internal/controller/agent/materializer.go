@@ -3,11 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
-	"os"
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/agent/bundle"
@@ -24,39 +21,47 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+type ScriptPackageLoader interface {
+	Load(ctx context.Context, collectionName string, resolver collection.ScriptCollectionResolver) (*collection.LoadResult, error)
+}
+
 type Materializer struct {
-	client         client.Client
-	store          *bundle.BundleStore
-	collectionsDir string
-	agentImage     string
-	bundleBaseURL  string
-	log            *slog.Logger
+	client        client.Client
+	store         *bundle.BundleStore
+	scriptLoader  ScriptPackageLoader
+	agentImage    string
+	bundleBaseURL string
+	log           *slog.Logger
 }
 
 type MaterializeResult struct {
 	BundleDigest string
 }
 
-func NewMaterializer(c client.Client, store *bundle.BundleStore, collectionsDir, agentImage, bundleBaseURL string, log *slog.Logger) *Materializer {
+func NewMaterializer(c client.Client, store *bundle.BundleStore, loader ScriptPackageLoader, agentImage, bundleBaseURL string, log *slog.Logger) *Materializer {
 	return &Materializer{
-		client:         c,
-		store:          store,
-		collectionsDir: collectionsDir,
-		agentImage:     agentImage,
-		bundleBaseURL:  bundleBaseURL,
-		log:            log,
+		client:        c,
+		store:         store,
+		scriptLoader:  loader,
+		agentImage:    agentImage,
+		bundleBaseURL: bundleBaseURL,
+		log:           log,
 	}
 }
 
 func (m *Materializer) Materialize(ctx context.Context, ag *v1alpha1.Agent) (*MaterializeResult, error) {
-	packages, entrypointPkg, err := m.loadPackages(ctx, ag)
+	loaded, err := m.scriptLoader.Load(ctx, ag.Spec.Script.Collection, &clientResolver{m.client})
 	if err != nil {
 		return nil, err
 	}
 
+	if !loaded.RootPackages[ag.Spec.Script.Package] {
+		return nil, fmt.Errorf("entrypoint package %q is not in the root collection %q", ag.Spec.Script.Package, ag.Spec.Script.Collection)
+	}
+
 	values := convertValues(ag.Spec.Values)
 
-	b, err := bundle.Build(packages, entrypointPkg, values, string(ag.Spec.Runtime), ag.Spec.Timeout)
+	b, err := bundle.Build(loaded.Packages, ag.Spec.Script.Package, values, string(ag.Spec.Runtime), ag.Spec.Timeout)
 	if err != nil {
 		return nil, fmt.Errorf("building bundle: %w", err)
 	}
@@ -91,83 +96,17 @@ func (m *Materializer) Materialize(ctx context.Context, ag *v1alpha1.Agent) (*Ma
 	return &MaterializeResult{BundleDigest: b.Digest}, nil
 }
 
-func (m *Materializer) loadPackages(ctx context.Context, ag *v1alpha1.Agent) ([]collection.ScriptPackageContent, string, error) {
-	var rc v1alpha1.ResourceCollection
-	if err := m.client.Get(ctx, client.ObjectKey{Name: ag.Spec.Script.Collection}, &rc); err != nil {
-		return nil, "", fmt.Errorf("reading collection %q: %w", ag.Spec.Script.Collection, err)
-	}
-
-	collFS, err := m.scriptFS(rc.Spec.Source)
-	if err != nil {
-		return nil, "", err
-	}
-
-	var packages []collection.ScriptPackageContent
-	var entrypointPkg string
-
-	for i := range rc.Spec.Scripts {
-		pkg := &rc.Spec.Scripts[i]
-		content, err := collection.LoadScriptPackage(pkg, collFS)
-		if err != nil {
-			return nil, "", fmt.Errorf("loading script package %q: %w", pkg.Name, err)
-		}
-		packages = append(packages, *content)
-		if pkg.Name == ag.Spec.Script.Package {
-			entrypointPkg = pkg.Name
-		}
-	}
-
-	if entrypointPkg == "" {
-		return nil, "", fmt.Errorf("package %q not found in collection %q", ag.Spec.Script.Package, ag.Spec.Script.Collection)
-	}
-
-	for _, refName := range rc.Spec.ScriptCollections {
-		var ref v1alpha1.ResourceCollection
-		if err := m.client.Get(ctx, client.ObjectKey{Name: refName}, &ref); err != nil {
-			return nil, "", fmt.Errorf("reading referenced collection %q: %w", refName, err)
-		}
-		refFS, err := m.scriptFS(ref.Spec.Source)
-		if err != nil {
-			return nil, "", err
-		}
-		for i := range ref.Spec.Scripts {
-			pkg := &ref.Spec.Scripts[i]
-			content, err := collection.LoadScriptPackage(pkg, refFS)
-			if err != nil {
-				return nil, "", fmt.Errorf("loading script package %q from collection %q: %w", pkg.Name, refName, err)
-			}
-			packages = append(packages, *content)
-		}
-	}
-
-	return packages, entrypointPkg, nil
+// clientResolver adapts a controller-runtime client to ScriptCollectionResolver.
+type clientResolver struct {
+	c client.Client
 }
 
-// TODO: move source resolution and package loading behind a collection-facing
-// API so the materializer does not inspect collection directories or choose
-// between user and builtin filesystems.
-func (m *Materializer) scriptFS(source string) (fs.FS, error) {
-	if source == "" {
-		return nil, nil
+func (r *clientResolver) Resolve(ctx context.Context, name string) (*v1alpha1.ResourceCollection, error) {
+	var rc v1alpha1.ResourceCollection
+	if err := r.c.Get(ctx, client.ObjectKey{Name: name}, &rc); err != nil {
+		return nil, err
 	}
-	if m.collectionsDir != "" {
-		userFS, err := fs.Sub(os.DirFS(m.collectionsDir), source)
-		if err != nil {
-			return nil, fmt.Errorf("opening collection directory %q: %w", source, err)
-		}
-		entries, err := fs.ReadDir(userFS, ".")
-		if err == nil && len(entries) > 0 {
-			return userFS, nil
-		}
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("reading collection directory %q: %w", source, err)
-		}
-	}
-	builtinFS, err := collection.BuiltinFS(source)
-	if err != nil {
-		return nil, fmt.Errorf("opening builtin collection %q: %w", source, err)
-	}
-	return builtinFS, nil
+	return &rc, nil
 }
 
 func (m *Materializer) ensureServiceAccount(ctx context.Context, name, namespace string, ownerRef metav1.OwnerReference) error {

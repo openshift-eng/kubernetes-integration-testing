@@ -3,9 +3,8 @@ package webhook_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/spf13/afero"
@@ -14,6 +13,7 @@ import (
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/agent/bundle"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 	agentctl "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent"
 	kitwebhook "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/webhook"
 
@@ -29,6 +29,42 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
+type fakeScriptLoader struct {
+	packages []collection.ScriptPackageContent
+	err      error
+}
+
+func (f *fakeScriptLoader) Load(_ context.Context, _ string, _ collection.ScriptCollectionResolver) (*collection.LoadResult, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	root := make(map[string]bool, len(f.packages))
+	for _, p := range f.packages {
+		root[p.Name] = true
+	}
+	return &collection.LoadResult{
+		Packages:     f.packages,
+		RootPackages: root,
+		ContentHash:  "fake",
+	}, nil
+}
+
+func defaultFakeLoader() *fakeScriptLoader {
+	return &fakeScriptLoader{
+		packages: []collection.ScriptPackageContent{{
+			Name:       "test-pkg",
+			Entrypoint: "main.js",
+			Files: []collection.ScriptFile{
+				{Path: "main.js", Content: []byte(`exports.main = function(ctx) { return {exitCode: 0}; };`)},
+			},
+		}},
+	}
+}
+
+func failingLoader() *fakeScriptLoader {
+	return &fakeScriptLoader{err: fmt.Errorf("loader error")}
+}
+
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
@@ -43,16 +79,6 @@ func testStore(t *testing.T) *bundle.BundleStore {
 	store, err := bundle.NewBundleStore(afero.NewMemMapFs(), "/bundles", slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	return store
-}
-
-func writeCollectionDir(t *testing.T) string {
-	t.Helper()
-	dir := t.TempDir()
-	collDir := filepath.Join(dir, "test-collection", "scripts", "test-pkg")
-	require.NoError(t, os.MkdirAll(collDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(collDir, "main.js"),
-		[]byte(`exports.main = function(ctx) { return {exitCode: 0}; };`), 0644))
-	return dir
 }
 
 func testAgent() *v1alpha1.Agent {
@@ -76,25 +102,9 @@ func testAgent() *v1alpha1.Agent {
 	}
 }
 
-func testCollection() *v1alpha1.ResourceCollection {
-	return &v1alpha1.ResourceCollection{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-collection"},
-		Spec: v1alpha1.ResourceCollectionSpec{
-			Source: "test-collection",
-			Scripts: []v1alpha1.ScriptPackage{{
-				Name:       "test-pkg",
-				Root:       "scripts/test-pkg",
-				Entrypoint: "main.js",
-			}},
-		},
-	}
-}
-
-// trapMaterializer returns a Materializer that will fail if Materialize is
-// called (missing collection). Use it to prove a code path never materializes.
 func trapMaterializer(t *testing.T, c client.Client) *agentctl.Materializer {
 	t.Helper()
-	return agentctl.NewMaterializer(c, testStore(t), "/nonexistent", "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+	return agentctl.NewMaterializer(c, testStore(t), failingLoader(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
 }
 
 func admissionRequest(t *testing.T, pod *corev1.Pod, namespace string, dryRun bool) admission.Request {
@@ -113,14 +123,13 @@ func admissionRequest(t *testing.T, pod *corev1.Pod, namespace string, dryRun bo
 
 func TestPodMutator(t *testing.T) {
 	t.Run("agent matching pod materializes WO on admission", func(t *testing.T) {
-		collectionsDir := writeCollectionDir(t)
 		scheme := testScheme(t)
 		ag := testAgent()
 		c := fake.NewClientBuilder().
 			WithScheme(scheme).
-			WithObjects(ag, testCollection()).
+			WithObjects(ag).
 			Build()
-		mat := agentctl.NewMaterializer(c, testStore(t), collectionsDir, "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+		mat := agentctl.NewMaterializer(c, testStore(t), defaultFakeLoader(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
 
 		mutator := &kitwebhook.PodMutator{
 			Client:       c,
@@ -219,7 +228,6 @@ func TestPodMutator(t *testing.T) {
 	})
 
 	t.Run("stale WO triggers re-materialization", func(t *testing.T) {
-		collectionsDir := writeCollectionDir(t)
 		scheme := testScheme(t)
 		ag := testAgent()
 		ag.Generation = 2
@@ -253,9 +261,9 @@ func TestPodMutator(t *testing.T) {
 		}
 		c := fake.NewClientBuilder().
 			WithScheme(scheme).
-			WithObjects(ag, wo, testCollection()).
+			WithObjects(ag, wo).
 			Build()
-		mat := agentctl.NewMaterializer(c, testStore(t), collectionsDir, "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+		mat := agentctl.NewMaterializer(c, testStore(t), defaultFakeLoader(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
 
 		mutator := &kitwebhook.PodMutator{
 			Client:       c,
@@ -293,7 +301,6 @@ func TestPodMutator(t *testing.T) {
 	})
 
 	t.Run("unowned WO triggers materialization", func(t *testing.T) {
-		collectionsDir := writeCollectionDir(t)
 		scheme := testScheme(t)
 		ag := testAgent()
 		ag.Generation = 1
@@ -319,9 +326,9 @@ func TestPodMutator(t *testing.T) {
 		}
 		c := fake.NewClientBuilder().
 			WithScheme(scheme).
-			WithObjects(ag, wo, testCollection()).
+			WithObjects(ag, wo).
 			Build()
-		mat := agentctl.NewMaterializer(c, testStore(t), collectionsDir, "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+		mat := agentctl.NewMaterializer(c, testStore(t), defaultFakeLoader(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
 
 		mutator := &kitwebhook.PodMutator{
 			Client:       c,
@@ -440,7 +447,7 @@ func TestPodMutator(t *testing.T) {
 			WithScheme(scheme).
 			WithObjects(ag).
 			Build()
-		mat := agentctl.NewMaterializer(c, testStore(t), "/nonexistent", "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+		mat := agentctl.NewMaterializer(c, testStore(t), failingLoader(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
 
 		mutator := &kitwebhook.PodMutator{
 			Client:       c,

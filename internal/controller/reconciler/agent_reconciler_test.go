@@ -3,8 +3,6 @@ package reconciler_test
 import (
 	"context"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/spf13/afero"
@@ -13,6 +11,7 @@ import (
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/agent/bundle"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 	agentctl "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/reconciler"
 
@@ -27,6 +26,25 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
+type fakeScriptLoader struct {
+	calledWith []string
+}
+
+func (f *fakeScriptLoader) Load(_ context.Context, collectionName string, _ collection.ScriptCollectionResolver) (*collection.LoadResult, error) {
+	f.calledWith = append(f.calledWith, collectionName)
+	return &collection.LoadResult{
+		Packages: []collection.ScriptPackageContent{{
+			Name:       "test-pkg",
+			Entrypoint: "main.js",
+			Files: []collection.ScriptFile{
+				{Path: "main.js", Content: []byte(`exports.main = function(ctx) {};`)},
+			},
+		}},
+		RootPackages: map[string]bool{"test-pkg": true},
+		ContentHash:  "fake",
+	}, nil
+}
+
 func agentTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
@@ -36,13 +54,8 @@ func agentTestScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-func agentTestSetup(t *testing.T, objects ...client.Object) (client.WithWatch, *agentctl.Materializer, string) {
+func agentTestSetup(t *testing.T, objects ...client.Object) (client.WithWatch, *agentctl.Materializer, *fakeScriptLoader) {
 	t.Helper()
-
-	collectionsDir := t.TempDir()
-	collDir := filepath.Join(collectionsDir, "test-collection", "scripts", "test-pkg")
-	require.NoError(t, os.MkdirAll(collDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(collDir, "main.js"), []byte(`exports.main = function(ctx) {};`), 0644))
 
 	c := fake.NewClientBuilder().
 		WithScheme(agentTestScheme(t)).
@@ -53,8 +66,9 @@ func agentTestSetup(t *testing.T, objects ...client.Object) (client.WithWatch, *
 	store, err := bundle.NewBundleStore(afero.NewMemMapFs(), "/bundles", slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 
-	mat := agentctl.NewMaterializer(c, store, collectionsDir, "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
-	return c, mat, collectionsDir
+	loader := &fakeScriptLoader{}
+	mat := agentctl.NewMaterializer(c, store, loader, "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+	return c, mat, loader
 }
 
 func testAgentCR() *v1alpha1.Agent {
@@ -79,20 +93,6 @@ func testAgentCR() *v1alpha1.Agent {
 	}
 }
 
-func testResourceCollection() *v1alpha1.ResourceCollection {
-	return &v1alpha1.ResourceCollection{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-collection"},
-		Spec: v1alpha1.ResourceCollectionSpec{
-			Source: "test-collection",
-			Scripts: []v1alpha1.ScriptPackage{{
-				Name:       "test-pkg",
-				Root:       "scripts/test-pkg",
-				Entrypoint: "main.js",
-			}},
-		},
-	}
-}
-
 func reconcileAgent(t *testing.T, c client.Client, mat *agentctl.Materializer, name string) ctrl.Result {
 	t.Helper()
 	r := reconciler.NewAgentReconciler(c, mat, slog.New(slog.DiscardHandler))
@@ -106,7 +106,7 @@ func reconcileAgent(t *testing.T, c client.Client, mat *agentctl.Materializer, n
 func TestAgentReconciler(t *testing.T) {
 	t.Run("namespace pending when target does not exist", func(t *testing.T) {
 		ag := testAgentCR()
-		c, mat, _ := agentTestSetup(t, ag, testResourceCollection())
+		c, mat, _ := agentTestSetup(t, ag)
 
 		reconcileAgent(t, c, mat, "mcd-stub")
 
@@ -122,9 +122,12 @@ func TestAgentReconciler(t *testing.T) {
 	t.Run("ready when namespace exists", func(t *testing.T) {
 		ag := testAgentCR()
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "openshift-machine-config-operator"}}
-		c, mat, _ := agentTestSetup(t, ag, testResourceCollection(), ns)
+		c, mat, loader := agentTestSetup(t, ag, ns)
 
 		reconcileAgent(t, c, mat, "mcd-stub")
+
+		require.Len(t, loader.calledWith, 1)
+		assert.Equal(t, "test-collection", loader.calledWith[0])
 
 		var updated v1alpha1.Agent
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "mcd-stub"}, &updated))
@@ -139,7 +142,7 @@ func TestAgentReconciler(t *testing.T) {
 	t.Run("materializer creates all generated resources", func(t *testing.T) {
 		ag := testAgentCR()
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "openshift-machine-config-operator"}}
-		c, mat, _ := agentTestSetup(t, ag, testResourceCollection(), ns)
+		c, mat, _ := agentTestSetup(t, ag, ns)
 
 		reconcileAgent(t, c, mat, "mcd-stub")
 
@@ -169,7 +172,7 @@ func TestAgentReconciler(t *testing.T) {
 
 	t.Run("namespace appears triggers ready", func(t *testing.T) {
 		ag := testAgentCR()
-		c, mat, _ := agentTestSetup(t, ag, testResourceCollection())
+		c, mat, _ := agentTestSetup(t, ag)
 
 		reconcileAgent(t, c, mat, "mcd-stub")
 		var updated v1alpha1.Agent

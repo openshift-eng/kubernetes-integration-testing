@@ -217,4 +217,13 @@ func TestBuildValidation(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no packages")
 	})
+
+	t.Run("duplicate package names", func(t *testing.T) {
+		pkg1 := runnablePackage("dup", map[string]string{"main.js": "v1"}, "main.js")
+		pkg2 := runnablePackage("dup", map[string]string{"main.js": "v2"}, "main.js")
+
+		_, err := Build([]collection.ScriptPackageContent{pkg1, pkg2}, "dup", nil, "js", nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "duplicate package name")
+	})
 }

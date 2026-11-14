@@ -43,6 +43,9 @@ func LoadScriptPackage(pkg *v1alpha1.ScriptPackage, fsys fs.FS) (*ScriptPackageC
 
 	switch {
 	case pkg.Root != "":
+		if fsys == nil {
+			return nil, fmt.Errorf("script package %q: root %q requires a collection source directory", pkg.Name, pkg.Root)
+		}
 		files, err = loadScriptDir(pkg.Root, pkg.Include, fsys)
 	case pkg.Inline != "":
 		if len(pkg.Inline) > MaxScriptFileSize {

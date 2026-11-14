@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/spf13/afero"
@@ -14,8 +12,8 @@ import (
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/agent/bundle"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 	agentctl "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -25,6 +23,46 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+type fakeScriptLoader struct {
+	packages     []collection.ScriptPackageContent
+	rootPackages map[string]bool
+	err          error
+}
+
+func (f *fakeScriptLoader) Load(_ context.Context, _ string, _ collection.ScriptCollectionResolver) (*collection.LoadResult, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	root := f.rootPackages
+	if root == nil {
+		root = make(map[string]bool, len(f.packages))
+		for _, p := range f.packages {
+			root[p.Name] = true
+		}
+	}
+	return &collection.LoadResult{
+		Packages:     f.packages,
+		RootPackages: root,
+		ContentHash:  "fake",
+	}, nil
+}
+
+func defaultFakeLoader() *fakeScriptLoader {
+	return fakeLoaderWithScript(`exports.main = function(ctx) { return {exitCode: 0}; };`)
+}
+
+func fakeLoaderWithScript(content string) *fakeScriptLoader {
+	return &fakeScriptLoader{
+		packages: []collection.ScriptPackageContent{{
+			Name:       "test-pkg",
+			Entrypoint: "main.js",
+			Files: []collection.ScriptFile{
+				{Path: "main.js", Content: []byte(content)},
+			},
+		}},
+	}
+}
 
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -40,22 +78,6 @@ func testStore(t *testing.T) *bundle.BundleStore {
 	store, err := bundle.NewBundleStore(afero.NewMemMapFs(), "/bundles", slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 	return store
-}
-
-// TODO: replace these collection-layout helpers with the collection-facing
-// script loading API when the materializer no longer resolves user and builtin
-// sources itself.
-func writeCollectionDir(t *testing.T, scripts map[string]string) string {
-	t.Helper()
-	dir := t.TempDir()
-	collDir := filepath.Join(dir, "test-collection", "scripts", "test-pkg")
-	require.NoError(t, os.MkdirAll(collDir, 0755))
-	for name, content := range scripts {
-		full := filepath.Join(collDir, name)
-		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0755))
-		require.NoError(t, os.WriteFile(full, []byte(content), 0644))
-	}
-	return dir
 }
 
 func testAgent(name string) *v1alpha1.Agent {
@@ -79,38 +101,20 @@ func testAgent(name string) *v1alpha1.Agent {
 	}
 }
 
-func testCollection() *v1alpha1.ResourceCollection {
-	return &v1alpha1.ResourceCollection{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-collection"},
-		Spec: v1alpha1.ResourceCollectionSpec{
-			Source: "test-collection",
-			Scripts: []v1alpha1.ScriptPackage{{
-				Name:       "test-pkg",
-				Root:       "scripts/test-pkg",
-				Entrypoint: "main.js",
-			}},
-		},
-	}
-}
-
-func newMaterializer(t *testing.T, c client.Client, collectionsDir string) *agentctl.Materializer {
+func newMaterializer(t *testing.T, c client.Client, loader agentctl.ScriptPackageLoader) *agentctl.Materializer {
 	t.Helper()
-	return agentctl.NewMaterializer(c, testStore(t), collectionsDir, "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+	return agentctl.NewMaterializer(c, testStore(t), loader, "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
 }
 
 func TestMaterialize(t *testing.T) {
 	t.Run("creates all resources", func(t *testing.T) {
-		collectionsDir := writeCollectionDir(t, map[string]string{
-			"main.js": `exports.main = function(ctx) { return {exitCode: 0}; };`,
-		})
 		ag := testAgent("mcd-stub")
 		c := fake.NewClientBuilder().
 			WithScheme(testScheme(t)).
-			WithObjects(testCollection()).
 			WithStatusSubresource(&v1alpha1.Agent{}).
 			Build()
 
-		mat := newMaterializer(t, c, collectionsDir)
+		mat := newMaterializer(t, c, defaultFakeLoader())
 		result, err := mat.Materialize(context.Background(), ag)
 		require.NoError(t, err)
 		assert.NotEmpty(t, result.BundleDigest)
@@ -144,44 +148,14 @@ func TestMaterialize(t *testing.T) {
 		assert.Equal(t, "kit-agent-mcd-stub", wo.Spec.ServiceAccountName)
 	})
 
-	t.Run("falls back to builtin script collection", func(t *testing.T) {
-		ag := testAgent("mcd-agent")
-		ag.Spec.Script.Collection = "openshift-mco"
-		ag.Spec.Script.Package = "mcd-agent"
-		collection := &v1alpha1.ResourceCollection{
-			ObjectMeta: metav1.ObjectMeta{Name: "openshift-mco"},
-			Spec: v1alpha1.ResourceCollectionSpec{
-				Source: "openshift-mco",
-				Scripts: []v1alpha1.ScriptPackage{{
-					Name:       "mcd-agent",
-					Root:       "scripts/mcd-agent",
-					Entrypoint: "main.js",
-				}},
-			},
-		}
-		c := fake.NewClientBuilder().
-			WithScheme(kube.Scheme).
-			WithObjects(collection).
-			Build()
-
-		mat := newMaterializer(t, c, t.TempDir())
-		result, err := mat.Materialize(context.Background(), ag)
-		require.NoError(t, err)
-		assert.NotEmpty(t, result.BundleDigest)
-	})
-
 	t.Run("replace pod generates ReplacePod", func(t *testing.T) {
-		collectionsDir := writeCollectionDir(t, map[string]string{
-			"main.js": `exports.main = function(ctx) {};`,
-		})
 		ag := testAgent("test")
 		ag.Spec.Target.Replace = v1alpha1.AgentReplacePod
 		c := fake.NewClientBuilder().
 			WithScheme(testScheme(t)).
-			WithObjects(testCollection()).
 			Build()
 
-		mat := newMaterializer(t, c, collectionsDir)
+		mat := newMaterializer(t, c, defaultFakeLoader())
 		_, err := mat.Materialize(context.Background(), ag)
 		require.NoError(t, err)
 
@@ -195,18 +169,14 @@ func TestMaterialize(t *testing.T) {
 	})
 
 	t.Run("replace container generates ContainerOverride", func(t *testing.T) {
-		collectionsDir := writeCollectionDir(t, map[string]string{
-			"main.js": `exports.main = function(ctx) {};`,
-		})
 		ag := testAgent("test")
 		ag.Spec.Target.Replace = v1alpha1.AgentReplaceContainer
 		ag.Spec.Target.Container = "mcd"
 		c := fake.NewClientBuilder().
 			WithScheme(testScheme(t)).
-			WithObjects(testCollection()).
 			Build()
 
-		mat := newMaterializer(t, c, collectionsDir)
+		mat := newMaterializer(t, c, defaultFakeLoader())
 		_, err := mat.Materialize(context.Background(), ag)
 		require.NoError(t, err)
 
@@ -219,16 +189,12 @@ func TestMaterialize(t *testing.T) {
 	})
 
 	t.Run("bundle env vars populated", func(t *testing.T) {
-		collectionsDir := writeCollectionDir(t, map[string]string{
-			"main.js": `exports.main = function(ctx) {};`,
-		})
 		ag := testAgent("my-agent")
 		c := fake.NewClientBuilder().
 			WithScheme(testScheme(t)).
-			WithObjects(testCollection()).
 			Build()
 
-		mat := newMaterializer(t, c, collectionsDir)
+		mat := newMaterializer(t, c, defaultFakeLoader())
 		result, err := mat.Materialize(context.Background(), ag)
 		require.NoError(t, err)
 
@@ -254,46 +220,67 @@ func TestMaterialize(t *testing.T) {
 		assert.Equal(t, "spec.nodeName", envByName["KIT_NODE_NAME"].ValueFrom.FieldRef.FieldPath)
 	})
 
-	t.Run("missing collection returns error", func(t *testing.T) {
+	t.Run("loader error propagates", func(t *testing.T) {
 		ag := testAgent("test")
 		c := fake.NewClientBuilder().
 			WithScheme(testScheme(t)).
 			Build()
 
-		mat := newMaterializer(t, c, t.TempDir())
+		loader := &fakeScriptLoader{err: fmt.Errorf("collection not found")}
+		mat := newMaterializer(t, c, loader)
 		_, err := mat.Materialize(context.Background(), ag)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "reading collection")
+		assert.Contains(t, err.Error(), "collection not found")
 	})
 
 	t.Run("missing package returns error", func(t *testing.T) {
-		collectionsDir := writeCollectionDir(t, map[string]string{
-			"main.js": `exports.main = function(ctx) {};`,
-		})
 		ag := testAgent("test")
 		ag.Spec.Script.Package = "nonexistent"
 		c := fake.NewClientBuilder().
 			WithScheme(testScheme(t)).
-			WithObjects(testCollection()).
 			Build()
 
-		mat := newMaterializer(t, c, collectionsDir)
+		mat := newMaterializer(t, c, defaultFakeLoader())
 		_, err := mat.Materialize(context.Background(), ag)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not found in collection")
+		assert.Contains(t, err.Error(), "not in the root collection")
+	})
+
+	t.Run("entrypoint from dependency rejected", func(t *testing.T) {
+		ag := testAgent("test")
+		ag.Spec.Script.Package = "dep-pkg"
+		c := fake.NewClientBuilder().
+			WithScheme(testScheme(t)).
+			Build()
+
+		loader := &fakeScriptLoader{
+			packages: []collection.ScriptPackageContent{
+				{
+					Name:       "test-pkg",
+					Entrypoint: "main.js",
+					Files:      []collection.ScriptFile{{Path: "main.js", Content: []byte("main")}},
+				},
+				{
+					Name:       "dep-pkg",
+					Entrypoint: "main.js",
+					Files:      []collection.ScriptFile{{Path: "main.js", Content: []byte("dep")}},
+				},
+			},
+			rootPackages: map[string]bool{"test-pkg": true},
+		}
+		mat := newMaterializer(t, c, loader)
+		_, err := mat.Materialize(context.Background(), ag)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not in the root collection")
 	})
 
 	t.Run("idempotent second call", func(t *testing.T) {
-		collectionsDir := writeCollectionDir(t, map[string]string{
-			"main.js": `exports.main = function(ctx) {};`,
-		})
 		ag := testAgent("test")
 		c := fake.NewClientBuilder().
 			WithScheme(testScheme(t)).
-			WithObjects(testCollection()).
 			Build()
 
-		mat := newMaterializer(t, c, collectionsDir)
+		mat := newMaterializer(t, c, defaultFakeLoader())
 		r1, err := mat.Materialize(context.Background(), ag)
 		require.NoError(t, err)
 
@@ -303,16 +290,12 @@ func TestMaterialize(t *testing.T) {
 	})
 
 	t.Run("owner references on all resources", func(t *testing.T) {
-		collectionsDir := writeCollectionDir(t, map[string]string{
-			"main.js": `exports.main = function(ctx) {};`,
-		})
 		ag := testAgent("test")
 		c := fake.NewClientBuilder().
 			WithScheme(testScheme(t)).
-			WithObjects(testCollection()).
 			Build()
 
-		mat := newMaterializer(t, c, collectionsDir)
+		mat := newMaterializer(t, c, defaultFakeLoader())
 		_, err := mat.Materialize(context.Background(), ag)
 		require.NoError(t, err)
 
@@ -351,18 +334,14 @@ func TestMaterialize(t *testing.T) {
 	})
 
 	t.Run("match copies agent target fields", func(t *testing.T) {
-		collectionsDir := writeCollectionDir(t, map[string]string{
-			"main.js": `exports.main = function(ctx) {};`,
-		})
 		ag := testAgent("test")
 		ag.Spec.Target.PodName = "specific-pod"
 		ag.Spec.Target.NodeName = "node-1"
 		c := fake.NewClientBuilder().
 			WithScheme(testScheme(t)).
-			WithObjects(testCollection()).
 			Build()
 
-		mat := newMaterializer(t, c, collectionsDir)
+		mat := newMaterializer(t, c, defaultFakeLoader())
 		_, err := mat.Materialize(context.Background(), ag)
 		require.NoError(t, err)
 
@@ -375,16 +354,12 @@ func TestMaterialize(t *testing.T) {
 	})
 
 	t.Run("cluster role grants node and OCP read access", func(t *testing.T) {
-		collectionsDir := writeCollectionDir(t, map[string]string{
-			"main.js": `exports.main = function(ctx) {};`,
-		})
 		ag := testAgent("test")
 		c := fake.NewClientBuilder().
 			WithScheme(testScheme(t)).
-			WithObjects(testCollection()).
 			Build()
 
-		mat := newMaterializer(t, c, collectionsDir)
+		mat := newMaterializer(t, c, defaultFakeLoader())
 		_, err := mat.Materialize(context.Background(), ag)
 		require.NoError(t, err)
 
@@ -436,9 +411,6 @@ func TestMaterialize(t *testing.T) {
 
 	t.Run("updates an existing generated cluster role", func(t *testing.T) {
 		ag := testAgent("test")
-		collectionsDir := writeCollectionDir(t, map[string]string{
-			"main.js": `exports.main = function(ctx) {};`,
-		})
 		existing := &rbacv1.ClusterRole{
 			ObjectMeta: metav1.ObjectMeta{Name: "kit-agent-test"},
 			Rules: []rbacv1.PolicyRule{{
@@ -449,10 +421,10 @@ func TestMaterialize(t *testing.T) {
 		}
 		c := fake.NewClientBuilder().
 			WithScheme(testScheme(t)).
-			WithObjects(testCollection(), existing).
+			WithObjects(existing).
 			Build()
 
-		mat := newMaterializer(t, c, collectionsDir)
+		mat := newMaterializer(t, c, defaultFakeLoader())
 		_, err := mat.Materialize(context.Background(), ag)
 		require.NoError(t, err)
 
@@ -484,16 +456,12 @@ func TestMaterialize(t *testing.T) {
 	})
 
 	t.Run("role excludes secrets", func(t *testing.T) {
-		collectionsDir := writeCollectionDir(t, map[string]string{
-			"main.js": `exports.main = function(ctx) {};`,
-		})
 		ag := testAgent("test")
 		c := fake.NewClientBuilder().
 			WithScheme(testScheme(t)).
-			WithObjects(testCollection()).
 			Build()
 
-		mat := newMaterializer(t, c, collectionsDir)
+		mat := newMaterializer(t, c, defaultFakeLoader())
 		_, err := mat.Materialize(context.Background(), ag)
 		require.NoError(t, err)
 
@@ -507,9 +475,6 @@ func TestMaterialize(t *testing.T) {
 	})
 
 	t.Run("WO update adopts owner references", func(t *testing.T) {
-		collectionsDir := writeCollectionDir(t, map[string]string{
-			"main.js": `exports.main = function(ctx) {};`,
-		})
 		ag := testAgent("test")
 		scheme := testScheme(t)
 		orphanWO := &v1alpha1.WorkloadOverride{
@@ -520,10 +485,10 @@ func TestMaterialize(t *testing.T) {
 		}
 		c := fake.NewClientBuilder().
 			WithScheme(scheme).
-			WithObjects(testCollection(), orphanWO).
+			WithObjects(orphanWO).
 			Build()
 
-		mat := newMaterializer(t, c, collectionsDir)
+		mat := newMaterializer(t, c, defaultFakeLoader())
 		_, err := mat.Materialize(context.Background(), ag)
 		require.NoError(t, err)
 
@@ -534,24 +499,18 @@ func TestMaterialize(t *testing.T) {
 	})
 
 	t.Run("WO updated when digest changes", func(t *testing.T) {
-		collectionsDir := writeCollectionDir(t, map[string]string{
-			"main.js": `exports.main = function(ctx) { return {exitCode: 0}; };`,
-		})
 		ag := testAgent("test")
 		c := fake.NewClientBuilder().
 			WithScheme(testScheme(t)).
-			WithObjects(testCollection()).
 			Build()
 
 		store := testStore(t)
-		mat := agentctl.NewMaterializer(c, store, collectionsDir, "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+		loader := defaultFakeLoader()
+		mat := agentctl.NewMaterializer(c, store, loader, "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
 		r1, err := mat.Materialize(context.Background(), ag)
 		require.NoError(t, err)
 
-		// Change the script content
-		scriptPath := filepath.Join(collectionsDir, "test-collection", "scripts", "test-pkg", "main.js")
-		require.NoError(t, os.WriteFile(scriptPath, []byte(`exports.main = function(ctx) { return {exitCode: 1}; };`), 0644))
-
+		loader.packages[0].Files[0].Content = []byte(`exports.main = function(ctx) { return {exitCode: 1}; };`)
 		r2, err := mat.Materialize(context.Background(), ag)
 		require.NoError(t, err)
 		assert.NotEqual(t, r1.BundleDigest, r2.BundleDigest)
