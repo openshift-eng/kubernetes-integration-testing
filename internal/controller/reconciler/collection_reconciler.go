@@ -621,20 +621,22 @@ func (r *collectionReconciler) ensureResourceCollection(ctx context.Context, nam
 }
 
 func hasTemplates(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+	found := false
+	filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
+		if err != nil || found {
+			return filepath.SkipDir
 		}
-		ext := filepath.Ext(e.Name())
+		if d.IsDir() {
+			return nil
+		}
+		ext := filepath.Ext(d.Name())
 		if ext == ".yaml" || ext == ".yml" {
-			return true
+			found = true
+			return filepath.SkipAll
 		}
-	}
-	return false
+		return nil
+	})
+	return found
 }
 
 func (r *collectionReconciler) tryAutoCreate(ctx context.Context, name string) {

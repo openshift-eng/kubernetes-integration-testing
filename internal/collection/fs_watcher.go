@@ -37,6 +37,10 @@ type FSEvent struct {
 // at flush time. Create events are sent immediately (so the caller can
 // add watches and auto-create resources), followed by a trailing
 // debounced Change that covers directories created already populated.
+//
+// All subdirectories are watched recursively; nested events resolve to
+// the owning top-level collection and debounce as Change. Symlinks are
+// not followed.
 type FSWatcher struct {
 	collectionsDir string
 	log            *slog.Logger
@@ -67,22 +71,42 @@ func (w *FSWatcher) Start(ctx context.Context) (<-chan FSEvent, error) {
 		return nil, err
 	}
 
-	entries, err := os.ReadDir(w.collectionsDir)
-	if err != nil {
-		w.log.Warn("reading collections directory for initial watch", "dir", w.collectionsDir, "error", err)
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			dir := filepath.Join(w.collectionsDir, e.Name())
-			if err := watcher.Add(dir); err != nil {
-				w.log.Warn("watching collection directory", "dir", dir, "error", err)
-			}
-		}
-	}
+	watched := map[string]struct{}{w.collectionsDir: {}}
+	w.addSubtree(watcher, watched, w.collectionsDir)
 
 	ch := make(chan FSEvent)
-	go w.loop(ctx, watcher, ch)
+	go w.loop(ctx, watcher, ch, watched)
 	return ch, nil
+}
+
+// addSubtree recursively adds all directories under root (inclusive) to
+// the watcher and tracked set, skipping symlinks.
+func (w *FSWatcher) addSubtree(watcher *fsnotify.Watcher, watched map[string]struct{}, root string) {
+	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if err := watcher.Add(path); err != nil {
+			w.log.Warn("watching directory", "dir", path, "error", err)
+		}
+		watched[path] = struct{}{}
+		return nil
+	})
+}
+
+// removeSubtree removes the exact path and all descendants (prefix +
+// separator) from the watcher and tracked set.
+func removeSubtree(watcher *fsnotify.Watcher, watched map[string]struct{}, root string) {
+	prefix := root + string(filepath.Separator)
+	for path := range watched {
+		if path == root || strings.HasPrefix(path, prefix) {
+			watcher.Remove(path)
+			delete(watched, path)
+		}
+	}
 }
 
 type pendingFlush struct {
@@ -90,7 +114,7 @@ type pendingFlush struct {
 	gen        int
 }
 
-func (w *FSWatcher) loop(ctx context.Context, watcher *fsnotify.Watcher, ch chan<- FSEvent) {
+func (w *FSWatcher) loop(ctx context.Context, watcher *fsnotify.Watcher, ch chan<- FSEvent, watched map[string]struct{}) {
 	defer func() {
 		if err := watcher.Close(); err != nil {
 			w.log.Warn("failed to close watcher", "error", err)
@@ -138,16 +162,29 @@ func (w *FSWatcher) loop(ctx context.Context, watcher *fsnotify.Watcher, ch chan
 
 			// Collections are directories; ignore top-level regular files.
 			if w.isTopLevel(ev.Name, name) {
-				if info, err := os.Stat(ev.Name); err == nil && !info.IsDir() {
+				if ev.Op&fsnotify.Create != 0 {
+					if info, err := os.Lstat(ev.Name); err != nil || !info.IsDir() {
+						continue
+					}
+				} else if _, ok := watched[ev.Name]; !ok {
 					continue
+				}
+			}
+
+			// Watch management: register new directory subtrees, clean up deleted ones.
+			if ev.Op&fsnotify.Create != 0 {
+				if info, err := os.Lstat(ev.Name); err == nil && info.IsDir() {
+					w.addSubtree(watcher, watched, ev.Name)
+				}
+			}
+			if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+				if _, ok := watched[ev.Name]; ok {
+					removeSubtree(watcher, watched, ev.Name)
 				}
 			}
 
 			kind := w.classifyEvent(ev, name)
 			if kind == FSEventCreate {
-				if err := watcher.Add(ev.Name); err != nil {
-					w.log.Warn("watching new collection directory", "dir", ev.Name, "error", err)
-				}
 				select {
 				case ch <- FSEvent{Collection: name, Kind: FSEventCreate}:
 				case <-ctx.Done():
@@ -167,7 +204,7 @@ func (w *FSWatcher) loop(ctx context.Context, watcher *fsnotify.Watcher, ch chan
 			delete(gens, flush.collection)
 
 			kind := FSEventChange
-			if _, err := os.Stat(filepath.Join(w.collectionsDir, flush.collection)); os.IsNotExist(err) {
+			if _, err := os.Lstat(filepath.Join(w.collectionsDir, flush.collection)); os.IsNotExist(err) {
 				kind = FSEventRemove
 			}
 			select {
