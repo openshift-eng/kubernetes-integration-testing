@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
@@ -29,16 +30,25 @@ type FSEvent struct {
 // emits FSEvents on a channel. It owns the fsnotify lifecycle and the
 // event loop goroutine. Controller-specific logic (e.g. GenericEvent
 // conversion) belongs in the caller.
+//
+// Change and Remove events are debounced per-collection: multiple raw
+// events within the debounce window collapse into a single FSEvent
+// whose Kind is decided by whether the top-level directory still exists
+// at flush time. Create events are sent immediately (so the caller can
+// add watches and auto-create resources), followed by a trailing
+// debounced Change that covers directories created already populated.
 type FSWatcher struct {
 	collectionsDir string
 	log            *slog.Logger
+	debounce       time.Duration
 }
 
 // NewFSWatcher creates a watcher for the given collections directory.
-func NewFSWatcher(collectionsDir string, log *slog.Logger) *FSWatcher {
+func NewFSWatcher(collectionsDir string, log *slog.Logger, debounce time.Duration) *FSWatcher {
 	return &FSWatcher{
 		collectionsDir: collectionsDir,
 		log:            log,
+		debounce:       debounce,
 	}
 }
 
@@ -75,6 +85,11 @@ func (w *FSWatcher) Start(ctx context.Context) (<-chan FSEvent, error) {
 	return ch, nil
 }
 
+type pendingFlush struct {
+	collection string
+	gen        int
+}
+
 func (w *FSWatcher) loop(ctx context.Context, watcher *fsnotify.Watcher, ch chan<- FSEvent) {
 	defer func() {
 		if err := watcher.Close(); err != nil {
@@ -82,6 +97,30 @@ func (w *FSWatcher) loop(ctx context.Context, watcher *fsnotify.Watcher, ch chan
 		}
 	}()
 	defer close(ch)
+
+	timers := make(map[string]*time.Timer)
+	gens := make(map[string]int)
+	pending := make(chan pendingFlush, 16)
+
+	defer func() {
+		for _, t := range timers {
+			t.Stop()
+		}
+	}()
+
+	resetTimer := func(name string) {
+		if t, ok := timers[name]; ok {
+			t.Stop()
+		}
+		gens[name]++
+		gen := gens[name]
+		timers[name] = time.AfterFunc(w.debounce, func() {
+			select {
+			case pending <- pendingFlush{collection: name, gen: gen}:
+			case <-ctx.Done():
+			}
+		})
+	}
 
 	for {
 		select {
@@ -97,15 +136,42 @@ func (w *FSWatcher) loop(ctx context.Context, watcher *fsnotify.Watcher, ch chan
 				continue
 			}
 
+			// Collections are directories; ignore top-level regular files.
+			if w.isTopLevel(ev.Name, name) {
+				if info, err := os.Stat(ev.Name); err == nil && !info.IsDir() {
+					continue
+				}
+			}
+
 			kind := w.classifyEvent(ev, name)
 			if kind == FSEventCreate {
 				if err := watcher.Add(ev.Name); err != nil {
 					w.log.Warn("watching new collection directory", "dir", ev.Name, "error", err)
 				}
+				select {
+				case ch <- FSEvent{Collection: name, Kind: FSEventCreate}:
+				case <-ctx.Done():
+					return
+				}
+				resetTimer(name)
+				continue
 			}
 
+			resetTimer(name)
+
+		case flush := <-pending:
+			if gens[flush.collection] != flush.gen {
+				continue
+			}
+			delete(timers, flush.collection)
+			delete(gens, flush.collection)
+
+			kind := FSEventChange
+			if _, err := os.Stat(filepath.Join(w.collectionsDir, flush.collection)); os.IsNotExist(err) {
+				kind = FSEventRemove
+			}
 			select {
-			case ch <- FSEvent{Collection: name, Kind: kind}:
+			case ch <- FSEvent{Collection: flush.collection, Kind: kind}:
 			case <-ctx.Done():
 				return
 			}

@@ -649,7 +649,7 @@ func (r *collectionReconciler) tryAutoCreate(ctx context.Context, name string) {
 }
 
 func (r *collectionReconciler) startFSBridge(ctx context.Context) (<-chan event.GenericEvent, error) {
-	w := collection.NewFSWatcher(r.collectionsDir, r.log)
+	w := collection.NewFSWatcher(r.collectionsDir, r.log, 100*time.Millisecond)
 	fsCh, err := w.Start(ctx)
 	if err != nil {
 		return nil, err
