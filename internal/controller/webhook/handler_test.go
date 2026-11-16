@@ -43,9 +43,9 @@ func (f *fakeScriptLoader) Load(_ context.Context, _ string, _ collection.Script
 		root[p.Name] = true
 	}
 	return &collection.LoadResult{
-		Packages:     f.packages,
-		RootPackages: root,
-		ContentHash:  "fake",
+		Packages:      f.packages,
+		LocalPackages: root,
+		ContentHash:   "fake",
 	}, nil
 }
 

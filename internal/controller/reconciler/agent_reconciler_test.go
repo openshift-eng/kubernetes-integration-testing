@@ -40,8 +40,8 @@ func (f *fakeScriptLoader) Load(_ context.Context, collectionName string, _ coll
 				{Path: "main.js", Content: []byte(`exports.main = function(ctx) {};`)},
 			},
 		}},
-		RootPackages: map[string]bool{"test-pkg": true},
-		ContentHash:  "fake",
+		LocalPackages: map[string]bool{"test-pkg": true},
+		ContentHash:   "fake",
 	}, nil
 }
 

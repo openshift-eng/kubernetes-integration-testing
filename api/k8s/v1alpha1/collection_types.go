@@ -19,10 +19,13 @@ type ResourceCollection struct {
 	Status            ResourceCollectionStatus `json:"status,omitempty"`
 }
 
-// +kubebuilder:validation:XValidation:rule="has(self.source) != has(self.inline)",message="exactly one of source or inline must be set"
+// +kubebuilder:validation:XValidation:rule="!(has(self.source) && has(self.inline))",message="source and inline are mutually exclusive"
+// +kubebuilder:validation:XValidation:rule="has(self.source) || has(self.inline) || (has(self.scripts) && size(self.scripts) > 0) || (has(self.scriptCollections) && size(self.scriptCollections) > 0)",message="one of source, inline, scripts, or scriptCollections must be set"
+// +kubebuilder:validation:XValidation:rule="!has(self.scripts) || !self.scripts.exists(s, has(s.root) && size(s.root) > 0) || has(self.source)",message="scripts with root require source"
 type ResourceCollectionSpec struct {
 	// Source is the name of a builtin or filesystem-provided collection.
 	// Mutually exclusive with Inline.
+	// +kubebuilder:validation:MinLength=1
 	Source string `json:"source,omitempty"`
 
 	// Inline provides templates directly in the CR.
@@ -43,11 +46,10 @@ type ResourceCollectionSpec struct {
 	// +kubebuilder:validation:MaxItems=16
 	Scripts []ScriptPackage `json:"scripts,omitempty"`
 
-	// ScriptCollections lists the names of other ResourceCollections whose
-	// script packages are included in the bundle alongside local packages.
-	// At runtime, all packages (local and from referenced collections) are
-	// available via require("<package-name>/<file>"). Collection-level cycles
-	// are rejected to prevent finalizer deadlocks.
+	// ScriptCollections lists other ResourceCollections whose script
+	// packages are merged into this collection's bundle. Dependencies
+	// are resolved transitively. An Agent's entrypoint must target a
+	// local package, not one from a dependency.
 	// +kubebuilder:validation:MaxItems=32
 	ScriptCollections []string `json:"scriptCollections,omitempty"`
 
@@ -121,6 +123,12 @@ const (
 )
 
 type ResourceCollectionStatus struct {
+	// ContentHash is a deterministic hash of the collection's declared
+	// content: rendered manifests, loaded scripts (with local package
+	// membership), and status patch declarations. It does not include
+	// Agent-level values, runtime, or timeout — those affect
+	// BundleDigest, not ContentHash. The reconciler skips reapply when
+	// the hash and ObservedGeneration are unchanged.
 	ContentHash string             `json:"contentHash,omitempty"`
 	Conditions  []metav1.Condition `json:"conditions,omitempty"`
 }

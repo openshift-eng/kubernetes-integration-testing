@@ -88,6 +88,9 @@ func Load(name string, userFS fs.FS, funcMap template.FuncMap) (*Collection, err
 // LoadInline creates a collection from inline template content.
 // An optional funcMap registers custom template functions available during rendering.
 func LoadInline(name string, contents []string, funcMap template.FuncMap) (*Collection, error) {
+	if len(contents) == 0 {
+		return nil, fmt.Errorf("collection %q has no inline templates", name)
+	}
 	templates := make(map[string]*template.Template)
 	for i, content := range contents {
 		key := fmt.Sprintf("inline-%d", i)
@@ -96,9 +99,6 @@ func LoadInline(name string, contents []string, funcMap template.FuncMap) (*Coll
 			return nil, fmt.Errorf("parsing inline template %d: %w", i, err)
 		}
 		templates[key] = tmpl
-	}
-	if len(templates) == 0 {
-		return nil, fmt.Errorf("collection %q has no templates", name)
 	}
 	return &Collection{name: name, templates: templates}, nil
 }
@@ -208,10 +208,6 @@ func loadFromFS(name string, fsys fs.FS, funcMap template.FuncMap) (*Collection,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("loading collection %q: %w", name, err)
-	}
-
-	if len(templates) == 0 {
-		return nil, fmt.Errorf("collection %q has no templates", name)
 	}
 
 	return &Collection{name: name, templates: templates}, nil

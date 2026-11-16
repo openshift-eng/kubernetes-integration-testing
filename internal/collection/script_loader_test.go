@@ -69,8 +69,52 @@ func TestScriptLoaderLoad(t *testing.T) {
 		result, err := loader.Load(context.Background(), "main", resolver)
 		require.NoError(t, err)
 		assert.Len(t, result.Packages, 2)
-		assert.True(t, result.RootPackages["app"])
-		assert.False(t, result.RootPackages["util"])
+		assert.True(t, result.LocalPackages["app"])
+		assert.False(t, result.LocalPackages["util"])
+	})
+
+	t.Run("transitive dependencies", func(t *testing.T) {
+		resolver := mapResolver{
+			"a": testCollection("a", []v1alpha1.ScriptPackage{
+				inlineScript("pkg-a", "a"),
+			}, "b"),
+			"b": testCollection("b", []v1alpha1.ScriptPackage{
+				inlineScript("pkg-b", "b"),
+			}, "c"),
+			"c": testCollection("c", []v1alpha1.ScriptPackage{
+				inlineScript("pkg-c", "c"),
+			}),
+		}
+
+		result, err := loader.Load(context.Background(), "a", resolver)
+		require.NoError(t, err)
+		assert.Len(t, result.Packages, 3)
+		assert.True(t, result.LocalPackages["pkg-a"])
+		assert.False(t, result.LocalPackages["pkg-b"])
+		assert.False(t, result.LocalPackages["pkg-c"])
+	})
+
+	t.Run("diamond dependency", func(t *testing.T) {
+		resolver := mapResolver{
+			"root": testCollection("root", []v1alpha1.ScriptPackage{
+				inlineScript("app", "main"),
+			}, "left", "right"),
+			"left": testCollection("left", []v1alpha1.ScriptPackage{
+				inlineScript("left-pkg", "l"),
+			}, "shared"),
+			"right": testCollection("right", []v1alpha1.ScriptPackage{
+				inlineScript("right-pkg", "r"),
+			}, "shared"),
+			"shared": testCollection("shared", []v1alpha1.ScriptPackage{
+				inlineScript("common", "shared-code"),
+			}),
+		}
+
+		result, err := loader.Load(context.Background(), "root", resolver)
+		require.NoError(t, err)
+		assert.Len(t, result.Packages, 4)
+		assert.True(t, result.LocalPackages["app"])
+		assert.False(t, result.LocalPackages["common"])
 	})
 }
 
@@ -110,6 +154,39 @@ func TestScriptLoaderValidation(t *testing.T) {
 		assert.Contains(t, err.Error(), "duplicate script package")
 		assert.Contains(t, err.Error(), "main")
 		assert.Contains(t, err.Error(), "other")
+	})
+
+	t.Run("direct cycle", func(t *testing.T) {
+		resolver := mapResolver{
+			"a": testCollection("a", []v1alpha1.ScriptPackage{
+				inlineScript("pkg-a", "a"),
+			}, "b"),
+			"b": testCollection("b", []v1alpha1.ScriptPackage{
+				inlineScript("pkg-b", "b"),
+			}, "a"),
+		}
+
+		_, err := loader.Load(context.Background(), "a", resolver)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cycle")
+	})
+
+	t.Run("transitive cycle", func(t *testing.T) {
+		resolver := mapResolver{
+			"a": testCollection("a", []v1alpha1.ScriptPackage{
+				inlineScript("pkg-a", "a"),
+			}, "b"),
+			"b": testCollection("b", []v1alpha1.ScriptPackage{
+				inlineScript("pkg-b", "b"),
+			}, "c"),
+			"c": testCollection("c", []v1alpha1.ScriptPackage{
+				inlineScript("pkg-c", "c"),
+			}, "a"),
+		}
+
+		_, err := loader.Load(context.Background(), "a", resolver)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cycle")
 	})
 
 	t.Run("nil FS with root package", func(t *testing.T) {
@@ -233,6 +310,77 @@ func TestScriptLoaderContentHash(t *testing.T) {
 		require.NoError(t, err)
 
 		r2, err := loader.Load(context.Background(), "main", mk("v2"))
+		require.NoError(t, err)
+
+		assert.NotEqual(t, r1.ContentHash, r2.ContentHash)
+	})
+
+	t.Run("changes when transitive dependency content changes", func(t *testing.T) {
+		mk := func(grandchildContent string) mapResolver {
+			return mapResolver{
+				"root": testCollection("root", []v1alpha1.ScriptPackage{
+					inlineScript("app", "stable"),
+				}, "mid"),
+				"mid": testCollection("mid", []v1alpha1.ScriptPackage{
+					inlineScript("mid-pkg", "stable"),
+				}, "leaf"),
+				"leaf": testCollection("leaf", []v1alpha1.ScriptPackage{
+					inlineScript("leaf-pkg", grandchildContent),
+				}),
+			}
+		}
+
+		r1, err := loader.Load(context.Background(), "root", mk("v1"))
+		require.NoError(t, err)
+
+		r2, err := loader.Load(context.Background(), "root", mk("v2"))
+		require.NoError(t, err)
+
+		assert.NotEqual(t, r1.ContentHash, r2.ContentHash)
+	})
+
+	t.Run("same content direct vs transitive produces same hash", func(t *testing.T) {
+		r1, err := loader.Load(context.Background(), "flat", mapResolver{
+			"flat": testCollection("flat", []v1alpha1.ScriptPackage{
+				inlineScript("app", "main"),
+			}, "dep"),
+			"dep": testCollection("dep", []v1alpha1.ScriptPackage{
+				inlineScript("lib", "helper"),
+			}),
+		})
+		require.NoError(t, err)
+
+		r2, err := loader.Load(context.Background(), "deep", mapResolver{
+			"deep": testCollection("deep", []v1alpha1.ScriptPackage{
+				inlineScript("app", "main"),
+			}, "mid"),
+			"mid": testCollection("mid", nil, "leaf"),
+			"leaf": testCollection("leaf", []v1alpha1.ScriptPackage{
+				inlineScript("lib", "helper"),
+			}),
+		})
+		require.NoError(t, err)
+
+		assert.Equal(t, r1.ContentHash, r2.ContentHash)
+	})
+
+	t.Run("changes when package moves from root to dependency", func(t *testing.T) {
+		r1, err := loader.Load(context.Background(), "coll", mapResolver{
+			"coll": testCollection("coll", []v1alpha1.ScriptPackage{
+				inlineScript("app", "main"),
+				inlineScript("lib", "helper"),
+			}),
+		})
+		require.NoError(t, err)
+
+		r2, err := loader.Load(context.Background(), "coll", mapResolver{
+			"coll": testCollection("coll", []v1alpha1.ScriptPackage{
+				inlineScript("app", "main"),
+			}, "dep"),
+			"dep": testCollection("dep", []v1alpha1.ScriptPackage{
+				inlineScript("lib", "helper"),
+			}),
+		})
 		require.NoError(t, err)
 
 		assert.NotEqual(t, r1.ContentHash, r2.ContentHash)

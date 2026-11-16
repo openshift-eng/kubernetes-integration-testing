@@ -25,16 +25,16 @@ import (
 )
 
 type fakeScriptLoader struct {
-	packages     []collection.ScriptPackageContent
-	rootPackages map[string]bool
-	err          error
+	packages      []collection.ScriptPackageContent
+	localPackages map[string]bool
+	err           error
 }
 
 func (f *fakeScriptLoader) Load(_ context.Context, _ string, _ collection.ScriptCollectionResolver) (*collection.LoadResult, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
-	root := f.rootPackages
+	root := f.localPackages
 	if root == nil {
 		root = make(map[string]bool, len(f.packages))
 		for _, p := range f.packages {
@@ -42,9 +42,9 @@ func (f *fakeScriptLoader) Load(_ context.Context, _ string, _ collection.Script
 		}
 	}
 	return &collection.LoadResult{
-		Packages:     f.packages,
-		RootPackages: root,
-		ContentHash:  "fake",
+		Packages:      f.packages,
+		LocalPackages: root,
+		ContentHash:   "fake",
 	}, nil
 }
 
@@ -243,7 +243,7 @@ func TestMaterialize(t *testing.T) {
 		mat := newMaterializer(t, c, defaultFakeLoader())
 		_, err := mat.Materialize(context.Background(), ag)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not in the root collection")
+		assert.Contains(t, err.Error(), "not in collection")
 	})
 
 	t.Run("entrypoint from dependency rejected", func(t *testing.T) {
@@ -266,12 +266,12 @@ func TestMaterialize(t *testing.T) {
 					Files:      []collection.ScriptFile{{Path: "main.js", Content: []byte("dep")}},
 				},
 			},
-			rootPackages: map[string]bool{"test-pkg": true},
+			localPackages: map[string]bool{"test-pkg": true},
 		}
 		mat := newMaterializer(t, c, loader)
 		_, err := mat.Materialize(context.Background(), ag)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not in the root collection")
+		assert.Contains(t, err.Error(), "not in collection")
 	})
 
 	t.Run("idempotent second call", func(t *testing.T) {

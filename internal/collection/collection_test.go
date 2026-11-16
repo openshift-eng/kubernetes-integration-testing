@@ -314,15 +314,21 @@ func TestLoadInlineBadTemplate(t *testing.T) {
 	}
 }
 
-func TestLoadEmptyCollection(t *testing.T) {
+func TestLoadEmptyCollectionRendersZeroObjects(t *testing.T) {
 	userFS := fstest.MapFS{
 		"empty/.keep": &fstest.MapFile{Data: []byte{}},
 	}
 
-	_, err := Load("empty", userFS, nil)
-	if err == nil {
-		t.Fatal("expected error for empty collection")
-	}
+	coll, err := Load("empty", userFS, nil)
+	require.NoError(t, err)
+	result, err := coll.Render(RenderContext{})
+	require.NoError(t, err)
+	assert.Empty(t, result.Objects)
+	assert.NotEmpty(t, result.Hash)
+
+	result2, err := coll.Render(RenderContext{})
+	require.NoError(t, err)
+	assert.Equal(t, result.Hash, result2.Hash, "empty render hash must be stable")
 }
 
 func TestLoadBadTemplate(t *testing.T) {

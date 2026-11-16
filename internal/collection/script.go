@@ -88,53 +88,6 @@ func LoadScriptPackage(pkg *v1alpha1.ScriptPackage, fsys fs.FS) (*ScriptPackageC
 	}, nil
 }
 
-// ValidateCollectionGraph checks that the scriptCollections references across
-// all collections form a DAG.
-func ValidateCollectionGraph(collections []v1alpha1.ResourceCollection) error {
-	byName := make(map[string]*v1alpha1.ResourceCollection, len(collections))
-	for i := range collections {
-		byName[collections[i].Name] = &collections[i]
-	}
-
-	const (
-		unvisited = 0
-		visiting  = 1
-		visited   = 2
-	)
-	state := make(map[string]int, len(collections))
-
-	var visit func(name string, path []string) error
-	visit = func(name string, path []string) error {
-		if state[name] == visited {
-			return nil
-		}
-		if state[name] == visiting {
-			return fmt.Errorf("script collection cycle: %s", strings.Join(append(path, name), " -> "))
-		}
-		state[name] = visiting
-		rc := byName[name]
-		if rc != nil {
-			for _, ref := range rc.Spec.ScriptCollections {
-				if ref == name {
-					return fmt.Errorf("collection %q cannot reference itself in scriptCollections", name)
-				}
-				if err := visit(ref, append(path, name)); err != nil {
-					return err
-				}
-			}
-		}
-		state[name] = visited
-		return nil
-	}
-
-	for _, c := range collections {
-		if err := visit(c.Name, nil); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func loadScriptDir(root string, include []string, fsys fs.FS) ([]ScriptFile, error) {
 	if containsTraversal(root) {
 		return nil, fmt.Errorf("root %q contains path traversal", root)

@@ -55,8 +55,8 @@ func (m *Materializer) Materialize(ctx context.Context, ag *v1alpha1.Agent) (*Ma
 		return nil, err
 	}
 
-	if !loaded.RootPackages[ag.Spec.Script.Package] {
-		return nil, fmt.Errorf("entrypoint package %q is not in the root collection %q", ag.Spec.Script.Package, ag.Spec.Script.Collection)
+	if !loaded.LocalPackages[ag.Spec.Script.Package] {
+		return nil, fmt.Errorf("entrypoint package %q is not in collection %q", ag.Spec.Script.Package, ag.Spec.Script.Collection)
 	}
 
 	values := convertValues(ag.Spec.Values)

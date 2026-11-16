@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 )
@@ -31,9 +32,9 @@ type ScriptLoader struct {
 // LoadResult contains the fully resolved script packages from a collection
 // and its dependencies, ready to pass to bundle.Build.
 type LoadResult struct {
-	Packages     []ScriptPackageContent
-	RootPackages map[string]bool
-	ContentHash  string
+	Packages      []ScriptPackageContent
+	LocalPackages map[string]bool
+	ContentHash   string
 }
 
 // NewScriptLoader creates a loader. collectionsDir is the on-disk root
@@ -56,7 +57,7 @@ func (l *ScriptLoader) Load(
 	}
 
 	var all []sourcePackage
-	rootPackages := make(map[string]bool, len(rc.Spec.Scripts))
+	localPackages := make(map[string]bool, len(rc.Spec.Scripts))
 
 	collFS, err := l.resolveFS(rc.Spec.Source)
 	if err != nil {
@@ -69,26 +70,47 @@ func (l *ScriptLoader) Load(
 			return nil, fmt.Errorf("loading script package %q from collection %q: %w", pkg.Name, rc.Name, err)
 		}
 		all = append(all, sourcePackage{collection: rc.Name, content: *content})
-		rootPackages[pkg.Name] = true
+		localPackages[pkg.Name] = true
 	}
 
-	for _, refName := range rc.Spec.ScriptCollections {
-		ref, err := resolver.Resolve(ctx, refName)
-		if err != nil {
-			return nil, fmt.Errorf("resolving referenced collection %q: %w", refName, err)
-		}
-		refFS, err := l.resolveFS(ref.Spec.Source)
-		if err != nil {
-			return nil, err
-		}
-		for i := range ref.Spec.Scripts {
-			pkg := &ref.Spec.Scripts[i]
-			content, err := LoadScriptPackage(pkg, refFS)
-			if err != nil {
-				return nil, fmt.Errorf("loading script package %q from collection %q: %w", pkg.Name, ref.Name, err)
+	visited := map[string]bool{collectionName: true}
+	var walkDeps func(deps []string, path []string) error
+	walkDeps = func(deps []string, path []string) error {
+		for _, refName := range deps {
+			for _, p := range path {
+				if p == refName {
+					return fmt.Errorf("script collection cycle: %s", strings.Join(append(path, refName), " -> "))
+				}
 			}
-			all = append(all, sourcePackage{collection: ref.Name, content: *content})
+			if visited[refName] {
+				continue
+			}
+			visited[refName] = true
+
+			ref, err := resolver.Resolve(ctx, refName)
+			if err != nil {
+				return fmt.Errorf("resolving referenced collection %q: %w", refName, err)
+			}
+			refFS, err := l.resolveFS(ref.Spec.Source)
+			if err != nil {
+				return err
+			}
+			for i := range ref.Spec.Scripts {
+				pkg := &ref.Spec.Scripts[i]
+				content, err := LoadScriptPackage(pkg, refFS)
+				if err != nil {
+					return fmt.Errorf("loading script package %q from collection %q: %w", pkg.Name, ref.Name, err)
+				}
+				all = append(all, sourcePackage{collection: ref.Name, content: *content})
+			}
+			if err := walkDeps(ref.Spec.ScriptCollections, append(path, refName)); err != nil {
+				return err
+			}
 		}
+		return nil
+	}
+	if err := walkDeps(rc.Spec.ScriptCollections, []string{collectionName}); err != nil {
+		return nil, err
 	}
 
 	seen := make(map[string]string, len(all))
@@ -104,12 +126,12 @@ func (l *ScriptLoader) Load(
 		packages[i] = sp.content
 	}
 
-	hash := contentHash(packages)
+	hash := scriptContentHash(packages, localPackages)
 
 	return &LoadResult{
-		Packages:     packages,
-		RootPackages: rootPackages,
-		ContentHash:  hash,
+		Packages:      packages,
+		LocalPackages: localPackages,
+		ContentHash:   hash,
 	}, nil
 }
 
@@ -139,16 +161,15 @@ func (l *ScriptLoader) resolveFS(source string) (fs.FS, error) {
 	return sub, nil
 }
 
-// contentHash produces a canonical hash over the resolved script
-// content. It covers only what would end up in the bundle: for each
-// package (sorted by name) the package name, declared entrypoint, and
-// each file's relative path + content (sorted by path). Collection
-// names and dependency order are excluded so that reorganising
-// collections without changing scripts produces the same hash.
-//
-// Each string is length-prefixed (4-byte big-endian length + bytes)
-// to avoid ambiguity between adjacent fields.
-func contentHash(packages []ScriptPackageContent) string {
+// scriptContentHash produces a canonical hash over the resolved script
+// content. It covers what would end up in the bundle plus local
+// package membership: for each package (sorted by name) the package
+// name, declared entrypoint, whether it is a local package, and each
+// file's relative path + content (sorted by path). Collection names
+// and dependency order are excluded so that reorganising collections
+// without changing scripts produces the same hash, but moving a
+// package from local to dependency does change it.
+func scriptContentHash(packages []ScriptPackageContent, localPackages map[string]bool) string {
 	sorted := make([]ScriptPackageContent, len(packages))
 	copy(sorted, packages)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
@@ -169,6 +190,11 @@ func contentHash(packages []ScriptPackageContent) string {
 	for _, pkg := range sorted {
 		writeField([]byte(pkg.Name))
 		writeField([]byte(pkg.Entrypoint))
+		if localPackages[pkg.Name] {
+			h.Write([]byte{1})
+		} else {
+			h.Write([]byte{0})
+		}
 
 		files := make([]ScriptFile, len(pkg.Files))
 		copy(files, pkg.Files)

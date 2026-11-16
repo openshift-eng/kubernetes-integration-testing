@@ -56,11 +56,10 @@ spec:
                 type: array
               scriptCollections:
                 description: |-
-                  ScriptCollections lists the names of other ResourceCollections whose
-                  script packages are included in the bundle alongside local packages.
-                  At runtime, all packages (local and from referenced collections) are
-                  available via require("<package-name>/<file>"). Collection-level cycles
-                  are rejected to prevent finalizer deadlocks.
+                  ScriptCollections lists other ResourceCollections whose script
+                  packages are merged into this collection's bundle. Dependencies
+                  are resolved transitively. An Agent's entrypoint must target a
+                  local package, not one from a dependency.
                 items:
                   type: string
                 maxItems: 32
@@ -134,6 +133,7 @@ spec:
                 description: |-
                   Source is the name of a builtin or filesystem-provided collection.
                   Mutually exclusive with Inline.
+                minLength: 1
                 type: string
               statusPatches:
                 description: |-
@@ -172,8 +172,16 @@ spec:
                 type: object
             type: object
             x-kubernetes-validations:
-            - message: exactly one of source or inline must be set
-              rule: has(self.source) != has(self.inline)
+            - message: source and inline are mutually exclusive
+              rule: '!(has(self.source) && has(self.inline))'
+            - message: one of source, inline, scripts, or scriptCollections must be
+                set
+              rule: has(self.source) || has(self.inline) || (has(self.scripts) &&
+                size(self.scripts) > 0) || (has(self.scriptCollections) && size(self.scriptCollections)
+                > 0)
+            - message: scripts with root require source
+              rule: '!has(self.scripts) || !self.scripts.exists(s, has(s.root) &&
+                size(s.root) > 0) || has(self.source)'
           status:
             properties:
               conditions:
@@ -233,6 +241,13 @@ spec:
                   type: object
                 type: array
               contentHash:
+                description: |-
+                  ContentHash is a deterministic hash of the collection's declared
+                  content: rendered manifests, loaded scripts (with local package
+                  membership), and status patch declarations. It does not include
+                  Agent-level values, runtime, or timeout — those affect
+                  BundleDigest, not ContentHash. The reconciler skips reapply when
+                  the hash and ObservedGeneration are unchanged.
                 type: string
             type: object
         required:
