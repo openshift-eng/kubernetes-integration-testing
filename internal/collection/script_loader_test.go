@@ -228,6 +228,51 @@ func TestScriptLoaderSourceResolution(t *testing.T) {
 		assert.Equal(t, []byte("user-version"), result.Packages[0].Files[0].Content)
 	})
 
+	t.Run("missing source returns ErrSourceMissing", func(t *testing.T) {
+		loader := NewScriptLoader(t.TempDir())
+		resolver := mapResolver{
+			"ghost": {
+				ObjectMeta: metav1.ObjectMeta{Name: "ghost"},
+				Spec: v1alpha1.ResourceCollectionSpec{
+					Source: "nonexistent-collection",
+					Scripts: []v1alpha1.ScriptPackage{
+						{Name: "pkg", Inline: "code"},
+					},
+				},
+			},
+		}
+
+		_, err := loader.Load(context.Background(), "ghost", resolver)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrSourceMissing)
+	})
+
+	t.Run("missing dependency source returns ErrSourceMissing", func(t *testing.T) {
+		loader := NewScriptLoader(t.TempDir())
+		resolver := mapResolver{
+			"root": {
+				ObjectMeta: metav1.ObjectMeta{Name: "root"},
+				Spec: v1alpha1.ResourceCollectionSpec{
+					Scripts:           []v1alpha1.ScriptPackage{{Name: "pkg", Inline: "code"}},
+					ScriptCollections: []string{"dep"},
+				},
+			},
+			"dep": {
+				ObjectMeta: metav1.ObjectMeta{Name: "dep"},
+				Spec: v1alpha1.ResourceCollectionSpec{
+					Source: "nonexistent-dep",
+					Scripts: []v1alpha1.ScriptPackage{
+						{Name: "lib", Inline: "code"},
+					},
+				},
+			},
+		}
+
+		_, err := loader.Load(context.Background(), "root", resolver)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrSourceMissing)
+	})
+
 	t.Run("falls back to builtin", func(t *testing.T) {
 		loader := NewScriptLoader(t.TempDir())
 		resolver := mapResolver{

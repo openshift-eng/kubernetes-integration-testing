@@ -124,8 +124,12 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	contentHash, err := r.computeContentHash(ctx, &rc, renderResult.Hash)
 	if err != nil {
+		reason := "HashFailed"
+		if errors.Is(err, collection.ErrSourceMissing) {
+			reason = "SourceMissing"
+		}
 		r.setContentConditions(&rc, isReferencedByPlan,
-			metav1.ConditionFalse, "HashFailed", err.Error())
+			metav1.ConditionFalse, reason, err.Error())
 		return ctrl.Result{}, err
 	}
 

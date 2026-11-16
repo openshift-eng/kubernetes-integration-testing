@@ -13,9 +13,11 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -189,4 +191,55 @@ func requestNames(requests []ctrl.Request) []string {
 		names[i] = r.Name
 	}
 	return names
+}
+
+func TestReconcileSourceMissingFromScriptLoader(t *testing.T) {
+	rc := &v1alpha1.ResourceCollection{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-coll",
+			Finalizers: []string{collectionFinalizer},
+		},
+		Spec: v1alpha1.ResourceCollectionSpec{
+			Scripts: []v1alpha1.ScriptPackage{{Name: "pkg", Inline: "code"}},
+		},
+	}
+	agent := &v1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "a"},
+		Spec: v1alpha1.AgentSpec{Script: v1alpha1.AgentScriptRef{Collection: "test-coll"}},
+	}
+	kc := &v1alpha1.KitCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "kc"},
+		Status: v1alpha1.KitClusterStatus{
+			Conditions: []metav1.Condition{{
+				Type:   v1alpha1.ConditionReady,
+				Status: metav1.ConditionTrue,
+			}},
+		},
+	}
+
+	s := hashScheme(t)
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(rc, agent, kc).
+		WithStatusSubresource(rc).
+		Build()
+
+	loader := &fakeLoader{err: fmt.Errorf("dep missing: %w", collection.ErrSourceMissing)}
+	r := NewCollectionReconciler(cl, slog.New(slog.DiscardHandler), nil, nil, loader, "", "", nil)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKey{Name: "test-coll"},
+	})
+	require.Error(t, err)
+
+	var updated v1alpha1.ResourceCollection
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKey{Name: "test-coll"}, &updated))
+
+	cond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionContentReady)
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, "SourceMissing", cond.Reason)
+
+	appliedCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+	assert.Nil(t, appliedCond, "Applied condition must not be set for agent-only collections")
 }

@@ -82,11 +82,27 @@ func Load(name string, userFS fs.FS, funcMap template.FuncMap) (*Collection, err
 	if name == "" {
 		return nil, fmt.Errorf("collection name must not be empty")
 	}
+	resolved, err := resolveCollectionFS(name, userFS)
+	if err != nil {
+		return nil, err
+	}
+	return loadFromFS(name, resolved, funcMap)
+}
+
+// resolveCollectionFS returns the filesystem for a collection source. If
+// userFS is non-nil and contains a non-empty subdirectory matching name,
+// it wins; otherwise the embedded builtins are tried. Returns
+// ErrSourceMissing when neither source exists.
+func resolveCollectionFS(name string, userFS fs.FS) (fs.FS, error) {
 	if userFS != nil {
 		sub, err := fs.Sub(userFS, name)
 		if err == nil {
-			if entries, err := fs.ReadDir(sub, "."); err == nil && len(entries) > 0 {
-				return loadFromFS(name, sub, funcMap)
+			entries, err := fs.ReadDir(sub, ".")
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return nil, fmt.Errorf("reading collection %q: %w", name, err)
+			}
+			if len(entries) > 0 {
+				return sub, nil
 			}
 		}
 	}
@@ -97,7 +113,7 @@ func Load(name string, userFS fs.FS, funcMap template.FuncMap) (*Collection, err
 	if entries, err := fs.ReadDir(sub, "."); err != nil || len(entries) == 0 {
 		return nil, fmt.Errorf("collection %q: %w", name, ErrSourceMissing)
 	}
-	return loadFromFS(name, sub, funcMap)
+	return sub, nil
 }
 
 // LoadInline creates a collection from inline template content.

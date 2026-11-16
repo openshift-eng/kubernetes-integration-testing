@@ -5,11 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -136,29 +134,17 @@ func (l *ScriptLoader) Load(
 }
 
 // resolveFS returns the filesystem for a collection source, trying the
-// user-provided directory first and falling back to builtins.
+// user-provided directory first and falling back to builtins. Returns
+// nil when source is empty (inline/local-only collections).
 func (l *ScriptLoader) resolveFS(source string) (fs.FS, error) {
 	if source == "" {
 		return nil, nil
 	}
+	var userFS fs.FS
 	if l.collectionsDir != "" {
-		userFS, err := fs.Sub(os.DirFS(l.collectionsDir), source)
-		if err != nil {
-			return nil, fmt.Errorf("opening collection directory %q: %w", source, err)
-		}
-		entries, err := fs.ReadDir(userFS, ".")
-		if err == nil && len(entries) > 0 {
-			return userFS, nil
-		}
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("reading collection directory %q: %w", source, err)
-		}
+		userFS = os.DirFS(l.collectionsDir)
 	}
-	sub, err := fs.Sub(builtinFS, filepath.Join("builtin", source))
-	if err != nil {
-		return nil, fmt.Errorf("opening builtin collection %q: %w", source, err)
-	}
-	return sub, nil
+	return resolveCollectionFS(source, userFS)
 }
 
 // scriptContentHash produces a canonical hash over the resolved script
