@@ -388,7 +388,7 @@ func TestScriptLoaderContentHash(t *testing.T) {
 
 	t.Run("dependency with no scripts produces EmptyHash", func(t *testing.T) {
 		result, err := loader.Load(context.Background(), "root", mapResolver{
-			"root": testCollection("root", nil, "empty-dep"),
+			"root":      testCollection("root", nil, "empty-dep"),
 			"empty-dep": testCollection("empty-dep", nil),
 		})
 		require.NoError(t, err)

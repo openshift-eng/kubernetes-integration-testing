@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"text/template"
 	"time"
 
@@ -21,7 +20,6 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/release"
 
-	"github.com/fsnotify/fsnotify"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -415,7 +413,7 @@ func (r *collectionReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Ma
 			r.log.Warn("failed to scan collections dir on startup", "error", err)
 		}
 
-		ch, err := r.startFSWatcher(ctx)
+		ch, err := r.startFSBridge(ctx)
 		if err != nil {
 			r.log.Warn("filesystem watcher not available, changes on disk won't trigger reconcile", "error", err)
 		} else {
@@ -555,92 +553,67 @@ func hasTemplates(dir string) bool {
 	return false
 }
 
-func (r *collectionReconciler) startFSWatcher(ctx context.Context) (<-chan event.GenericEvent, error) {
-	watcher, err := fsnotify.NewWatcher()
+func (r *collectionReconciler) tryAutoCreate(ctx context.Context, name string) {
+	dir := filepath.Join(r.collectionsDir, name)
+	if !hasTemplates(dir) {
+		return
+	}
+	fsys := os.DirFS(dir)
+	if err := r.ensureResourceCollection(ctx, name, fsys); err != nil {
+		r.log.Warn("failed to auto-create ResourceCollection from fs event", "name", name, "error", err)
+	}
+}
+
+func (r *collectionReconciler) startFSBridge(ctx context.Context) (<-chan event.GenericEvent, error) {
+	w := collection.NewFSWatcher(r.collectionsDir, r.log)
+	fsCh, err := w.Start(ctx)
 	if err != nil {
 		return nil, err
-	}
-
-	// Add a watcher to the root of the collections directory
-	if err := watcher.Add(r.collectionsDir); err != nil {
-		if closeErr := watcher.Close(); closeErr != nil {
-			r.log.Warn("failed to close watcher", "error", closeErr)
-		}
-		return nil, err
-	}
-
-	// Add a watcher to each existing collections directory
-	entries, _ := os.ReadDir(r.collectionsDir)
-	for _, e := range entries {
-		if e.IsDir() {
-			_ = watcher.Add(filepath.Join(r.collectionsDir, e.Name()))
-		}
 	}
 
 	ch := make(chan event.GenericEvent)
-
 	go func() {
-		defer func() {
-			if err := watcher.Close(); err != nil {
-				r.log.Warn("failed to close watcher", "error", err)
-			}
-		}()
 		defer close(ch)
-		for {
-			select {
-			case ev, ok := <-watcher.Events:
-				if !ok {
-					return
-				}
-				if ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) == 0 {
+		for fsEv := range fsCh {
+			switch fsEv.Kind {
+			case collection.FSEventCreate:
+				r.tryAutoCreate(ctx, fsEv.Collection)
+				continue
+
+			case collection.FSEventRemove:
+				var rc v1alpha1.ResourceCollection
+				if err := r.client.Get(ctx, client.ObjectKey{Name: fsEv.Collection}, &rc); err != nil {
 					continue
 				}
-				// Watch new top-level collection dirs so edits to their templates trigger reconciliation.
-				if ev.Op&fsnotify.Create != 0 {
-					if rel, err := filepath.Rel(r.collectionsDir, ev.Name); err == nil && !strings.Contains(rel, string(filepath.Separator)) {
-						_ = watcher.Add(ev.Name)
-					}
+				if rc.Spec.Source == "" {
+					continue
 				}
-				r.handleFSEvent(ctx, ev, ch)
-			case err, ok := <-watcher.Errors:
-				if !ok {
+				select {
+				case ch <- event.GenericEvent{Object: &rc}:
+				case <-ctx.Done():
 					return
 				}
-				r.log.Warn("fsnotify error", "error", err)
-			case <-ctx.Done():
-				return
+				continue
+
+			case collection.FSEventChange:
+				var rc v1alpha1.ResourceCollection
+				if err := r.client.Get(ctx, client.ObjectKey{Name: fsEv.Collection}, &rc); err != nil {
+					if apierrors.IsNotFound(err) {
+						r.tryAutoCreate(ctx, fsEv.Collection)
+					}
+					continue
+				}
+				if rc.Spec.Source != "" {
+					select {
+					case ch <- event.GenericEvent{Object: &rc}:
+					case <-ctx.Done():
+						return
+					}
+				}
 			}
 		}
 	}()
-
 	return ch, nil
-}
-
-func (r *collectionReconciler) handleFSEvent(ctx context.Context, ev fsnotify.Event, ch chan<- event.GenericEvent) {
-	rel, err := filepath.Rel(r.collectionsDir, ev.Name)
-	if err != nil {
-		return
-	}
-	name := strings.SplitN(rel, string(filepath.Separator), 2)[0]
-
-	if ev.Op&fsnotify.Create != 0 {
-		dir := filepath.Join(r.collectionsDir, name)
-		if hasTemplates(dir) {
-			fsys := os.DirFS(dir)
-			if err := r.ensureResourceCollection(ctx, name, fsys); err != nil {
-				r.log.Warn("failed to auto-create ResourceCollection from fs event", "name", name, "error", err)
-			}
-		}
-		return
-	}
-
-	var rc v1alpha1.ResourceCollection
-	if err := r.client.Get(ctx, client.ObjectKey{Name: name}, &rc); err != nil {
-		return
-	}
-	if rc.Spec.Source != "" {
-		ch <- event.GenericEvent{Object: &rc}
-	}
 }
 
 func (r *collectionReconciler) computeContentHash(ctx context.Context, rc *v1alpha1.ResourceCollection, renderHash string) (string, error) {
