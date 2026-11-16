@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -49,6 +50,7 @@ func newCollectionClient(t *testing.T, objects ...client.Object) client.WithWatc
 	return fake.NewClientBuilder().
 		WithScheme(newCollectionTestScheme(t)).
 		WithObjects(objects...).
+		WithStatusSubresource(&v1alpha1.ResourceCollection{}).
 		Build()
 }
 
@@ -149,4 +151,52 @@ func TestCollectionDeletionAllowedWhenNoRef(t *testing.T) {
 	var rc v1alpha1.ResourceCollection
 	err := kubeClient.Get(context.Background(), client.ObjectKey{Name: "common-scripts"}, &rc)
 	assert.True(t, apierrors.IsNotFound(err), "object should be deleted after finalizer removal")
+}
+
+func TestCollectionSourceMissingSetsCondition(t *testing.T) {
+	rc := &v1alpha1.ResourceCollection{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "nonexistent-source",
+			Finalizers: []string{collectionFinalizer},
+		},
+		Spec: v1alpha1.ResourceCollectionSpec{
+			Source: "nonexistent-source",
+		},
+	}
+	plan := &v1alpha1.DeploymentPlan{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-plan"},
+		Spec: v1alpha1.DeploymentPlanSpec{
+			Steps: []v1alpha1.DeploymentStep{
+				{Name: "step-1", Collection: &v1alpha1.CollectionStep{Source: "nonexistent-source"}},
+			},
+		},
+		Status: v1alpha1.DeploymentPlanStatus{
+			Steps: []v1alpha1.DeploymentStepStatus{
+				{Name: "step-1", Phase: v1alpha1.StepRequested},
+			},
+		},
+	}
+	kc := &v1alpha1.KitCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+		Status: v1alpha1.KitClusterStatus{
+			Conditions: []metav1.Condition{
+				{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: "Ready"},
+			},
+		},
+	}
+
+	kubeClient := newCollectionClient(t, rc, plan, kc)
+	_, err := reconciler.NewCollectionReconciler(kubeClient, slog.New(slog.DiscardHandler), nil, nil, &stubScriptLoader{}, t.TempDir(), "", nil).
+		Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: "nonexistent-source"},
+		})
+	require.Error(t, err)
+
+	var updated v1alpha1.ResourceCollection
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: "nonexistent-source"}, &updated))
+
+	cond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+	require.NotNil(t, cond, "Applied condition should be set")
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, "SourceMissing", cond.Reason)
 }

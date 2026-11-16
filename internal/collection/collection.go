@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -66,9 +67,13 @@ func BuiltinNames() []string {
 	return names
 }
 
+// ErrSourceMissing indicates that neither user-provided nor builtin source
+// exists for a collection. Callers can check with errors.Is.
+var ErrSourceMissing = errors.New("collection source not found")
+
 // Load resolves a collection by name. If userFS is non-nil and contains a
 // subdirectory matching name, it takes precedence over the embedded builtins.
-// An optional funcMap registers custom template functions available during rendering.
+// Returns ErrSourceMissing when neither user nor builtin source exists.
 func Load(name string, userFS fs.FS, funcMap template.FuncMap) (*Collection, error) {
 	if userFS != nil {
 		sub, err := fs.Sub(userFS, name)
@@ -80,7 +85,10 @@ func Load(name string, userFS fs.FS, funcMap template.FuncMap) (*Collection, err
 	}
 	sub, err := fs.Sub(builtinFS, filepath.Join("builtin", name))
 	if err != nil {
-		return nil, fmt.Errorf("collection %q not found: %w", name, err)
+		return nil, fmt.Errorf("collection %q: %w", name, ErrSourceMissing)
+	}
+	if entries, err := fs.ReadDir(sub, "."); err != nil || len(entries) == 0 {
+		return nil, fmt.Errorf("collection %q: %w", name, ErrSourceMissing)
 	}
 	return loadFromFS(name, sub, funcMap)
 }

@@ -27,11 +27,19 @@ func TestLoadBuiltin(t *testing.T) {
 	}
 }
 
-func TestLoadUnknown(t *testing.T) {
-	_, err := Load("nonexistent", nil, nil)
-	if err == nil {
-		t.Fatal("expected error for unknown collection")
-	}
+func TestLoadSourceResolution(t *testing.T) {
+	t.Run("user missing falls back to builtin", func(t *testing.T) {
+		emptyUserFS := fstest.MapFS{}
+		coll, err := Load("openshift-default", emptyUserFS, stubCertFuncMap)
+		require.NoError(t, err)
+		assert.Equal(t, "openshift-default", coll.Name())
+	})
+
+	t.Run("no source returns ErrSourceMissing", func(t *testing.T) {
+		_, err := Load("nonexistent", nil, nil)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrSourceMissing)
+	})
 }
 
 func TestLoadUserCollection(t *testing.T) {

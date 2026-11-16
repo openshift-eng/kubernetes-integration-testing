@@ -3,6 +3,7 @@ package reconciler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -108,7 +109,11 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	renderResult, err := r.render(&rc, &kc)
 	if err != nil {
-		r.setCollectionCondition(&rc, metav1.ConditionFalse, "RenderFailed", err.Error())
+		reason := "RenderFailed"
+		if errors.Is(err, collection.ErrSourceMissing) {
+			reason = "SourceMissing"
+		}
+		r.setCollectionCondition(&rc, metav1.ConditionFalse, reason, err.Error())
 		return ctrl.Result{}, err
 	}
 
