@@ -540,25 +540,15 @@ func (r *collectionReconciler) collectionScriptMapping(ctx context.Context, obj 
 		return nil
 	}
 
-	dependents := buildDependents(list.Items)
+	deps := buildDependents(list.Items)
 	seen := map[string]bool{}
-	var queue []string
-	for _, dep := range dependents[changed.Name] {
-		queue = append(queue, dep)
-	}
-
 	var requests []ctrl.Request
-	for len(queue) > 0 {
-		name := queue[0]
-		queue = queue[1:]
-		if seen[name] {
-			continue
-		}
+	for _, name := range transitiveDependents(changed.Name, deps) {
 		seen[name] = true
 		requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKey{Name: name}})
-		queue = append(queue, dependents[name]...)
 	}
 
+	// Downward: own dependencies (so they can release finalizers).
 	for _, ref := range changed.Spec.ScriptCollections {
 		if !seen[ref] {
 			requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKey{Name: ref}})
@@ -577,6 +567,25 @@ func buildDependents(collections []v1alpha1.ResourceCollection) map[string][]str
 		}
 	}
 	return deps
+}
+
+// transitiveDependents returns all collection names that transitively
+// depend on name via the inverse graph. Does not include name itself.
+func transitiveDependents(name string, deps map[string][]string) []string {
+	seen := map[string]bool{name: true}
+	queue := append([]string{}, deps[name]...)
+	var result []string
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if seen[current] {
+			continue
+		}
+		seen[current] = true
+		result = append(result, current)
+		queue = append(queue, deps[current]...)
+	}
+	return result
 }
 
 func (r *collectionReconciler) ensureCollectionsFromDisk(ctx context.Context) error {
@@ -650,6 +659,30 @@ func (r *collectionReconciler) tryAutoCreate(ctx context.Context, name string) {
 	}
 }
 
+func (r *collectionReconciler) enqueueDependents(ctx context.Context, ch chan<- event.GenericEvent, name string) {
+	var list v1alpha1.ResourceCollectionList
+	if err := r.client.List(ctx, &list); err != nil {
+		r.log.Error("listing collections for FS propagation", "error", err)
+		return
+	}
+	deps := buildDependents(list.Items)
+	byName := make(map[string]*v1alpha1.ResourceCollection, len(list.Items))
+	for i := range list.Items {
+		byName[list.Items[i].Name] = &list.Items[i]
+	}
+	for _, depName := range transitiveDependents(name, deps) {
+		rc, ok := byName[depName]
+		if !ok {
+			continue
+		}
+		select {
+		case ch <- event.GenericEvent{Object: rc}:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 func (r *collectionReconciler) startFSBridge(ctx context.Context) (<-chan event.GenericEvent, error) {
 	w := collection.NewFSWatcher(r.collectionsDir, r.log, 100*time.Millisecond)
 	fsCh, err := w.Start(ctx)
@@ -679,6 +712,7 @@ func (r *collectionReconciler) startFSBridge(ctx context.Context) (<-chan event.
 				case <-ctx.Done():
 					return
 				}
+				r.enqueueDependents(ctx, ch, fsEv.Collection)
 				continue
 
 			case collection.FSEventChange:
@@ -689,13 +723,15 @@ func (r *collectionReconciler) startFSBridge(ctx context.Context) (<-chan event.
 					}
 					continue
 				}
-				if rc.Spec.Source != "" {
-					select {
-					case ch <- event.GenericEvent{Object: &rc}:
-					case <-ctx.Done():
-						return
-					}
+				if rc.Spec.Source == "" {
+					continue
 				}
+				select {
+				case ch <- event.GenericEvent{Object: &rc}:
+				case <-ctx.Done():
+					return
+				}
+				r.enqueueDependents(ctx, ch, fsEv.Collection)
 			}
 		}
 	}()

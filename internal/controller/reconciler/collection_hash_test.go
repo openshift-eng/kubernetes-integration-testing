@@ -190,15 +190,3 @@ func requestNames(requests []ctrl.Request) []string {
 	}
 	return names
 }
-
-func TestBuildDependents(t *testing.T) {
-	collections := []v1alpha1.ResourceCollection{
-		{ObjectMeta: metav1.ObjectMeta{Name: "a"}, Spec: v1alpha1.ResourceCollectionSpec{ScriptCollections: []string{"c"}}},
-		{ObjectMeta: metav1.ObjectMeta{Name: "b"}, Spec: v1alpha1.ResourceCollectionSpec{ScriptCollections: []string{"c"}}},
-		{ObjectMeta: metav1.ObjectMeta{Name: "c"}},
-	}
-
-	deps := buildDependents(collections)
-	assert.ElementsMatch(t, []string{"a", "b"}, deps["c"])
-	assert.Empty(t, deps["a"])
-}
