@@ -1,6 +1,8 @@
 package collection
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -13,6 +15,11 @@ import (
 
 func hex64(prefix string) string {
 	return (prefix + strings.Repeat("0", 64))[:64]
+}
+
+func TestEmptyHash(t *testing.T) {
+	computed := hex.EncodeToString(sha256.New().Sum(nil))
+	assert.Equal(t, computed, EmptyHash)
 }
 
 func TestCombineContentHash(t *testing.T) {

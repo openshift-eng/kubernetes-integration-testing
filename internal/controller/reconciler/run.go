@@ -69,7 +69,7 @@ func Start(ctx context.Context, log *slog.Logger, bd *bootstrap.BootstrapData, c
 	reconcilerMat := agentctl.NewMaterializer(mgr.GetClient(), bundleStore, scriptLoader, bd.ClusterConfig.ControllerImageRef, bundleBaseURL, log)
 	webhookMat := agentctl.NewMaterializer(clients.Client, bundleStore, scriptLoader, bd.ClusterConfig.ControllerImageRef, bundleBaseURL, log)
 
-	if err := setupReconcilers(ctx, mgr, clients, cfg, bd, registry, certProvider, shutdowner, bundleStore, reconcilerMat, log); err != nil {
+	if err := setupReconcilers(ctx, mgr, clients, cfg, bd, registry, certProvider, shutdowner, bundleStore, reconcilerMat, scriptLoader, log); err != nil {
 		return err
 	}
 
@@ -120,7 +120,7 @@ func ensureBootstrapResources(ctx context.Context, clients *kube.Clients, bd *bo
 	return nil
 }
 
-func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clients, cfg common.Config, bd *bootstrap.BootstrapData, registry *image.Registry, certProvider *cert.Provider, shutdowner common.Shutdowner, bundleStore *bundle.BundleStore, mat *agentctl.Materializer, log *slog.Logger) error {
+func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clients, cfg common.Config, bd *bootstrap.BootstrapData, registry *image.Registry, certProvider *cert.Provider, shutdowner common.Shutdowner, bundleStore *bundle.BundleStore, mat *agentctl.Materializer, scriptLoader *collection.ScriptLoader, log *slog.Logger) error {
 	rel := release.NewReleaseManifests(registry, log)
 	crdMgr := NewCRDManager(clients.Extensions.ApiextensionsV1().CustomResourceDefinitions(), log)
 
@@ -140,7 +140,7 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 			}).SetupWithManager(mgr)
 		}},
 		{"ResourceCollection", func() error {
-			return NewCollectionReconciler(mgr.GetClient(), log, clients, rel, cfg.CollectionsDir, string(bd.PullSecret), certProvider).
+			return NewCollectionReconciler(mgr.GetClient(), log, clients, rel, scriptLoader, cfg.CollectionsDir, string(bd.PullSecret), certProvider).
 				SetupWithManager(ctx, mgr)
 		}},
 		{"DeploymentPlan", func() error {

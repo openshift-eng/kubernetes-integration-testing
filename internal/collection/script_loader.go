@@ -170,6 +170,9 @@ func (l *ScriptLoader) resolveFS(source string) (fs.FS, error) {
 // without changing scripts produces the same hash, but moving a
 // package from local to dependency does change it.
 func scriptContentHash(packages []ScriptPackageContent, localPackages map[string]bool) string {
+	if len(packages) == 0 {
+		return EmptyHash
+	}
 	sorted := make([]ScriptPackageContent, len(packages))
 	copy(sorted, packages)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })

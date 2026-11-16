@@ -38,21 +38,29 @@ import (
 
 const collectionFinalizer = "kit.openshift.io/collection-protection"
 
+// ScriptPackageLoader loads script packages and computes content hashes
+// for a collection and its transitive dependencies.
+type ScriptPackageLoader interface {
+	Load(ctx context.Context, collectionName string, resolver collection.ScriptCollectionResolver) (*collection.LoadResult, error)
+}
+
 type collectionReconciler struct {
 	client         client.Client
 	clients        *kube.Clients
 	release        *release.ReleaseManifests
+	scriptLoader   ScriptPackageLoader
 	collectionsDir string
 	pullSecret     string
 	certProvider   *cert.Provider
 	log            *slog.Logger
 }
 
-func NewCollectionReconciler(c client.Client, log *slog.Logger, clients *kube.Clients, release *release.ReleaseManifests, collectionsDir string, pullSecret string, certProvider *cert.Provider) *collectionReconciler {
+func NewCollectionReconciler(c client.Client, log *slog.Logger, clients *kube.Clients, release *release.ReleaseManifests, scriptLoader ScriptPackageLoader, collectionsDir string, pullSecret string, certProvider *cert.Provider) *collectionReconciler {
 	return &collectionReconciler{
 		client:         c,
 		clients:        clients,
 		release:        release,
+		scriptLoader:   scriptLoader,
 		collectionsDir: collectionsDir,
 		pullSecret:     pullSecret,
 		certProvider:   certProvider,
@@ -106,7 +114,13 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	if rc.Status.ContentHash == renderResult.Hash &&
+	contentHash, err := r.computeContentHash(ctx, &rc, renderResult.Hash)
+	if err != nil {
+		r.setCollectionCondition(&rc, metav1.ConditionFalse, "HashFailed", err.Error())
+		return ctrl.Result{}, err
+	}
+
+	if rc.Status.ContentHash == contentHash &&
 		rc.Status.ContentHash != "" {
 		appliedCond := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionApplied)
 		if appliedCond != nil && appliedCond.Status == metav1.ConditionTrue &&
@@ -115,7 +129,7 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 	}
 
-	r.log.Info("applying resource collection", "name", rc.Name, "oldHash", rc.Status.ContentHash, "newHash", renderResult.Hash)
+	r.log.Info("applying resource collection", "name", rc.Name, "oldHash", rc.Status.ContentHash, "newHash", contentHash)
 	if err := r.apply(ctx, renderResult); err != nil {
 		r.setCollectionCondition(&rc, metav1.ConditionFalse, "ApplyFailed", err.Error())
 		return ctrl.Result{}, err
@@ -129,7 +143,7 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	base := rc.DeepCopy()
-	rc.Status.ContentHash = renderResult.Hash
+	rc.Status.ContentHash = contentHash
 	meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
 		Type:               v1alpha1.ConditionCollectionApplied,
 		Status:             metav1.ConditionTrue,
@@ -383,7 +397,7 @@ func (r *collectionReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Ma
 		Named("resourcecollection").
 		For(&v1alpha1.ResourceCollection{}).
 		Watches(&v1alpha1.DeploymentPlan{}, handler.EnqueueRequestsFromMapFunc(r.planToCollections)).
-		Watches(&v1alpha1.ResourceCollection{}, handler.EnqueueRequestsFromMapFunc(r.collectionToScriptDeps))
+		Watches(&v1alpha1.ResourceCollection{}, handler.EnqueueRequestsFromMapFunc(r.collectionScriptMapping))
 
 	for _, name := range collection.BuiltinNames() {
 		fsys, err := collection.BuiltinFS(name)
@@ -429,17 +443,58 @@ func (r *collectionReconciler) planToCollections(ctx context.Context, obj client
 	return requests
 }
 
-// collectionToScriptDeps reconciles referenced collections so they can release finalizers promptly.
-func (r *collectionReconciler) collectionToScriptDeps(_ context.Context, obj client.Object) []ctrl.Request {
-	rc, ok := obj.(*v1alpha1.ResourceCollection)
+// collectionScriptMapping enqueues both directions when a collection changes:
+// its own dependencies (so they can release finalizers) and all transitive
+// dependents (so they recalculate ContentHash when a dependency's content changes).
+func (r *collectionReconciler) collectionScriptMapping(ctx context.Context, obj client.Object) []ctrl.Request {
+	changed, ok := obj.(*v1alpha1.ResourceCollection)
 	if !ok {
 		return nil
 	}
+
+	var list v1alpha1.ResourceCollectionList
+	if err := r.client.List(ctx, &list); err != nil {
+		r.log.Error("listing collections for script mapping", "error", err)
+		return nil
+	}
+
+	dependents := buildDependents(list.Items)
+	seen := map[string]bool{}
+	var queue []string
+	for _, dep := range dependents[changed.Name] {
+		queue = append(queue, dep)
+	}
+
 	var requests []ctrl.Request
-	for _, ref := range rc.Spec.ScriptCollections {
-		requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKey{Name: ref}})
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKey{Name: name}})
+		queue = append(queue, dependents[name]...)
+	}
+
+	for _, ref := range changed.Spec.ScriptCollections {
+		if !seen[ref] {
+			requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKey{Name: ref}})
+		}
 	}
 	return requests
+}
+
+// buildDependents builds the inverse graph: for each collection name,
+// which collections list it in their scriptCollections.
+func buildDependents(collections []v1alpha1.ResourceCollection) map[string][]string {
+	deps := make(map[string][]string)
+	for _, rc := range collections {
+		for _, ref := range rc.Spec.ScriptCollections {
+			deps[ref] = append(deps[ref], rc.Name)
+		}
+	}
+	return deps
 }
 
 func (r *collectionReconciler) ensureCollectionsFromDisk(ctx context.Context) error {
@@ -586,6 +641,40 @@ func (r *collectionReconciler) handleFSEvent(ctx context.Context, ev fsnotify.Ev
 	if rc.Spec.Source != "" {
 		ch <- event.GenericEvent{Object: &rc}
 	}
+}
+
+func (r *collectionReconciler) computeContentHash(ctx context.Context, rc *v1alpha1.ResourceCollection, renderHash string) (string, error) {
+	scriptHash := collection.EmptyHash
+	if len(rc.Spec.Scripts) > 0 || len(rc.Spec.ScriptCollections) > 0 {
+		loaded, err := r.scriptLoader.Load(ctx, rc.Name, &collectionResolver{r.client})
+		if err != nil {
+			return "", fmt.Errorf("computing script hash for %q: %w", rc.Name, err)
+		}
+		scriptHash = loaded.ContentHash
+	}
+
+	statusPatchesHash, err := collection.HashStatusPatches(rc.Spec.StatusPatches)
+	if err != nil {
+		return "", fmt.Errorf("hashing status patches for %q: %w", rc.Name, err)
+	}
+
+	return collection.CombineContentHash(collection.ContentHashComponents{
+		RenderHash:        renderHash,
+		ScriptHash:        scriptHash,
+		StatusPatchesHash: statusPatchesHash,
+	})
+}
+
+type collectionResolver struct {
+	c client.Client
+}
+
+func (r *collectionResolver) Resolve(ctx context.Context, name string) (*v1alpha1.ResourceCollection, error) {
+	var rc v1alpha1.ResourceCollection
+	if err := r.c.Get(ctx, client.ObjectKey{Name: name}, &rc); err != nil {
+		return nil, err
+	}
+	return &rc, nil
 }
 
 func unmarshalValues(raw map[string]apiextensionsv1.JSON) (map[string]any, error) {

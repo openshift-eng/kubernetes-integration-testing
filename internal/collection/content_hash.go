@@ -12,6 +12,10 @@ import (
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 )
 
+// EmptyHash is the SHA-256 of an empty input, used as the hash for
+// absent content domains (e.g. a collection with no scripts).
+const EmptyHash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
 // ContentHashComponents holds the per-domain hashes that compose a
 // collection's global ContentHash.
 type ContentHashComponents struct {

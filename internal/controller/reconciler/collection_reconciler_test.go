@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/reconciler"
 
 	"github.com/stretchr/testify/assert"
@@ -25,6 +26,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+type stubScriptLoader struct{}
+
+func (s *stubScriptLoader) Load(_ context.Context, _ string, _ collection.ScriptCollectionResolver) (*collection.LoadResult, error) {
+	return &collection.LoadResult{ContentHash: collection.EmptyHash}, nil
+}
 
 const collectionFinalizer = "kit.openshift.io/collection-protection"
 
@@ -48,7 +55,7 @@ func newCollectionClient(t *testing.T, objects ...client.Object) client.WithWatc
 func reconcileCollection(t *testing.T, kubeClient client.Client, name string) ctrl.Result {
 	t.Helper()
 
-	result, err := reconciler.NewCollectionReconciler(kubeClient, slog.New(slog.DiscardHandler), nil, nil, "", "", nil).
+	result, err := reconciler.NewCollectionReconciler(kubeClient, slog.New(slog.DiscardHandler), nil, nil, &stubScriptLoader{}, "", "", nil).
 		Reconcile(context.Background(), ctrl.Request{
 			NamespacedName: types.NamespacedName{Name: name},
 		})
