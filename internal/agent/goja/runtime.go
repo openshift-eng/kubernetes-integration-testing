@@ -47,7 +47,9 @@ func execute(ctx context.Context, req agent.AgentRequest, host agent.Host, loop 
 	vm := goja.New()
 
 	loader := newModuleLoader(vm, req.BundleDir, active, host, loop, log)
-	vm.Set("require", loader.requireFrom(req.BundleDir))
+	if err := vm.Set("require", loader.requireFrom(req.BundleDir)); err != nil {
+		return agent.AgentResult{}, fmt.Errorf("setting up VM: %w", err)
+	}
 
 	ctxObj := newCtxObject(active, vm, req, host, loop, log, shutdownGrace, shutdown)
 

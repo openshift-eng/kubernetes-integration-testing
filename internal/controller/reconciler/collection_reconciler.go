@@ -601,7 +601,12 @@ func (r *collectionReconciler) ensureCollectionsFromDisk(ctx context.Context) er
 		if !entry.IsDir() {
 			continue
 		}
-		if !hasTemplates(filepath.Join(r.collectionsDir, entry.Name())) {
+		has, err := hasTemplates(filepath.Join(r.collectionsDir, entry.Name()))
+		if err != nil {
+			r.log.Warn("checking templates", "name", entry.Name(), "error", err)
+			continue
+		}
+		if !has {
 			continue
 		}
 		fsys := os.DirFS(filepath.Join(r.collectionsDir, entry.Name()))
@@ -633,11 +638,11 @@ func (r *collectionReconciler) ensureResourceCollection(ctx context.Context, nam
 	return nil
 }
 
-func hasTemplates(dir string) bool {
+func hasTemplates(dir string) (bool, error) {
 	found := false
-	filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
-		if err != nil || found {
-			return filepath.SkipDir
+	err := filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
 		if d.IsDir() {
 			return nil
@@ -649,12 +654,20 @@ func hasTemplates(dir string) bool {
 		}
 		return nil
 	})
-	return found
+	if err != nil {
+		return false, err
+	}
+	return found, nil
 }
 
 func (r *collectionReconciler) tryAutoCreate(ctx context.Context, name string) {
 	dir := filepath.Join(r.collectionsDir, name)
-	if !hasTemplates(dir) {
+	has, err := hasTemplates(dir)
+	if err != nil {
+		r.log.Warn("checking templates for auto-create", "name", name, "error", err)
+		return
+	}
+	if !has {
 		return
 	}
 	fsys := os.DirFS(dir)

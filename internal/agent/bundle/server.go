@@ -116,7 +116,11 @@ func (s *Server) serveBundle(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	defer reader.Close()
+	defer func() {
+		if err := reader.Close(); err != nil {
+			s.log.Warn("closing bundle reader", "digest", digest[:12], "error", err)
+		}
+	}()
 
 	w.Header().Set("Content-Type", "application/gzip")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))

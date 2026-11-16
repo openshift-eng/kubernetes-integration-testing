@@ -57,7 +57,7 @@ func DownloadWithRetries(ctx context.Context, client *http.Client, fs afero.Fs, 
 	return extract(fs, data, destDir)
 }
 
-func fetchBundle(ctx context.Context, client *http.Client, url string) ([]byte, error) {
+func fetchBundle(ctx context.Context, client *http.Client, url string) (_ []byte, retErr error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
@@ -67,7 +67,7 @@ func fetchBundle(ctx context.Context, client *http.Client, url string) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { retErr = errors.Join(retErr, resp.Body.Close()) }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %s", resp.Status)

@@ -35,7 +35,10 @@ func serveBundleHTTP(t *testing.T, b *bundle.Bundle) (*httptest.Server, string) 
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/gzip")
-		io.Copy(w, b.Reader())
+		if _, err := io.Copy(w, b.Reader()); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}))
 	t.Cleanup(srv.Close)
 	return srv, fmt.Sprintf("%s/bundle.tar.gz", srv.URL)

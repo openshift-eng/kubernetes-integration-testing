@@ -35,7 +35,7 @@ func TestBundleStore(t *testing.T) {
 
 		reader, size, err := s.Open(b.Digest)
 		require.NoError(t, err)
-		defer reader.Close()
+		defer func() { assert.NoError(t, reader.Close()) }()
 		assert.Greater(t, size, int64(0))
 
 		data, err := io.ReadAll(reader)
@@ -54,7 +54,7 @@ func TestBundleStore(t *testing.T) {
 
 		reader, _, err := s.Open(b.Digest)
 		require.NoError(t, err)
-		reader.Close()
+		assert.NoError(t, reader.Close())
 	})
 
 	t.Run("two agents same digest", func(t *testing.T) {
@@ -90,11 +90,11 @@ func TestBundleStore(t *testing.T) {
 
 		oldReader, _, err := s.Open(old.Digest)
 		require.NoError(t, err, "old blob must survive Put — GC handles cleanup")
-		oldReader.Close()
+		assert.NoError(t, oldReader.Close())
 
 		newReader, _, err := s.Open(updated.Digest)
 		require.NoError(t, err)
-		newReader.Close()
+		assert.NoError(t, newReader.Close())
 	})
 
 	t.Run("restart persistence", func(t *testing.T) {
@@ -110,7 +110,7 @@ func TestBundleStore(t *testing.T) {
 
 		reader, _, err := s2.Open(b.Digest)
 		require.NoError(t, err, "blob must survive restart")
-		reader.Close()
+		assert.NoError(t, reader.Close())
 	})
 
 	t.Run("startup prunes stale index entry", func(t *testing.T) {
@@ -130,7 +130,7 @@ func TestBundleStore(t *testing.T) {
 		require.NoError(t, err)
 		reader, _, err := s2.Open(b.Digest)
 		require.NoError(t, err, "new mapping for previously stale agent must persist")
-		reader.Close()
+		assert.NoError(t, reader.Close())
 	})
 
 	t.Run("corrupt index starts fresh", func(t *testing.T) {
@@ -146,7 +146,7 @@ func TestBundleStore(t *testing.T) {
 
 		reader, _, err := s.Open(b.Digest)
 		require.NoError(t, err)
-		reader.Close()
+		assert.NoError(t, reader.Close())
 	})
 
 	t.Run("invalid digest in index skipped", func(t *testing.T) {

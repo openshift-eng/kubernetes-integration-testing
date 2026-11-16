@@ -54,10 +54,13 @@ func TestWatchReceivesEvents(t *testing.T) {
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
-		f.fake.Tracker().Create(gvr, &unstructured.Unstructured{Object: map[string]interface{}{
+		if err := f.fake.Tracker().Create(gvr, &unstructured.Unstructured{Object: map[string]interface{}{
 			"apiVersion": "v1", "kind": "ConfigMap",
 			"metadata": map[string]interface{}{"name": "watch-cm", "namespace": "default"},
-		}}, "default")
+		}}, "default"); err != nil {
+			t.Error(err)
+			return
+		}
 	}()
 
 	result, err := runWithKube(t, map[string]string{
@@ -88,13 +91,16 @@ func TestWatchCallbackStopsLoop(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
 		for i := 0; i < 3; i++ {
-			f.fake.Tracker().Create(gvr, &unstructured.Unstructured{Object: map[string]interface{}{
+			if err := f.fake.Tracker().Create(gvr, &unstructured.Unstructured{Object: map[string]interface{}{
 				"apiVersion": "v1", "kind": "ConfigMap",
 				"metadata": map[string]interface{}{
 					"name":      "cm-" + string(rune('a'+i)),
 					"namespace": "default",
 				},
-			}}, "default")
+			}}, "default"); err != nil {
+				t.Error(err)
+				return
+			}
 			time.Sleep(10 * time.Millisecond)
 		}
 	}()
@@ -667,10 +673,13 @@ func TestWatchListThenWatch(t *testing.T) {
 	go func() {
 		time.Sleep(100 * time.Millisecond)
 		gvr := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "configmaps"}
-		f.fake.Tracker().Create(gvr, &unstructured.Unstructured{Object: map[string]interface{}{
+		if err := f.fake.Tracker().Create(gvr, &unstructured.Unstructured{Object: map[string]interface{}{
 			"apiVersion": "v1", "kind": "ConfigMap",
 			"metadata": map[string]interface{}{"name": "new-cm", "namespace": "default"},
-		}}, "default")
+		}}, "default"); err != nil {
+			t.Error(err)
+			return
+		}
 	}()
 
 	result, err := runWithKube(t, map[string]string{

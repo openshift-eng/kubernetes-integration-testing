@@ -27,15 +27,20 @@ func (k *kubeModule) Name() string { return "kube" }
 func (k *kubeModule) Instantiate(vm *goja.Runtime) goja.Value {
 	kc := k.host.Kube()
 	obj := vm.NewObject()
-	obj.Set("get", k.getFunc(vm, kc))
-	obj.Set("list", k.listFunc(vm, kc))
-	obj.Set("create", k.createFunc(vm, kc))
-	obj.Set("replace", k.replaceFunc(vm, kc))
-	obj.Set("patch", k.patchFunc(vm, kc))
-	obj.Set("apply", k.applyFunc(vm, kc))
-	obj.Set("delete", k.deleteFunc(vm, kc))
-	obj.Set("watch", k.watchFunc(vm, kc))
-	obj.Set("resolveGVR", k.resolveGVRFunc(vm, kc))
+	must := func(err error) {
+		if err != nil {
+			panic(vm.NewTypeError(err.Error()))
+		}
+	}
+	must(obj.Set("get", k.getFunc(vm, kc)))
+	must(obj.Set("list", k.listFunc(vm, kc)))
+	must(obj.Set("create", k.createFunc(vm, kc)))
+	must(obj.Set("replace", k.replaceFunc(vm, kc)))
+	must(obj.Set("patch", k.patchFunc(vm, kc)))
+	must(obj.Set("apply", k.applyFunc(vm, kc)))
+	must(obj.Set("delete", k.deleteFunc(vm, kc)))
+	must(obj.Set("watch", k.watchFunc(vm, kc)))
+	must(obj.Set("resolveGVR", k.resolveGVRFunc(vm, kc)))
 	return obj
 }
 

@@ -194,10 +194,7 @@ func TestListWatcherContextCancellation(t *testing.T) {
 	cancel()
 
 	select {
-	case _, ok := <-lw.ResultChan():
-		if ok {
-			// Might drain one event before close, that's fine
-		}
+	case <-lw.ResultChan():
 	case <-time.After(5 * time.Second):
 		t.Fatal("channel not closed after context cancellation")
 	}

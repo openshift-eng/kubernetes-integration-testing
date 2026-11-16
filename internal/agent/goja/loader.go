@@ -86,7 +86,9 @@ func (ml *moduleLoader) load(resolved string) goja.Value {
 
 	module := ml.vm.NewObject()
 	exports := ml.vm.NewObject()
-	module.Set("exports", exports)
+	if err := module.Set("exports", exports); err != nil {
+		panic(ml.vm.NewTypeError(err.Error()))
+	}
 	ml.cache[resolved] = module
 
 	wrapped := "(function(exports, require, module) {\n" + string(source) + "\n})"

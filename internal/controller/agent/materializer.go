@@ -17,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -177,7 +178,7 @@ func (m *Materializer) ensureClusterRole(ctx context.Context, name string, owner
 		},
 		Rules: clusterScopedPolicyRules(),
 	}
-	return m.client.Patch(ctx, cr, client.Apply, client.FieldOwner("kit-agent-materializer"), client.ForceOwnership)
+	return applyObject(ctx, m.client, cr)
 }
 
 func (m *Materializer) ensureClusterRoleBinding(ctx context.Context, name, namespace string, ownerRef metav1.OwnerReference) error {
@@ -223,7 +224,7 @@ func (m *Materializer) ensureWorkloadOverride(ctx context.Context, ag *v1alpha1.
 	// Server-side apply makes concurrent webhook and reconciler materialization
 	// conflict-safe without a read/update resourceVersion race. Force ownership
 	// because Kit owns every field of this generated WorkloadOverride.
-	return m.client.Patch(ctx, desired, client.Apply, client.FieldOwner("kit-agent-materializer"), client.ForceOwnership)
+	return applyObject(ctx, m.client, desired)
 }
 
 func (m *Materializer) buildWOSpec(ag *v1alpha1.Agent, bundleURL, digest, saName string) v1alpha1.WorkloadOverrideSpec {
@@ -383,4 +384,13 @@ func clusterScopedPolicyRules() []rbacv1.PolicyRule {
 		{APIGroups: []string{"machineconfiguration.openshift.io"}, Resources: []string{"machineconfignodes", "machineconfignodes/status"}, Verbs: []string{"patch"}},
 		{APIGroups: []string{"config.openshift.io"}, Resources: []string{"*"}, Verbs: readOnly},
 	}
+}
+
+func applyObject(ctx context.Context, c client.Client, obj client.Object) error {
+	data, err := json.Marshal(obj)
+	if err != nil {
+		return fmt.Errorf("marshaling for server-side apply: %w", err)
+	}
+	patch := client.RawPatch(types.ApplyPatchType, data)
+	return c.Patch(ctx, obj, patch, client.FieldOwner("kit-agent-materializer"), client.ForceOwnership)
 }

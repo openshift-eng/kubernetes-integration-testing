@@ -28,7 +28,9 @@ func serveBundleHandler(b *bundle.Bundle) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/gzip")
 		w.WriteHeader(http.StatusOK)
-		io.Copy(w, b.Reader())
+		if _, err := io.Copy(w, b.Reader()); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	})
 }
 
@@ -93,7 +95,9 @@ func TestDownload(t *testing.T) {
 	t.Run("path traversal rejected", func(t *testing.T) {
 		data := buildTraversalTarGz(t)
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write(data)
+			if _, err := w.Write(data); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		}))
 		defer srv.Close()
 
@@ -122,7 +126,9 @@ func TestDownload(t *testing.T) {
 	t.Run("symlink skipped", func(t *testing.T) {
 		data := buildSymlinkTarGz(t)
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write(data)
+			if _, err := w.Write(data); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		}))
 		defer srv.Close()
 
@@ -151,7 +157,9 @@ func TestDownload(t *testing.T) {
 				return
 			}
 			w.Header().Set("Content-Type", "application/gzip")
-			io.Copy(w, b.Reader())
+			if _, err := io.Copy(w, b.Reader()); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		}))
 		defer srv.Close()
 
@@ -172,7 +180,9 @@ func TestDownload(t *testing.T) {
 		}
 		bigData := make([]byte, collection.MaxBundleSize+1)
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write(bigData)
+			if _, err := w.Write(bigData); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
 		}))
 		defer srv.Close()
 

@@ -19,8 +19,13 @@ type gojaEventHandler struct {
 
 func (h *gojaEventHandler) OnEvent(event agent.WatchEvent) (agent.AgentResult, bool) {
 	obj := h.vm.NewObject()
-	obj.Set("type", event.Type)
-	obj.Set("object", h.vm.ToValue(event.Object))
+	must := func(err error) {
+		if err != nil {
+			panic(h.vm.NewTypeError(err.Error()))
+		}
+	}
+	must(obj.Set("type", event.Type))
+	must(obj.Set("object", h.vm.ToValue(event.Object)))
 
 	retVal, err := h.cb(goja.Undefined(), obj)
 	if err != nil {

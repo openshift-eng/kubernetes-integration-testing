@@ -98,17 +98,16 @@ func TestServer(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		done := make(chan struct{})
+		done := make(chan error, 1)
 		go func() {
-			defer close(done)
-			srv.Start(ctx)
+			done <- srv.Start(ctx)
 		}()
 
 		require.NoError(t, srv.WaitReady(ctx))
 		require.NoError(t, srv.Ready(nil))
 
 		cancel()
-		<-done
+		require.NoError(t, <-done)
 
 		assert.Error(t, srv.Ready(nil), "ready must be false after Stop")
 		assert.Error(t, srv.WaitReady(context.Background()), "WaitReady must fail after Stop")
@@ -117,7 +116,7 @@ func TestServer(t *testing.T) {
 	t.Run("WaitReady fails on listener error", func(t *testing.T) {
 		lis, err := net.Listen("tcp", "127.0.0.1:0")
 		require.NoError(t, err)
-		defer lis.Close()
+		defer func() { assert.NoError(t, lis.Close()) }()
 
 		blocked := NewServer(nil, lis.Addr().String(), slog.New(slog.DiscardHandler))
 

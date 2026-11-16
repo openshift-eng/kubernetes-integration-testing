@@ -82,7 +82,7 @@ func (w *FSWatcher) Start(ctx context.Context) (<-chan FSEvent, error) {
 // addSubtree recursively adds all directories under root (inclusive) to
 // the watcher and tracked set, skipping symlinks.
 func (w *FSWatcher) addSubtree(watcher *fsnotify.Watcher, watched map[string]struct{}, root string) {
-	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -94,16 +94,20 @@ func (w *FSWatcher) addSubtree(watcher *fsnotify.Watcher, watched map[string]str
 		}
 		watched[path] = struct{}{}
 		return nil
-	})
+	}); err != nil {
+		w.log.Warn("walking subtree", "root", root, "error", err)
+	}
 }
 
 // removeSubtree removes the exact path and all descendants (prefix +
 // separator) from the watcher and tracked set.
-func removeSubtree(watcher *fsnotify.Watcher, watched map[string]struct{}, root string) {
+func (w *FSWatcher) removeSubtree(watcher *fsnotify.Watcher, watched map[string]struct{}, root string) {
 	prefix := root + string(filepath.Separator)
 	for path := range watched {
 		if path == root || strings.HasPrefix(path, prefix) {
-			watcher.Remove(path)
+			if err := watcher.Remove(path); err != nil {
+				w.log.Warn("unwatching directory", "dir", path, "error", err)
+			}
 			delete(watched, path)
 		}
 	}
@@ -179,7 +183,7 @@ func (w *FSWatcher) loop(ctx context.Context, watcher *fsnotify.Watcher, ch chan
 			}
 			if ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 				if _, ok := watched[ev.Name]; ok {
-					removeSubtree(watcher, watched, ev.Name)
+					w.removeSubtree(watcher, watched, ev.Name)
 				}
 			}
 

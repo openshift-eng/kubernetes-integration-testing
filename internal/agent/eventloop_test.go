@@ -160,7 +160,7 @@ func TestEventLoopAddWatchDuringHandler(t *testing.T) {
 			}
 		},
 	}
-	el.AddWatch(fw1, handler1)
+	assert.NoError(t, el.AddWatch(fw1, handler1))
 
 	go func() {
 		fw1.Add(&unstructured.Unstructured{Object: map[string]interface{}{

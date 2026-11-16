@@ -45,7 +45,7 @@ func extractTarGz(t *testing.T, b *Bundle) map[string][]byte {
 	t.Helper()
 	gr, err := gzip.NewReader(b.Reader())
 	require.NoError(t, err)
-	defer gr.Close()
+	defer func() { assert.NoError(t, gr.Close()) }()
 	tr := tar.NewReader(gr)
 
 	files := make(map[string][]byte)
