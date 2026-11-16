@@ -40,6 +40,22 @@ func TestLoadSourceResolution(t *testing.T) {
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrSourceMissing)
 	})
+
+	t.Run("empty name rejected", func(t *testing.T) {
+		_, err := Load("", nil, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must not be empty")
+	})
+}
+
+func TestNewEmptyRendersZeroObjects(t *testing.T) {
+	coll := NewEmpty("scripts-only")
+	assert.Equal(t, "scripts-only", coll.Name())
+
+	result, err := coll.Render(RenderContext{})
+	require.NoError(t, err)
+	assert.Empty(t, result.Objects)
+	assert.Equal(t, EmptyHash, result.Hash)
 }
 
 func TestLoadUserCollection(t *testing.T) {

@@ -119,7 +119,8 @@ type InlineTemplate struct {
 }
 
 const (
-	ConditionCollectionApplied = "Applied"
+	ConditionCollectionApplied      = "Applied"
+	ConditionCollectionContentReady = "ContentReady"
 )
 
 type ResourceCollectionStatus struct {

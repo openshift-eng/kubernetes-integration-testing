@@ -85,11 +85,15 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	requested, err := r.isRequested(ctx, rc.Name)
+	isReferencedByPlan, err := r.isReferencedByPlan(ctx, rc.Name)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !requested {
+	isReferencedByAgent, err := r.isReferencedByAgent(ctx, rc.Name)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !isReferencedByPlan && !isReferencedByAgent {
 		return ctrl.Result{}, nil
 	}
 
@@ -103,7 +107,7 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	kc := kcList.Items[0]
 
 	if !meta.IsStatusConditionTrue(kc.Status.Conditions, v1alpha1.ConditionReady) {
-		r.log.Info("KitCluster not ready, deferring collection apply", "name", rc.Name)
+		r.log.Info("KitCluster not ready, deferring collection reconcile", "name", rc.Name)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
@@ -113,59 +117,104 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if errors.Is(err, collection.ErrSourceMissing) {
 			reason = "SourceMissing"
 		}
-		r.setCollectionCondition(&rc, metav1.ConditionFalse, reason, err.Error())
+		r.setContentConditions(&rc, isReferencedByPlan,
+			metav1.ConditionFalse, reason, err.Error())
 		return ctrl.Result{}, err
 	}
 
 	contentHash, err := r.computeContentHash(ctx, &rc, renderResult.Hash)
 	if err != nil {
-		r.setCollectionCondition(&rc, metav1.ConditionFalse, "HashFailed", err.Error())
+		r.setContentConditions(&rc, isReferencedByPlan,
+			metav1.ConditionFalse, "HashFailed", err.Error())
 		return ctrl.Result{}, err
 	}
 
-	if rc.Status.ContentHash == contentHash &&
-		rc.Status.ContentHash != "" {
-		appliedCond := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionApplied)
-		if appliedCond != nil && appliedCond.Status == metav1.ConditionTrue &&
-			appliedCond.ObservedGeneration == rc.Generation {
-			return ctrl.Result{}, nil
+	if rc.Status.ContentHash == contentHash && rc.Status.ContentHash != "" {
+		contentCond := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionContentReady)
+		if contentCond != nil && contentCond.Status == metav1.ConditionTrue && contentCond.ObservedGeneration == rc.Generation {
+			if !isReferencedByPlan {
+				return ctrl.Result{}, nil
+			}
+			appliedCond := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+			if appliedCond != nil && appliedCond.Status == metav1.ConditionTrue && appliedCond.Reason == "Applied" && appliedCond.ObservedGeneration == rc.Generation {
+				return ctrl.Result{}, nil
+			}
 		}
 	}
 
-	r.log.Info("applying resource collection", "name", rc.Name, "oldHash", rc.Status.ContentHash, "newHash", contentHash)
-	if err := r.apply(ctx, renderResult); err != nil {
-		r.setCollectionCondition(&rc, metav1.ConditionFalse, "ApplyFailed", err.Error())
-		return ctrl.Result{}, err
-	}
-
-	if len(rc.Spec.StatusPatches) > 0 {
-		if err := r.applyStatusPatches(ctx, &rc, &kc, renderResult); err != nil {
-			r.setCollectionCondition(&rc, metav1.ConditionFalse, "StatusPatchFailed", err.Error())
+	if isReferencedByPlan {
+		r.log.Info("applying resource collection", "name", rc.Name, "oldHash", rc.Status.ContentHash, "newHash", contentHash)
+		if err := r.apply(ctx, renderResult); err != nil {
+			r.setApplyFailure(&rc, "ApplyFailed", err.Error())
 			return ctrl.Result{}, err
+		}
+
+		if len(rc.Spec.StatusPatches) > 0 {
+			if err := r.applyStatusPatches(ctx, &rc, &kc, renderResult); err != nil {
+				r.setApplyFailure(&rc, "StatusPatchFailed", err.Error())
+				return ctrl.Result{}, err
+			}
 		}
 	}
 
 	base := rc.DeepCopy()
 	rc.Status.ContentHash = contentHash
 	meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
-		Type:               v1alpha1.ConditionCollectionApplied,
+		Type:               v1alpha1.ConditionCollectionContentReady,
 		Status:             metav1.ConditionTrue,
-		Reason:             "Applied",
+		Reason:             "Ready",
 		ObservedGeneration: rc.Generation,
 	})
+	if isReferencedByPlan {
+		meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
+			Type:               v1alpha1.ConditionCollectionApplied,
+			Status:             metav1.ConditionTrue,
+			Reason:             "Applied",
+			ObservedGeneration: rc.Generation,
+		})
+	}
 	if err := r.client.Status().Patch(ctx, &rc, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	r.log.Info("applied resource collection", "name", rc.Name)
+	r.log.Info("reconciled resource collection", "name", rc.Name, "isReferencedByPlan", isReferencedByPlan, "isReferencedByAgent", isReferencedByAgent)
 	return ctrl.Result{}, nil
 }
 
-func (r *collectionReconciler) setCollectionCondition(rc *v1alpha1.ResourceCollection, status metav1.ConditionStatus, reason, message string) {
+func (r *collectionReconciler) setContentConditions(rc *v1alpha1.ResourceCollection, hasPlan bool, status metav1.ConditionStatus, reason, message string) {
 	base := rc.DeepCopy()
 	meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
-		Type:               v1alpha1.ConditionCollectionApplied,
+		Type:               v1alpha1.ConditionCollectionContentReady,
 		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: rc.Generation,
+	})
+	if hasPlan {
+		meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
+			Type:               v1alpha1.ConditionCollectionApplied,
+			Status:             status,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: rc.Generation,
+		})
+	}
+	if err := r.client.Status().Patch(context.Background(), rc, client.MergeFrom(base)); err != nil {
+		r.log.Error("patching collection status", "name", rc.Name, "error", err)
+	}
+}
+
+func (r *collectionReconciler) setApplyFailure(rc *v1alpha1.ResourceCollection, reason, message string) {
+	base := rc.DeepCopy()
+	meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionCollectionContentReady,
+		Status:             metav1.ConditionTrue,
+		Reason:             "Ready",
+		ObservedGeneration: rc.Generation,
+	})
+	meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionCollectionApplied,
+		Status:             metav1.ConditionFalse,
 		Reason:             reason,
 		Message:            message,
 		ObservedGeneration: rc.Generation,
@@ -211,6 +260,10 @@ func (r *collectionReconciler) newMapper() (meta.RESTMapper, error) {
 // TODO: implement proper resource ordering (namespaces before namespaced
 // resources, CRDs before CRs, etc.) instead of relying on template walk order.
 func (r *collectionReconciler) apply(ctx context.Context, result *collection.RenderResult) error {
+	if len(result.Objects) == 0 {
+		return nil
+	}
+
 	mapper, err := r.newMapper()
 	if err != nil {
 		return err
@@ -321,6 +374,10 @@ func (r *collectionReconciler) loadCollection(rc *v1alpha1.ResourceCollection) (
 		return collection.LoadInline(rc.Name, contents, r.certFuncMap())
 	}
 
+	if rc.Spec.Source == "" {
+		return collection.NewEmpty(rc.Name), nil
+	}
+
 	var userFS fs.FS
 	if r.collectionsDir != "" {
 		userFS = os.DirFS(r.collectionsDir)
@@ -333,13 +390,22 @@ func (r *collectionReconciler) handleDeletion(ctx context.Context, rc *v1alpha1.
 		return ctrl.Result{}, nil
 	}
 
-	requested, err := r.isRequested(ctx, rc.Name)
+	requested, err := r.isReferencedByPlan(ctx, rc.Name)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if requested {
 		r.log.Info("collection still requested by DeploymentPlan, blocking deletion", "name", rc.Name)
 		return ctrl.Result{}, nil
+	}
+
+	isReferencedByAgent, err := r.isReferencedByAgent(ctx, rc.Name)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if isReferencedByAgent {
+		r.log.Info("collection still referenced by Agent, blocking deletion", "name", rc.Name)
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
 	referenced, err := r.isReferencedByCollection(ctx, rc.Name)
@@ -377,7 +443,7 @@ func (r *collectionReconciler) isReferencedByCollection(ctx context.Context, nam
 	return false, nil
 }
 
-func (r *collectionReconciler) isRequested(ctx context.Context, name string) (bool, error) {
+func (r *collectionReconciler) isReferencedByPlan(ctx context.Context, name string) (bool, error) {
 	var planList v1alpha1.DeploymentPlanList
 	if err := r.client.List(ctx, &planList); err != nil {
 		return false, fmt.Errorf("listing DeploymentPlan: %w", err)
@@ -390,6 +456,19 @@ func (r *collectionReconciler) isRequested(ctx context.Context, name string) (bo
 			if i < len(plan.Spec.Steps) && plan.Spec.Steps[i].Collection != nil && plan.Spec.Steps[i].Collection.Source == name {
 				return true, nil
 			}
+		}
+	}
+	return false, nil
+}
+
+func (r *collectionReconciler) isReferencedByAgent(ctx context.Context, name string) (bool, error) {
+	var agentList v1alpha1.AgentList
+	if err := r.client.List(ctx, &agentList); err != nil {
+		return false, fmt.Errorf("listing Agent: %w", err)
+	}
+	for _, agent := range agentList.Items {
+		if agent.Spec.Script.Collection == name {
+			return true, nil
 		}
 	}
 	return false, nil

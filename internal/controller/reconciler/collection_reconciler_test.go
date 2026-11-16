@@ -195,8 +195,251 @@ func TestCollectionSourceMissingSetsCondition(t *testing.T) {
 	var updated v1alpha1.ResourceCollection
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: "nonexistent-source"}, &updated))
 
-	cond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionApplied)
-	require.NotNil(t, cond, "Applied condition should be set")
-	assert.Equal(t, metav1.ConditionFalse, cond.Status)
-	assert.Equal(t, "SourceMissing", cond.Reason)
+	contentCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionContentReady)
+	require.NotNil(t, contentCond, "ContentReady should be set")
+	assert.Equal(t, metav1.ConditionFalse, contentCond.Status)
+	assert.Equal(t, "SourceMissing", contentCond.Reason)
+
+	appliedCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+	require.NotNil(t, appliedCond, "Applied should also be set for plan-referenced collection")
+	assert.Equal(t, metav1.ConditionFalse, appliedCond.Status)
+	assert.Equal(t, "SourceMissing", appliedCond.Reason)
+}
+
+func TestCollectionAgentOnlyGetsReadyWithoutApply(t *testing.T) {
+	rc := &v1alpha1.ResourceCollection{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "scripts-coll",
+			Finalizers: []string{collectionFinalizer},
+		},
+		Spec: v1alpha1.ResourceCollectionSpec{
+			Scripts: []v1alpha1.ScriptPackage{
+				{Name: "my-pkg", Inline: "code"},
+			},
+		},
+	}
+	agent := &v1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: "default"},
+		Spec: v1alpha1.AgentSpec{
+			Script: v1alpha1.AgentScriptRef{
+				Collection: "scripts-coll",
+				Package:    "my-pkg",
+			},
+		},
+	}
+	kc := &v1alpha1.KitCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+		Status: v1alpha1.KitClusterStatus{
+			Conditions: []metav1.Condition{
+				{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: "Ready"},
+			},
+		},
+	}
+
+	kubeClient := newCollectionClient(t, rc, agent, kc)
+	_, err := reconciler.NewCollectionReconciler(kubeClient, slog.New(slog.DiscardHandler), nil, nil, &stubScriptLoader{}, "", "", nil).
+		Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: "scripts-coll"},
+		})
+	require.NoError(t, err)
+
+	var updated v1alpha1.ResourceCollection
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: "scripts-coll"}, &updated))
+
+	contentCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionContentReady)
+	require.NotNil(t, contentCond, "ContentReady should be set for agent-only collection")
+	assert.Equal(t, metav1.ConditionTrue, contentCond.Status)
+	assert.Equal(t, "Ready", contentCond.Reason)
+
+	appliedCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+	assert.Nil(t, appliedCond, "Applied should not be set for agent-only collection")
+
+	assert.NotEmpty(t, updated.Status.ContentHash)
+}
+
+func TestCollectionSourceMissingViaAgent(t *testing.T) {
+	rc := &v1alpha1.ResourceCollection{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "missing-source",
+			Finalizers: []string{collectionFinalizer},
+		},
+		Spec: v1alpha1.ResourceCollectionSpec{
+			Source: "missing-source",
+		},
+	}
+	agent := &v1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: "default"},
+		Spec: v1alpha1.AgentSpec{
+			Script: v1alpha1.AgentScriptRef{
+				Collection: "missing-source",
+				Package:    "pkg",
+			},
+		},
+	}
+	kc := &v1alpha1.KitCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+		Status: v1alpha1.KitClusterStatus{
+			Conditions: []metav1.Condition{
+				{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: "Ready"},
+			},
+		},
+	}
+
+	kubeClient := newCollectionClient(t, rc, agent, kc)
+	_, err := reconciler.NewCollectionReconciler(kubeClient, slog.New(slog.DiscardHandler), nil, nil, &stubScriptLoader{}, t.TempDir(), "", nil).
+		Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: "missing-source"},
+		})
+	require.Error(t, err)
+
+	var updated v1alpha1.ResourceCollection
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: "missing-source"}, &updated))
+
+	contentCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionContentReady)
+	require.NotNil(t, contentCond, "ContentReady should report SourceMissing for agent-only collections")
+	assert.Equal(t, metav1.ConditionFalse, contentCond.Status)
+	assert.Equal(t, "SourceMissing", contentCond.Reason)
+
+	appliedCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+	assert.Nil(t, appliedCond, "Applied should not be set for agent-only collection")
+}
+
+func TestCollectionAgentOnlyRecoverFromSourceMissing(t *testing.T) {
+	// Compute the actual combined hash that the reconciler will produce.
+	combinedHash, err := collection.CombineContentHash(collection.ContentHashComponents{
+		RenderHash:        collection.EmptyHash,
+		ScriptHash:        collection.EmptyHash,
+		StatusPatchesHash: collection.EmptyHash,
+	})
+	require.NoError(t, err)
+
+	rc := &v1alpha1.ResourceCollection{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "scripts-coll",
+			Finalizers: []string{collectionFinalizer},
+		},
+		Spec: v1alpha1.ResourceCollectionSpec{
+			Scripts: []v1alpha1.ScriptPackage{
+				{Name: "my-pkg", Inline: "code"},
+			},
+		},
+		Status: v1alpha1.ResourceCollectionStatus{
+			ContentHash: combinedHash,
+			Conditions: []metav1.Condition{
+				{
+					Type:   v1alpha1.ConditionCollectionContentReady,
+					Status: metav1.ConditionFalse,
+					Reason: "SourceMissing",
+				},
+			},
+		},
+	}
+	agent := &v1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: "default"},
+		Spec: v1alpha1.AgentSpec{
+			Script: v1alpha1.AgentScriptRef{
+				Collection: "scripts-coll",
+				Package:    "my-pkg",
+			},
+		},
+	}
+	kc := &v1alpha1.KitCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+		Status: v1alpha1.KitClusterStatus{
+			Conditions: []metav1.Condition{
+				{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: "Ready"},
+			},
+		},
+	}
+
+	kubeClient := newCollectionClient(t, rc, agent, kc)
+	_, err = reconciler.NewCollectionReconciler(kubeClient, slog.New(slog.DiscardHandler), nil, nil, &stubScriptLoader{}, "", "", nil).
+		Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: "scripts-coll"},
+		})
+	require.NoError(t, err)
+
+	var updated v1alpha1.ResourceCollection
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: "scripts-coll"}, &updated))
+
+	contentCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionContentReady)
+	require.NotNil(t, contentCond, "ContentReady should be updated after recovery")
+	assert.Equal(t, metav1.ConditionTrue, contentCond.Status)
+	assert.Equal(t, "Ready", contentCond.Reason)
+}
+
+func TestCollectionAgentOnlyToPlanTriggersApply(t *testing.T) {
+	combinedHash, err := collection.CombineContentHash(collection.ContentHashComponents{
+		RenderHash:        collection.EmptyHash,
+		ScriptHash:        collection.EmptyHash,
+		StatusPatchesHash: collection.EmptyHash,
+	})
+	require.NoError(t, err)
+
+	rc := &v1alpha1.ResourceCollection{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "scripts-coll",
+			Finalizers: []string{collectionFinalizer},
+		},
+		Spec: v1alpha1.ResourceCollectionSpec{
+			Scripts: []v1alpha1.ScriptPackage{
+				{Name: "my-pkg", Inline: "code"},
+			},
+		},
+		Status: v1alpha1.ResourceCollectionStatus{
+			ContentHash: combinedHash,
+			Conditions: []metav1.Condition{
+				{
+					Type:   v1alpha1.ConditionCollectionContentReady,
+					Status: metav1.ConditionTrue,
+					Reason: "Ready",
+				},
+			},
+		},
+	}
+	agent := &v1alpha1.Agent{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: "default"},
+		Spec: v1alpha1.AgentSpec{
+			Script: v1alpha1.AgentScriptRef{
+				Collection: "scripts-coll",
+				Package:    "my-pkg",
+			},
+		},
+	}
+	plan := &v1alpha1.DeploymentPlan{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-plan"},
+		Spec: v1alpha1.DeploymentPlanSpec{
+			Steps: []v1alpha1.DeploymentStep{
+				{Name: "step-1", Collection: &v1alpha1.CollectionStep{Source: "scripts-coll"}},
+			},
+		},
+		Status: v1alpha1.DeploymentPlanStatus{
+			Steps: []v1alpha1.DeploymentStepStatus{
+				{Name: "step-1", Phase: v1alpha1.StepRequested},
+			},
+		},
+	}
+	kc := &v1alpha1.KitCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-cluster"},
+		Status: v1alpha1.KitClusterStatus{
+			Conditions: []metav1.Condition{
+				{Type: v1alpha1.ConditionReady, Status: metav1.ConditionTrue, Reason: "Ready"},
+			},
+		},
+	}
+
+	kubeClient := newCollectionClient(t, rc, agent, plan, kc)
+	_, err = reconciler.NewCollectionReconciler(kubeClient, slog.New(slog.DiscardHandler), nil, nil, &stubScriptLoader{}, "", "", nil).
+		Reconcile(context.Background(), ctrl.Request{
+			NamespacedName: types.NamespacedName{Name: "scripts-coll"},
+		})
+	require.NoError(t, err)
+
+	var updated v1alpha1.ResourceCollection
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: "scripts-coll"}, &updated))
+
+	appliedCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+	require.NotNil(t, appliedCond, "Applied should be set after plan requests the collection")
+	assert.Equal(t, metav1.ConditionTrue, appliedCond.Status)
+	assert.Equal(t, "Applied", appliedCond.Reason)
 }

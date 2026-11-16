@@ -52,6 +52,10 @@ func (c *Collection) Name() string {
 	return c.name
 }
 
+func NewEmpty(name string) *Collection {
+	return &Collection{name: name}
+}
+
 // BuiltinNames returns the names of all embedded builtin collections.
 func BuiltinNames() []string {
 	entries, err := fs.ReadDir(builtinFS, "builtin")
@@ -75,6 +79,9 @@ var ErrSourceMissing = errors.New("collection source not found")
 // subdirectory matching name, it takes precedence over the embedded builtins.
 // Returns ErrSourceMissing when neither user nor builtin source exists.
 func Load(name string, userFS fs.FS, funcMap template.FuncMap) (*Collection, error) {
+	if name == "" {
+		return nil, fmt.Errorf("collection name must not be empty")
+	}
 	if userFS != nil {
 		sub, err := fs.Sub(userFS, name)
 		if err == nil {
