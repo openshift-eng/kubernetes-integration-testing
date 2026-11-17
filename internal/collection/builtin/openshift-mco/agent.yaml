@@ -1,10 +1,14 @@
 apiVersion: kit.openshift.io/v1alpha1
-kind: WorkloadOverride
+kind: Agent
 metadata:
-  name: suppress-machine-config-daemon
+  name: mcd-agent
 spec:
-  match:
+  target:
     namespace: openshift-machine-config-operator
+    replace: pod
     labels:
       k8s-app: machine-config-daemon
-  noOp: true
+  runtime: js
+  script:
+    collection: openshift-mco
+    package: mcd-agent

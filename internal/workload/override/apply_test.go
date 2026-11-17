@@ -9,6 +9,8 @@ import (
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -300,6 +302,220 @@ func TestApplyContainerOverridesValidation(t *testing.T) {
 	})
 }
 
+func TestApplyReplacePod(t *testing.T) {
+	rp := &v1alpha1.PodReplacement{
+		Name:    "agent",
+		Image:   "quay.io/kit-agent:latest",
+		Command: []string{"/kit-agent"},
+		Args:    []string{"--bundle=/tmp/bundle"},
+		Env: []corev1.EnvVar{
+			{Name: "KIT_AGENT_BUNDLE_URL", Value: "http://controller:8082/agents/test/bundle"},
+		},
+		PullPolicy: corev1.PullAlways,
+	}
+
+	t.Run("replaces all containers with single agent container", func(t *testing.T) {
+		pod := &corev1.Pod{
+			Spec: corev1.PodSpec{
+				InitContainers: []corev1.Container{
+					{Name: "init", Image: "init:latest"},
+				},
+				Containers: []corev1.Container{
+					{Name: "main", Image: "main:latest"},
+					{Name: "sidecar", Image: "sidecar:latest"},
+				},
+			},
+		}
+
+		ApplyReplacePod(pod, rp)
+
+		assert.Empty(t, pod.Spec.InitContainers)
+		require.Len(t, pod.Spec.Containers, 1)
+		c := pod.Spec.Containers[0]
+		assert.Equal(t, "agent", c.Name)
+		assert.Equal(t, "quay.io/kit-agent:latest", c.Image)
+		assert.Equal(t, []string{"/kit-agent"}, c.Command)
+		assert.Equal(t, []string{"--bundle=/tmp/bundle"}, c.Args)
+		assert.Equal(t, corev1.PullAlways, c.ImagePullPolicy)
+		require.Len(t, c.Env, 1)
+		assert.Equal(t, "KIT_AGENT_BUNDLE_URL", c.Env[0].Name)
+	})
+
+	t.Run("omitted pull policy keeps container default", func(t *testing.T) {
+		pod := podWithContainers("main", "main:latest")
+		rp := &v1alpha1.PodReplacement{Name: "agent", Image: "img:v1"}
+		ApplyReplacePod(pod, rp)
+		assert.Equal(t, corev1.PullPolicy(""), pod.Spec.Containers[0].ImagePullPolicy)
+	})
+
+	t.Run("does not touch service account", func(t *testing.T) {
+		pod := podWithContainers("main", "main:latest")
+		pod.Spec.ServiceAccountName = "original"
+		rp := &v1alpha1.PodReplacement{Name: "agent", Image: "img:v1"}
+		ApplyReplacePod(pod, rp)
+		assert.Equal(t, "original", pod.Spec.ServiceAccountName)
+	})
+}
+
+// TestApplyReplacePodIsIdempotentAfterDefaulting verifies the ownership
+// contract of ApplyReplacePod: differences limited to unmanaged fields do not
+// rebuild an already-applied replacement, while any change to a managed field
+// or to the shape of a managed collection does.
+func TestApplyReplacePodIsIdempotentAfterDefaulting(t *testing.T) {
+	rp := &v1alpha1.PodReplacement{
+		Name:    "agent",
+		Image:   "quay.io/kit-agent:latest",
+		Command: []string{"/usr/bin/kit-agent"},
+		Args:    []string{"--bundle=/tmp/bundle"},
+		Env: []corev1.EnvVar{{
+			Name:  "KIT_AGENT_BUNDLE_URL",
+			Value: "http://controller:8082/bundle",
+		}, {
+			Name: "KIT_POD_NAME",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+			},
+		}, {
+			Name: "KIT_CPU_LIMIT",
+			ValueFrom: &corev1.EnvVarSource{
+				ResourceFieldRef: &corev1.ResourceFieldSelector{
+					Resource: "limits.cpu",
+					Divisor:  resource.MustParse("1"),
+				},
+			},
+		}},
+		PullPolicy: corev1.PullAlways,
+	}
+
+	// 1. Apply once and verify that the managed fields change the Pod.
+	pod := podWithContainers("main", "main:latest")
+	originalPod := pod.DeepCopy()
+	ApplyReplacePod(pod, rp)
+
+	// The PodReplacement has been applied, so the workload must have changed.
+	assert.False(t, equality.Semantic.DeepEqual(originalPod.Spec, pod.Spec))
+
+	// 2. Add representative values to fields that the replacement does not
+	// manage. This simulates Kubernetes injecting defaults after a Pod is stored.
+	container := &pod.Spec.Containers[0]
+	container.TerminationMessagePath = "/dev/termination-log"
+	container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
+	envByName(t, container.Env, "KIT_POD_NAME").ValueFrom.FieldRef.APIVersion = "v1"
+	envByName(t, container.Env, "KIT_CPU_LIMIT").ValueFrom.ResourceFieldRef.ContainerName = "agent"
+	before := pod.DeepCopy()
+
+	// Apply again: the Pod must remain unchanged because only unmanaged fields
+	// were modified.
+	ApplyReplacePod(pod, rp)
+	assert.True(t, equality.Semantic.DeepEqual(before.Spec, pod.Spec))
+
+	// 3. An extra entry changes the shape of a managed collection and must be
+	// removed when the replacement is reapplied.
+	pod.Spec.Containers[0].Env = append(
+		pod.Spec.Containers[0].Env,
+		corev1.EnvVar{Name: "KIT_UNEXPECTED", Value: "unexpected"},
+	)
+	ApplyReplacePod(pod, rp)
+	assert.Len(t, pod.Spec.Containers[0].Env, len(rp.Env))
+	for _, env := range pod.Spec.Containers[0].Env {
+		assert.NotEqual(t, "KIT_UNEXPECTED", env.Name)
+	}
+
+	// 4. Changes to managed fields must also be repaired.
+	pod.Spec.Containers[0].Command = []string{"/hacked"}
+	envByName(t, pod.Spec.Containers[0].Env, "KIT_AGENT_BUNDLE_URL").Value = "http://hacked/bundle"
+	ApplyReplacePod(pod, rp)
+	assert.Equal(t, rp.Command, pod.Spec.Containers[0].Command)
+	assertEnv(t, pod.Spec.Containers[0].Env, "KIT_AGENT_BUNDLE_URL", "http://controller:8082/bundle")
+}
+
+func TestApplyReplacePodIntegration(t *testing.T) {
+	overrides := []v1alpha1.WorkloadOverride{
+		{
+			ObjectMeta: metav1.ObjectMeta{Name: "replace-mcd"},
+			Spec: v1alpha1.WorkloadOverrideSpec{
+				Match: v1alpha1.WorkloadOverrideMatch{Namespace: "openshift-mco"},
+				ReplacePod: &v1alpha1.PodReplacement{
+					Name:  "agent",
+					Image: "quay.io/kit-agent:latest",
+				},
+			},
+		},
+	}
+
+	t.Run("Apply dispatches to replacePod", func(t *testing.T) {
+		pod := podWithContainers("mcd", "mcd:real")
+		r := Apply(pod, overrides, "openshift-mco")
+		require.Equal(t, Applied, r.Outcome)
+		assert.Equal(t, "replace-mcd", r.Override.Name)
+		require.Len(t, pod.Spec.Containers, 1)
+		assert.Equal(t, "agent", pod.Spec.Containers[0].Name)
+	})
+}
+
+func TestApplyServiceAccountName(t *testing.T) {
+	t.Run("sets SA with containers mode", func(t *testing.T) {
+		overrides := []v1alpha1.WorkloadOverride{{
+			ObjectMeta: metav1.ObjectMeta{Name: "sa-override"},
+			Spec: v1alpha1.WorkloadOverrideSpec{
+				Match:              v1alpha1.WorkloadOverrideMatch{Namespace: "ns"},
+				Containers:         []v1alpha1.ContainerOverride{{Name: "app", Image: "new:v1"}},
+				ServiceAccountName: "kit-stub",
+			},
+		}}
+		pod := podWithContainers("app", "old:v1")
+		r := Apply(pod, overrides, "ns")
+		require.Equal(t, Applied, r.Outcome)
+		assert.Equal(t, "kit-stub", pod.Spec.ServiceAccountName)
+		assert.Equal(t, "new:v1", pod.Spec.Containers[0].Image)
+	})
+
+	t.Run("sets SA with replacePod mode", func(t *testing.T) {
+		overrides := []v1alpha1.WorkloadOverride{{
+			ObjectMeta: metav1.ObjectMeta{Name: "sa-replace"},
+			Spec: v1alpha1.WorkloadOverrideSpec{
+				Match:              v1alpha1.WorkloadOverrideMatch{Namespace: "ns"},
+				ReplacePod:         &v1alpha1.PodReplacement{Name: "agent", Image: "agent:v1"},
+				ServiceAccountName: "kit-agent",
+			},
+		}}
+		pod := podWithContainers("app", "old:v1")
+		r := Apply(pod, overrides, "ns")
+		require.Equal(t, Applied, r.Outcome)
+		assert.Equal(t, "kit-agent", pod.Spec.ServiceAccountName)
+	})
+
+	t.Run("sets SA with noOp mode", func(t *testing.T) {
+		overrides := []v1alpha1.WorkloadOverride{{
+			ObjectMeta: metav1.ObjectMeta{Name: "sa-noop"},
+			Spec: v1alpha1.WorkloadOverrideSpec{
+				Match:              v1alpha1.WorkloadOverrideMatch{Namespace: "ns"},
+				NoOp:               true,
+				ServiceAccountName: "kit-noop-sa",
+			},
+		}}
+		pod := podWithContainers("app", "old:v1")
+		r := Apply(pod, overrides, "ns")
+		require.Equal(t, Applied, r.Outcome)
+		assert.Equal(t, "kit-noop-sa", pod.Spec.ServiceAccountName)
+	})
+
+	t.Run("omitted SA preserves original", func(t *testing.T) {
+		overrides := []v1alpha1.WorkloadOverride{{
+			ObjectMeta: metav1.ObjectMeta{Name: "no-sa"},
+			Spec: v1alpha1.WorkloadOverrideSpec{
+				Match:      v1alpha1.WorkloadOverrideMatch{Namespace: "ns"},
+				Containers: []v1alpha1.ContainerOverride{{Name: "app", Image: "new:v1"}},
+			},
+		}}
+		pod := podWithContainers("app", "old:v1")
+		pod.Spec.ServiceAccountName = "original"
+		r := Apply(pod, overrides, "ns")
+		require.Equal(t, Applied, r.Outcome)
+		assert.Equal(t, "original", pod.Spec.ServiceAccountName)
+	})
+}
+
 func TestIsNoOp(t *testing.T) {
 	t.Run("canonical noOp pod", func(t *testing.T) {
 		pod := podWithContainers("original", "original:latest")
@@ -346,4 +562,15 @@ func assertEnv(t *testing.T, envs []corev1.EnvVar, name, value string) {
 		}
 	}
 	t.Errorf("env %s not found", name)
+}
+
+func envByName(t *testing.T, envs []corev1.EnvVar, name string) *corev1.EnvVar {
+	t.Helper()
+	for i := range envs {
+		if envs[i].Name == name {
+			return &envs[i]
+		}
+	}
+	t.Fatalf("env %s not found", name)
+	return nil
 }

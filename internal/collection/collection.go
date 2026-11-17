@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -51,6 +52,10 @@ func (c *Collection) Name() string {
 	return c.name
 }
 
+func NewEmpty(name string) *Collection {
+	return &Collection{name: name}
+}
+
 // BuiltinNames returns the names of all embedded builtin collections.
 func BuiltinNames() []string {
 	entries, err := fs.ReadDir(builtinFS, "builtin")
@@ -66,28 +71,57 @@ func BuiltinNames() []string {
 	return names
 }
 
+// ErrSourceMissing indicates that neither user-provided nor builtin source
+// exists for a collection. Callers can check with errors.Is.
+var ErrSourceMissing = errors.New("collection source not found")
+
 // Load resolves a collection by name. If userFS is non-nil and contains a
 // subdirectory matching name, it takes precedence over the embedded builtins.
-// An optional funcMap registers custom template functions available during rendering.
+// Returns ErrSourceMissing when neither user nor builtin source exists.
 func Load(name string, userFS fs.FS, funcMap template.FuncMap) (*Collection, error) {
+	if name == "" {
+		return nil, fmt.Errorf("collection name must not be empty")
+	}
+	resolved, err := resolveCollectionFS(name, userFS)
+	if err != nil {
+		return nil, err
+	}
+	return loadFromFS(name, resolved, funcMap)
+}
+
+// resolveCollectionFS returns the filesystem for a collection source. If
+// userFS is non-nil and contains a non-empty subdirectory matching name,
+// it wins; otherwise the embedded builtins are tried. Returns
+// ErrSourceMissing when neither source exists.
+func resolveCollectionFS(name string, userFS fs.FS) (fs.FS, error) {
 	if userFS != nil {
 		sub, err := fs.Sub(userFS, name)
 		if err == nil {
-			if entries, err := fs.ReadDir(sub, "."); err == nil && len(entries) > 0 {
-				return loadFromFS(name, sub, funcMap)
+			entries, err := fs.ReadDir(sub, ".")
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return nil, fmt.Errorf("reading collection %q: %w", name, err)
+			}
+			if len(entries) > 0 {
+				return sub, nil
 			}
 		}
 	}
 	sub, err := fs.Sub(builtinFS, filepath.Join("builtin", name))
 	if err != nil {
-		return nil, fmt.Errorf("collection %q not found: %w", name, err)
+		return nil, fmt.Errorf("collection %q: %w", name, ErrSourceMissing)
 	}
-	return loadFromFS(name, sub, funcMap)
+	if entries, err := fs.ReadDir(sub, "."); err != nil || len(entries) == 0 {
+		return nil, fmt.Errorf("collection %q: %w", name, ErrSourceMissing)
+	}
+	return sub, nil
 }
 
 // LoadInline creates a collection from inline template content.
 // An optional funcMap registers custom template functions available during rendering.
 func LoadInline(name string, contents []string, funcMap template.FuncMap) (*Collection, error) {
+	if len(contents) == 0 {
+		return nil, fmt.Errorf("collection %q has no inline templates", name)
+	}
 	templates := make(map[string]*template.Template)
 	for i, content := range contents {
 		key := fmt.Sprintf("inline-%d", i)
@@ -96,9 +130,6 @@ func LoadInline(name string, contents []string, funcMap template.FuncMap) (*Coll
 			return nil, fmt.Errorf("parsing inline template %d: %w", i, err)
 		}
 		templates[key] = tmpl
-	}
-	if len(templates) == 0 {
-		return nil, fmt.Errorf("collection %q has no templates", name)
 	}
 	return &Collection{name: name, templates: templates}, nil
 }
@@ -208,10 +239,6 @@ func loadFromFS(name string, fsys fs.FS, funcMap template.FuncMap) (*Collection,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("loading collection %q: %w", name, err)
-	}
-
-	if len(templates) == 0 {
-		return nil, fmt.Errorf("collection %q has no templates", name)
 	}
 
 	return &Collection{name: name, templates: templates}, nil

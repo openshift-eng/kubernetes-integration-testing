@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/agent/bundle"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/bootstrap"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/cert"
+	agentctl "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/common"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/pod"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/reconciler"
@@ -14,6 +17,7 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/podman"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/pullsecret"
+	"github.com/spf13/afero"
 )
 
 func Run(ctx context.Context, log *slog.Logger, cfg common.Config) error {
@@ -39,32 +43,60 @@ func Run(ctx context.Context, log *slog.Logger, cfg common.Config) error {
 
 	certProvider := cert.NewProvider(clients.Clientset, bootstrap.Namespace, reconciler.NewCACallback(clients.Client, log))
 
+	bundleStore, err := bundle.NewBundleStore(afero.NewOsFs(), filepath.Join(cfg.CacheDir, "bundles"), log)
+	if err != nil {
+		return fmt.Errorf("creating bundle store: %w", err)
+	}
+
 	shutdowner := common.NewDeferredShutdowner(ctx)
-	if err := reconciler.Start(shutdowner.Context(), log, bd, clients, cfg, registry, certProvider, shutdowner); err != nil {
+	runCtx := shutdowner.Context()
+
+	bundleSrv := bundle.NewServer(bundleStore, cfg.BundleServerAddr, log)
+
+	go func() {
+		if err := bundleSrv.Start(runCtx); err != nil && runCtx.Err() == nil {
+			shutdowner.ShutdownWithError(fmt.Errorf("bundle server: %w", err))
+		}
+	}()
+
+	if err := bundleSrv.WaitReady(runCtx); err != nil {
+		return fmt.Errorf("waiting for bundle server: %w", err)
+	}
+
+	if err := reconciler.Start(runCtx, log, bd, clients, cfg, registry, certProvider, shutdowner, bundleStore, []common.ReadyzChecker{bundleSrv}); err != nil {
 		return fmt.Errorf("starting reconciler: %w", err)
 	}
+
+	go bundleStore.RunGC(runCtx, bundle.DefaultGCConfig(), agentctl.ProtectedBundleState(clients.Client))
 
 	var runner pod.PodRunner
 	if bd.KitCluster.Spec.Provider == "kwok" {
 		var err error
-		runner, err = runPodController(ctx, log, cfg, bd.ClusterConfig, &ps, clients)
+		runner, err = runPodController(runCtx, log, cfg, bd.ClusterConfig, &ps, clients, shutdowner)
 		if err != nil {
 			return fmt.Errorf("starting pod controller: %w", err)
 		}
 	}
 
 	log.Info("controller started", "cluster", bd.KitCluster.Name, "provider", bd.KitCluster.Spec.Provider)
-	<-ctx.Done()
-	log.Info("shutting down")
+	<-runCtx.Done()
+
+	if err := shutdowner.Failure(); err != nil {
+		log.Error("controller stopped by internal failure", "error", err)
+		return err
+	}
 
 	if shutdowner.IsDeleting() && runner != nil {
 		runner.Teardown()
 	}
 
+	log.Info("waiting for host termination")
+	<-ctx.Done()
+
 	return nil
 }
 
-func runPodController(ctx context.Context, log *slog.Logger, cfg common.Config, clusterCfg *bootstrap.ClusterConfig, ps *pullsecret.PullSecret, clients *kube.Clients) (pod.PodRunner, error) {
+func runPodController(ctx context.Context, log *slog.Logger, cfg common.Config, clusterCfg *bootstrap.ClusterConfig, ps *pullsecret.PullSecret, clients *kube.Clients, shutdowner common.Shutdowner) (pod.PodRunner, error) {
 	var podmanClient podman.Client
 	if cfg.PodmanSocket != "" {
 		podmanClient = podman.NewRemoteClient(cfg.PodmanSocket)
@@ -88,8 +120,9 @@ func runPodController(ctx context.Context, log *slog.Logger, cfg common.Config, 
 
 	ctrl := pod.NewController(clients, runner, log)
 	go func() {
-		if err := ctrl.Run(ctx); err != nil {
+		if err := ctrl.Run(ctx); err != nil && ctx.Err() == nil {
 			log.Error("pod controller stopped", "error", err)
+			shutdowner.ShutdownWithError(fmt.Errorf("pod controller: %w", err))
 		}
 	}()
 

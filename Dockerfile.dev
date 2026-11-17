@@ -1,4 +1,5 @@
 FROM quay.io/centos/centos:stream9-minimal
 RUN microdnf install -y podman-remote curl && microdnf clean all
 COPY bin/kit-controller /usr/bin/kit-controller
+COPY bin/kit-agent /usr/bin/kit-agent
 ENTRYPOINT ["/usr/bin/kit-controller"]

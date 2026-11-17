@@ -255,6 +255,153 @@ func TestWorkloadOverrideReconcileNoOpPending(t *testing.T) {
 	assertPodNotFound(t, kubeClient, pod)
 }
 
+// TestWorkloadOverrideReconcileReplacePodApplied verifies that a Pod already
+// matching the full replacement shape is counted as applied without deletion.
+func TestWorkloadOverrideReconcileReplacePodApplied(t *testing.T) {
+	wo := newWorkloadOverride("override", matchByApp("app"), nil)
+	wo.Spec.ReplacePod = &v1alpha1.PodReplacement{
+		Name:    "agent",
+		Image:   "quay.io/kit-agent:latest",
+		Command: []string{"/kit-agent"},
+		Args:    []string{"--bundle=/tmp/b"},
+	}
+	wo.Spec.ServiceAccountName = "kit-agent-test"
+	pod := newPod("pod", "default", map[string]string{"app": "app"}, "", true)
+	override.ApplyReplacePod(pod, wo.Spec.ReplacePod)
+	pod.Spec.ServiceAccountName = "kit-agent-test"
+
+	kubeClient := newWorkloadOverrideClient(t, wo, pod)
+	reconcileWorkloadOverride(t, kubeClient, wo.Name)
+
+	status := getWorkloadOverrideStatus(t, kubeClient, wo.Name)
+	assert.Equal(t, int32(1), status.MatchedPods)
+	assert.Equal(t, int32(1), status.AppliedPods)
+	assertWorkloadOverrideCondition(t, status, metav1.ConditionTrue, "Applied")
+	assertPodUnchanged(t, kubeClient, pod)
+}
+
+// TestWorkloadOverrideReconcileReplacePodAppliedAfterDefaulting verifies that
+// API-server defaults do not make an admitted replacement look pending.
+func TestWorkloadOverrideReconcileReplacePodAppliedAfterDefaulting(t *testing.T) {
+	wo := newWorkloadOverride("override", matchByApp("app"), nil)
+	wo.Spec.ReplacePod = &v1alpha1.PodReplacement{
+		Name:    "agent",
+		Image:   "localhost/kit-controller:latest",
+		Command: []string{"/usr/bin/kit-agent"},
+		Env: []corev1.EnvVar{{
+			Name: "KIT_POD_NAME",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+			},
+		}},
+	}
+	wo.Spec.ServiceAccountName = "kit-agent-test"
+
+	pod := newPod("pod", "default", map[string]string{"app": "app"}, "", true)
+	override.ApplyReplacePod(pod, wo.Spec.ReplacePod)
+	pod.Spec.ServiceAccountName = "kit-agent-test"
+
+	container := &pod.Spec.Containers[0]
+	container.ImagePullPolicy = corev1.PullIfNotPresent
+	container.TerminationMessagePath = "/dev/termination-log"
+	container.TerminationMessagePolicy = corev1.TerminationMessageReadFile
+	container.Env[0].ValueFrom.FieldRef.APIVersion = "v1"
+
+	kubeClient := newWorkloadOverrideClient(t, wo, pod)
+	reconcileWorkloadOverride(t, kubeClient, wo.Name)
+
+	status := getWorkloadOverrideStatus(t, kubeClient, wo.Name)
+	assert.Equal(t, int32(1), status.MatchedPods)
+	assert.Equal(t, int32(1), status.AppliedPods)
+	assertWorkloadOverrideCondition(t, status, metav1.ConditionTrue, "Applied")
+	assertPodUnchanged(t, kubeClient, pod)
+}
+
+// TestWorkloadOverrideReconcileReplacePodPending verifies that a Pod with
+// original containers is deleted so admission can replace it.
+func TestWorkloadOverrideReconcileReplacePodPending(t *testing.T) {
+	wo := newWorkloadOverride("override", matchByApp("app"), nil)
+	wo.Spec.ReplacePod = &v1alpha1.PodReplacement{
+		Name:  "agent",
+		Image: "quay.io/kit-agent:latest",
+	}
+	pod := newPod("pod", "default", map[string]string{"app": "app"}, "registry.example/old-image", true)
+
+	kubeClient := newWorkloadOverrideClient(t, wo, pod)
+	reconcileWorkloadOverride(t, kubeClient, wo.Name)
+
+	status := getWorkloadOverrideStatus(t, kubeClient, wo.Name)
+	assert.Equal(t, int32(1), status.MatchedPods)
+	assert.Equal(t, int32(0), status.AppliedPods)
+	assertWorkloadOverrideCondition(t, status, metav1.ConditionFalse, "PendingApplication")
+	assertPodNotFound(t, kubeClient, pod)
+}
+
+// TestWorkloadOverrideReconcileReplacePodUnsupported verifies that a standalone
+// Pod (no controller owner) is not deleted even when replacement is pending.
+func TestWorkloadOverrideReconcileReplacePodUnsupported(t *testing.T) {
+	wo := newWorkloadOverride("override", matchByApp("app"), nil)
+	wo.Spec.ReplacePod = &v1alpha1.PodReplacement{
+		Name:  "agent",
+		Image: "quay.io/kit-agent:latest",
+	}
+	pod := newPod("pod", "default", map[string]string{"app": "app"}, "registry.example/old-image", false)
+
+	kubeClient := newWorkloadOverrideClient(t, wo, pod)
+	reconcileWorkloadOverride(t, kubeClient, wo.Name)
+
+	status := getWorkloadOverrideStatus(t, kubeClient, wo.Name)
+	assert.Equal(t, int32(1), status.MatchedPods)
+	assert.Equal(t, int32(0), status.AppliedPods)
+	assertWorkloadOverrideCondition(t, status, metav1.ConditionFalse, "RecreationUnsupported")
+	assertPodUnchanged(t, kubeClient, pod)
+}
+
+// TestWorkloadOverrideReconcileReplacePodDriftDetected verifies that a
+// previously replaced Pod whose command has been patched is detected as
+// pending, not applied.
+func TestWorkloadOverrideReconcileReplacePodDriftDetected(t *testing.T) {
+	wo := newWorkloadOverride("override", matchByApp("app"), nil)
+	wo.Spec.ReplacePod = &v1alpha1.PodReplacement{
+		Name:    "agent",
+		Image:   "quay.io/kit-agent:latest",
+		Command: []string{"/kit-agent"},
+	}
+	pod := newPod("pod", "default", map[string]string{"app": "app"}, "", true)
+	override.ApplyReplacePod(pod, wo.Spec.ReplacePod)
+	// Simulate external mutation: command changed after replacement.
+	pod.Spec.Containers[0].Command = []string{"/hacked"}
+
+	kubeClient := newWorkloadOverrideClient(t, wo, pod)
+	reconcileWorkloadOverride(t, kubeClient, wo.Name)
+
+	status := getWorkloadOverrideStatus(t, kubeClient, wo.Name)
+	assert.Equal(t, int32(1), status.MatchedPods)
+	assert.Equal(t, int32(0), status.AppliedPods)
+	assertWorkloadOverrideCondition(t, status, metav1.ConditionFalse, "PendingApplication")
+	assertPodNotFound(t, kubeClient, pod)
+}
+
+// TestWorkloadOverrideReconcileServiceAccountDrift verifies that a Pod with
+// the correct container shape but wrong service account is detected as pending.
+func TestWorkloadOverrideReconcileServiceAccountDrift(t *testing.T) {
+	wo := newWorkloadOverride("override", matchByApp("app"), []v1alpha1.ContainerOverride{
+		{Name: "app", Image: "registry.example/new-image"},
+	})
+	wo.Spec.ServiceAccountName = "kit-stub"
+	pod := newPod("pod", "default", map[string]string{"app": "app"}, "registry.example/new-image", true)
+	pod.Spec.ServiceAccountName = "wrong-sa"
+
+	kubeClient := newWorkloadOverrideClient(t, wo, pod)
+	reconcileWorkloadOverride(t, kubeClient, wo.Name)
+
+	status := getWorkloadOverrideStatus(t, kubeClient, wo.Name)
+	assert.Equal(t, int32(1), status.MatchedPods)
+	assert.Equal(t, int32(0), status.AppliedPods)
+	assertWorkloadOverrideCondition(t, status, metav1.ConditionFalse, "PendingApplication")
+	assertPodNotFound(t, kubeClient, pod)
+}
+
 // TestWorkloadOverrideReconcileExcludesTerminalPods verifies that succeeded
 // and failed Pods do not affect live override counts or remediation.
 func TestWorkloadOverrideReconcileExcludesTerminalPods(t *testing.T) {

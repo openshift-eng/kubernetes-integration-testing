@@ -3,12 +3,12 @@ package reconciler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"text/template"
 	"time"
 
@@ -18,16 +18,14 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 	collcel "github.com/openshift-eng/kubernetes-integration-testing/internal/collection/cel"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/dynutil"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/release"
 
-	"github.com/fsnotify/fsnotify"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/client-go/discovery"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/restmapper"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,15 +37,34 @@ import (
 
 const collectionFinalizer = "kit.openshift.io/collection-protection"
 
+// ScriptPackageLoader loads script packages and computes content hashes
+// for a collection and its transitive dependencies.
+type ScriptPackageLoader interface {
+	Load(ctx context.Context, collectionName string, resolver collection.ScriptCollectionResolver) (*collection.LoadResult, error)
+}
+
 type collectionReconciler struct {
 	client         client.Client
-	dynClient      dynamic.Interface
-	discovery      discovery.DiscoveryInterface
+	clients        *kube.Clients
 	release        *release.ReleaseManifests
+	scriptLoader   ScriptPackageLoader
 	collectionsDir string
 	pullSecret     string
 	certProvider   *cert.Provider
 	log            *slog.Logger
+}
+
+func NewCollectionReconciler(c client.Client, log *slog.Logger, clients *kube.Clients, release *release.ReleaseManifests, scriptLoader ScriptPackageLoader, collectionsDir string, pullSecret string, certProvider *cert.Provider) *collectionReconciler {
+	return &collectionReconciler{
+		client:         c,
+		clients:        clients,
+		release:        release,
+		scriptLoader:   scriptLoader,
+		collectionsDir: collectionsDir,
+		pullSecret:     pullSecret,
+		certProvider:   certProvider,
+		log:            log,
+	}
 }
 
 func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -68,11 +85,15 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	requested, err := r.isRequested(ctx, rc.Name)
+	isReferencedByPlan, err := r.isReferencedByPlan(ctx, rc.Name)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if !requested {
+	isReferencedByAgent, err := r.isReferencedByAgent(ctx, rc.Name)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if !isReferencedByPlan && !isReferencedByAgent {
 		return ctrl.Result{}, nil
 	}
 
@@ -86,59 +107,118 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	kc := kcList.Items[0]
 
 	if !meta.IsStatusConditionTrue(kc.Status.Conditions, v1alpha1.ConditionReady) {
-		r.log.Info("KitCluster not ready, deferring collection apply", "name", rc.Name)
+		r.log.Info("KitCluster not ready, deferring collection reconcile", "name", rc.Name)
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
 	renderResult, err := r.render(&rc, &kc)
 	if err != nil {
-		r.setCollectionCondition(&rc, metav1.ConditionFalse, "RenderFailed", err.Error())
+		reason := "RenderFailed"
+		if errors.Is(err, collection.ErrSourceMissing) {
+			reason = "SourceMissing"
+		}
+		r.setContentConditions(&rc, isReferencedByPlan,
+			metav1.ConditionFalse, reason, err.Error())
 		return ctrl.Result{}, err
 	}
 
-	if rc.Status.ContentHash == renderResult.Hash &&
-		rc.Status.ContentHash != "" {
-		appliedCond := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionApplied)
-		if appliedCond != nil && appliedCond.Status == metav1.ConditionTrue &&
-			appliedCond.ObservedGeneration == rc.Generation {
-			return ctrl.Result{}, nil
+	contentHash, err := r.computeContentHash(ctx, &rc, renderResult.Hash)
+	if err != nil {
+		reason := "HashFailed"
+		if errors.Is(err, collection.ErrSourceMissing) {
+			reason = "SourceMissing"
+		}
+		r.setContentConditions(&rc, isReferencedByPlan,
+			metav1.ConditionFalse, reason, err.Error())
+		return ctrl.Result{}, err
+	}
+
+	if rc.Status.ContentHash == contentHash && rc.Status.ContentHash != "" {
+		contentCond := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionContentReady)
+		if contentCond != nil && contentCond.Status == metav1.ConditionTrue && contentCond.ObservedGeneration == rc.Generation {
+			if !isReferencedByPlan {
+				return ctrl.Result{}, nil
+			}
+			appliedCond := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+			if appliedCond != nil && appliedCond.Status == metav1.ConditionTrue && appliedCond.Reason == "Applied" && appliedCond.ObservedGeneration == rc.Generation {
+				return ctrl.Result{}, nil
+			}
 		}
 	}
 
-	r.log.Info("applying resource collection", "name", rc.Name, "oldHash", rc.Status.ContentHash, "newHash", renderResult.Hash)
-	if err := r.apply(ctx, renderResult); err != nil {
-		r.setCollectionCondition(&rc, metav1.ConditionFalse, "ApplyFailed", err.Error())
-		return ctrl.Result{}, err
-	}
-
-	if len(rc.Spec.StatusPatches) > 0 {
-		if err := r.applyStatusPatches(ctx, &rc, &kc, renderResult); err != nil {
-			r.setCollectionCondition(&rc, metav1.ConditionFalse, "StatusPatchFailed", err.Error())
+	if isReferencedByPlan {
+		r.log.Info("applying resource collection", "name", rc.Name, "oldHash", rc.Status.ContentHash, "newHash", contentHash)
+		if err := r.apply(ctx, renderResult); err != nil {
+			r.setApplyFailure(&rc, "ApplyFailed", err.Error())
 			return ctrl.Result{}, err
+		}
+
+		if len(rc.Spec.StatusPatches) > 0 {
+			if err := r.applyStatusPatches(ctx, &rc, &kc, renderResult); err != nil {
+				r.setApplyFailure(&rc, "StatusPatchFailed", err.Error())
+				return ctrl.Result{}, err
+			}
 		}
 	}
 
 	base := rc.DeepCopy()
-	rc.Status.ContentHash = renderResult.Hash
+	rc.Status.ContentHash = contentHash
 	meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
-		Type:               v1alpha1.ConditionCollectionApplied,
+		Type:               v1alpha1.ConditionCollectionContentReady,
 		Status:             metav1.ConditionTrue,
-		Reason:             "Applied",
+		Reason:             "Ready",
 		ObservedGeneration: rc.Generation,
 	})
+	if isReferencedByPlan {
+		meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
+			Type:               v1alpha1.ConditionCollectionApplied,
+			Status:             metav1.ConditionTrue,
+			Reason:             "Applied",
+			ObservedGeneration: rc.Generation,
+		})
+	}
 	if err := r.client.Status().Patch(ctx, &rc, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	r.log.Info("applied resource collection", "name", rc.Name)
+	r.log.Info("reconciled resource collection", "name", rc.Name, "isReferencedByPlan", isReferencedByPlan, "isReferencedByAgent", isReferencedByAgent)
 	return ctrl.Result{}, nil
 }
 
-func (r *collectionReconciler) setCollectionCondition(rc *v1alpha1.ResourceCollection, status metav1.ConditionStatus, reason, message string) {
+func (r *collectionReconciler) setContentConditions(rc *v1alpha1.ResourceCollection, hasPlan bool, status metav1.ConditionStatus, reason, message string) {
 	base := rc.DeepCopy()
 	meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
-		Type:               v1alpha1.ConditionCollectionApplied,
+		Type:               v1alpha1.ConditionCollectionContentReady,
 		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: rc.Generation,
+	})
+	if hasPlan {
+		meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
+			Type:               v1alpha1.ConditionCollectionApplied,
+			Status:             status,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: rc.Generation,
+		})
+	}
+	if err := r.client.Status().Patch(context.Background(), rc, client.MergeFrom(base)); err != nil {
+		r.log.Error("patching collection status", "name", rc.Name, "error", err)
+	}
+}
+
+func (r *collectionReconciler) setApplyFailure(rc *v1alpha1.ResourceCollection, reason, message string) {
+	base := rc.DeepCopy()
+	meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionCollectionContentReady,
+		Status:             metav1.ConditionTrue,
+		Reason:             "Ready",
+		ObservedGeneration: rc.Generation,
+	})
+	meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionCollectionApplied,
+		Status:             metav1.ConditionFalse,
 		Reason:             reason,
 		Message:            message,
 		ObservedGeneration: rc.Generation,
@@ -174,7 +254,7 @@ func (r *collectionReconciler) render(rc *v1alpha1.ResourceCollection, kc *v1alp
 }
 
 func (r *collectionReconciler) newMapper() (meta.RESTMapper, error) {
-	groupResources, err := restmapper.GetAPIGroupResources(r.discovery)
+	groupResources, err := restmapper.GetAPIGroupResources(r.clients.Discovery)
 	if err != nil {
 		return nil, fmt.Errorf("discovering API resources: %w", err)
 	}
@@ -184,6 +264,10 @@ func (r *collectionReconciler) newMapper() (meta.RESTMapper, error) {
 // TODO: implement proper resource ordering (namespaces before namespaced
 // resources, CRDs before CRs, etc.) instead of relying on template walk order.
 func (r *collectionReconciler) apply(ctx context.Context, result *collection.RenderResult) error {
+	if len(result.Objects) == 0 {
+		return nil
+	}
+
 	mapper, err := r.newMapper()
 	if err != nil {
 		return err
@@ -199,7 +283,7 @@ func (r *collectionReconciler) apply(ctx context.Context, result *collection.Ren
 	}
 
 	for _, obj := range append(namespaces, rest...) {
-		applied, err := dynutil.ApplyWithMapper(ctx, r.dynClient, mapper, obj)
+		applied, err := dynutil.ApplyWithMapper(ctx, r.clients.Dynamic, mapper, obj)
 		if err != nil {
 			return fmt.Errorf("applying %s %s: %w", obj.GetKind(), obj.GetName(), err)
 		}
@@ -256,7 +340,7 @@ func (r *collectionReconciler) applyStatusPatches(ctx context.Context, rc *v1alp
 		if target == nil {
 			return fmt.Errorf("status patch target %s/%s not found in rendered objects", sr.Kind, sr.Name)
 		}
-		if err := dynutil.UpdateStatus(ctx, r.dynClient, mapper, target, sr.Status); err != nil {
+		if err := dynutil.UpdateStatus(ctx, r.clients.Dynamic, mapper, target, sr.Status); err != nil {
 			return fmt.Errorf("status patch %s/%s: %w", sr.Kind, sr.Name, err)
 		}
 		r.log.Info("applied status patch", "kind", sr.Kind, "name", sr.Name)
@@ -294,6 +378,10 @@ func (r *collectionReconciler) loadCollection(rc *v1alpha1.ResourceCollection) (
 		return collection.LoadInline(rc.Name, contents, r.certFuncMap())
 	}
 
+	if rc.Spec.Source == "" {
+		return collection.NewEmpty(rc.Name), nil
+	}
+
 	var userFS fs.FS
 	if r.collectionsDir != "" {
 		userFS = os.DirFS(r.collectionsDir)
@@ -306,13 +394,31 @@ func (r *collectionReconciler) handleDeletion(ctx context.Context, rc *v1alpha1.
 		return ctrl.Result{}, nil
 	}
 
-	requested, err := r.isRequested(ctx, rc.Name)
+	requested, err := r.isReferencedByPlan(ctx, rc.Name)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if requested {
 		r.log.Info("collection still requested by DeploymentPlan, blocking deletion", "name", rc.Name)
 		return ctrl.Result{}, nil
+	}
+
+	isReferencedByAgent, err := r.isReferencedByAgent(ctx, rc.Name)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if isReferencedByAgent {
+		r.log.Info("collection still referenced by Agent, blocking deletion", "name", rc.Name)
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	referenced, err := r.isReferencedByCollection(ctx, rc.Name)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if referenced {
+		r.log.Info("collection still referenced by another ResourceCollection via scriptCollections, blocking deletion", "name", rc.Name)
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
 	controllerutil.RemoveFinalizer(rc, collectionFinalizer)
@@ -322,7 +428,26 @@ func (r *collectionReconciler) handleDeletion(ctx context.Context, rc *v1alpha1.
 	return ctrl.Result{}, nil
 }
 
-func (r *collectionReconciler) isRequested(ctx context.Context, name string) (bool, error) {
+func (r *collectionReconciler) isReferencedByCollection(ctx context.Context, name string) (bool, error) {
+	var list v1alpha1.ResourceCollectionList
+	if err := r.client.List(ctx, &list); err != nil {
+		return false, fmt.Errorf("listing ResourceCollections: %w", err)
+	}
+	for _, other := range list.Items {
+		// Collections that are flagged to be deleted are not considered
+		if other.Name == name || !other.DeletionTimestamp.IsZero() {
+			continue
+		}
+		for _, ref := range other.Spec.ScriptCollections {
+			if ref == name {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func (r *collectionReconciler) isReferencedByPlan(ctx context.Context, name string) (bool, error) {
 	var planList v1alpha1.DeploymentPlanList
 	if err := r.client.List(ctx, &planList); err != nil {
 		return false, fmt.Errorf("listing DeploymentPlan: %w", err)
@@ -340,11 +465,25 @@ func (r *collectionReconciler) isRequested(ctx context.Context, name string) (bo
 	return false, nil
 }
 
+func (r *collectionReconciler) isReferencedByAgent(ctx context.Context, name string) (bool, error) {
+	var agentList v1alpha1.AgentList
+	if err := r.client.List(ctx, &agentList); err != nil {
+		return false, fmt.Errorf("listing Agent: %w", err)
+	}
+	for _, agent := range agentList.Items {
+		if agent.Spec.Script.Collection == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (r *collectionReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
 	builder := ctrl.NewControllerManagedBy(mgr).
 		Named("resourcecollection").
 		For(&v1alpha1.ResourceCollection{}).
-		Watches(&v1alpha1.DeploymentPlan{}, handler.EnqueueRequestsFromMapFunc(r.planToCollections))
+		Watches(&v1alpha1.DeploymentPlan{}, handler.EnqueueRequestsFromMapFunc(r.planToCollections)).
+		Watches(&v1alpha1.ResourceCollection{}, handler.EnqueueRequestsFromMapFunc(r.collectionScriptMapping))
 
 	for _, name := range collection.BuiltinNames() {
 		fsys, err := collection.BuiltinFS(name)
@@ -362,7 +501,7 @@ func (r *collectionReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Ma
 			r.log.Warn("failed to scan collections dir on startup", "error", err)
 		}
 
-		ch, err := r.startFSWatcher(ctx)
+		ch, err := r.startFSBridge(ctx)
 		if err != nil {
 			r.log.Warn("filesystem watcher not available, changes on disk won't trigger reconcile", "error", err)
 		} else {
@@ -390,6 +529,69 @@ func (r *collectionReconciler) planToCollections(ctx context.Context, obj client
 	return requests
 }
 
+// collectionScriptMapping enqueues both directions when a collection changes:
+// its own dependencies (so they can release finalizers) and all transitive
+// dependents (so they recalculate ContentHash when a dependency's content changes).
+func (r *collectionReconciler) collectionScriptMapping(ctx context.Context, obj client.Object) []ctrl.Request {
+	changed, ok := obj.(*v1alpha1.ResourceCollection)
+	if !ok {
+		return nil
+	}
+
+	var list v1alpha1.ResourceCollectionList
+	if err := r.client.List(ctx, &list); err != nil {
+		r.log.Error("listing collections for script mapping", "error", err)
+		return nil
+	}
+
+	deps := buildDependents(list.Items)
+	seen := map[string]bool{}
+	var requests []ctrl.Request
+	for _, name := range transitiveDependents(changed.Name, deps) {
+		seen[name] = true
+		requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKey{Name: name}})
+	}
+
+	// Downward: own dependencies (so they can release finalizers).
+	for _, ref := range changed.Spec.ScriptCollections {
+		if !seen[ref] {
+			requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKey{Name: ref}})
+		}
+	}
+	return requests
+}
+
+// buildDependents builds the inverse graph: for each collection name,
+// which collections list it in their scriptCollections.
+func buildDependents(collections []v1alpha1.ResourceCollection) map[string][]string {
+	deps := make(map[string][]string)
+	for _, rc := range collections {
+		for _, ref := range rc.Spec.ScriptCollections {
+			deps[ref] = append(deps[ref], rc.Name)
+		}
+	}
+	return deps
+}
+
+// transitiveDependents returns all collection names that transitively
+// depend on name via the inverse graph. Does not include name itself.
+func transitiveDependents(name string, deps map[string][]string) []string {
+	seen := map[string]bool{name: true}
+	queue := append([]string{}, deps[name]...)
+	var result []string
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if seen[current] {
+			continue
+		}
+		seen[current] = true
+		result = append(result, current)
+		queue = append(queue, deps[current]...)
+	}
+	return result
+}
+
 func (r *collectionReconciler) ensureCollectionsFromDisk(ctx context.Context) error {
 	entries, err := os.ReadDir(r.collectionsDir)
 	if err != nil {
@@ -399,7 +601,12 @@ func (r *collectionReconciler) ensureCollectionsFromDisk(ctx context.Context) er
 		if !entry.IsDir() {
 			continue
 		}
-		if !hasTemplates(filepath.Join(r.collectionsDir, entry.Name())) {
+		has, err := hasTemplates(filepath.Join(r.collectionsDir, entry.Name()))
+		if err != nil {
+			r.log.Warn("checking templates", "name", entry.Name(), "error", err)
+			continue
+		}
+		if !has {
 			continue
 		}
 		fsys := os.DirFS(filepath.Join(r.collectionsDir, entry.Name()))
@@ -431,109 +638,155 @@ func (r *collectionReconciler) ensureResourceCollection(ctx context.Context, nam
 	return nil
 }
 
-func hasTemplates(dir string) bool {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+func hasTemplates(dir string) (bool, error) {
+	found := false
+	err := filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-		ext := filepath.Ext(e.Name())
+		if d.IsDir() {
+			return nil
+		}
+		ext := filepath.Ext(d.Name())
 		if ext == ".yaml" || ext == ".yml" {
-			return true
+			found = true
+			return filepath.SkipAll
 		}
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
-	return false
+	return found, nil
 }
 
-func (r *collectionReconciler) startFSWatcher(ctx context.Context) (<-chan event.GenericEvent, error) {
-	watcher, err := fsnotify.NewWatcher()
+func (r *collectionReconciler) tryAutoCreate(ctx context.Context, name string) {
+	dir := filepath.Join(r.collectionsDir, name)
+	has, err := hasTemplates(dir)
+	if err != nil {
+		r.log.Warn("checking templates for auto-create", "name", name, "error", err)
+		return
+	}
+	if !has {
+		return
+	}
+	fsys := os.DirFS(dir)
+	if err := r.ensureResourceCollection(ctx, name, fsys); err != nil {
+		r.log.Warn("failed to auto-create ResourceCollection from fs event", "name", name, "error", err)
+	}
+}
+
+func (r *collectionReconciler) enqueueDependents(ctx context.Context, ch chan<- event.GenericEvent, name string) {
+	var list v1alpha1.ResourceCollectionList
+	if err := r.client.List(ctx, &list); err != nil {
+		r.log.Error("listing collections for FS propagation", "error", err)
+		return
+	}
+	deps := buildDependents(list.Items)
+	byName := make(map[string]*v1alpha1.ResourceCollection, len(list.Items))
+	for i := range list.Items {
+		byName[list.Items[i].Name] = &list.Items[i]
+	}
+	for _, depName := range transitiveDependents(name, deps) {
+		rc, ok := byName[depName]
+		if !ok {
+			continue
+		}
+		select {
+		case ch <- event.GenericEvent{Object: rc}:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (r *collectionReconciler) startFSBridge(ctx context.Context) (<-chan event.GenericEvent, error) {
+	w := collection.NewFSWatcher(r.collectionsDir, r.log, 100*time.Millisecond)
+	fsCh, err := w.Start(ctx)
 	if err != nil {
 		return nil, err
-	}
-
-	// Add a watcher to the root of the collections directory
-	if err := watcher.Add(r.collectionsDir); err != nil {
-		if closeErr := watcher.Close(); closeErr != nil {
-			r.log.Warn("failed to close watcher", "error", closeErr)
-		}
-		return nil, err
-	}
-
-	// Add a watcher to each existing collections directory
-	entries, _ := os.ReadDir(r.collectionsDir)
-	for _, e := range entries {
-		if e.IsDir() {
-			_ = watcher.Add(filepath.Join(r.collectionsDir, e.Name()))
-		}
 	}
 
 	ch := make(chan event.GenericEvent)
-
 	go func() {
-		defer func() {
-			if err := watcher.Close(); err != nil {
-				r.log.Warn("failed to close watcher", "error", err)
-			}
-		}()
 		defer close(ch)
-		for {
-			select {
-			case ev, ok := <-watcher.Events:
-				if !ok {
-					return
-				}
-				if ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) == 0 {
+		for fsEv := range fsCh {
+			switch fsEv.Kind {
+			case collection.FSEventCreate:
+				r.tryAutoCreate(ctx, fsEv.Collection)
+				continue
+
+			case collection.FSEventRemove:
+				var rc v1alpha1.ResourceCollection
+				if err := r.client.Get(ctx, client.ObjectKey{Name: fsEv.Collection}, &rc); err != nil {
 					continue
 				}
-				// Watch new top-level collection dirs so edits to their templates trigger reconciliation.
-				if ev.Op&fsnotify.Create != 0 {
-					if rel, err := filepath.Rel(r.collectionsDir, ev.Name); err == nil && !strings.Contains(rel, string(filepath.Separator)) {
-						_ = watcher.Add(ev.Name)
-					}
+				if rc.Spec.Source == "" {
+					continue
 				}
-				r.handleFSEvent(ctx, ev, ch)
-			case err, ok := <-watcher.Errors:
-				if !ok {
+				select {
+				case ch <- event.GenericEvent{Object: &rc}:
+				case <-ctx.Done():
 					return
 				}
-				r.log.Warn("fsnotify error", "error", err)
-			case <-ctx.Done():
-				return
+				r.enqueueDependents(ctx, ch, fsEv.Collection)
+				continue
+
+			case collection.FSEventChange:
+				var rc v1alpha1.ResourceCollection
+				if err := r.client.Get(ctx, client.ObjectKey{Name: fsEv.Collection}, &rc); err != nil {
+					if apierrors.IsNotFound(err) {
+						r.tryAutoCreate(ctx, fsEv.Collection)
+					}
+					continue
+				}
+				if rc.Spec.Source == "" {
+					continue
+				}
+				select {
+				case ch <- event.GenericEvent{Object: &rc}:
+				case <-ctx.Done():
+					return
+				}
+				r.enqueueDependents(ctx, ch, fsEv.Collection)
 			}
 		}
 	}()
-
 	return ch, nil
 }
 
-func (r *collectionReconciler) handleFSEvent(ctx context.Context, ev fsnotify.Event, ch chan<- event.GenericEvent) {
-	rel, err := filepath.Rel(r.collectionsDir, ev.Name)
-	if err != nil {
-		return
-	}
-	name := strings.SplitN(rel, string(filepath.Separator), 2)[0]
-
-	if ev.Op&fsnotify.Create != 0 {
-		dir := filepath.Join(r.collectionsDir, name)
-		if hasTemplates(dir) {
-			fsys := os.DirFS(dir)
-			if err := r.ensureResourceCollection(ctx, name, fsys); err != nil {
-				r.log.Warn("failed to auto-create ResourceCollection from fs event", "name", name, "error", err)
-			}
+func (r *collectionReconciler) computeContentHash(ctx context.Context, rc *v1alpha1.ResourceCollection, renderHash string) (string, error) {
+	scriptHash := collection.EmptyHash
+	if len(rc.Spec.Scripts) > 0 || len(rc.Spec.ScriptCollections) > 0 {
+		loaded, err := r.scriptLoader.Load(ctx, rc.Name, &collectionResolver{r.client})
+		if err != nil {
+			return "", fmt.Errorf("computing script hash for %q: %w", rc.Name, err)
 		}
-		return
+		scriptHash = loaded.ContentHash
 	}
 
+	statusPatchesHash, err := collection.HashStatusPatches(rc.Spec.StatusPatches)
+	if err != nil {
+		return "", fmt.Errorf("hashing status patches for %q: %w", rc.Name, err)
+	}
+
+	return collection.CombineContentHash(collection.ContentHashComponents{
+		RenderHash:        renderHash,
+		ScriptHash:        scriptHash,
+		StatusPatchesHash: statusPatchesHash,
+	})
+}
+
+type collectionResolver struct {
+	c client.Client
+}
+
+func (r *collectionResolver) Resolve(ctx context.Context, name string) (*v1alpha1.ResourceCollection, error) {
 	var rc v1alpha1.ResourceCollection
-	if err := r.client.Get(ctx, client.ObjectKey{Name: name}, &rc); err != nil {
-		return
+	if err := r.c.Get(ctx, client.ObjectKey{Name: name}, &rc); err != nil {
+		return nil, err
 	}
-	if rc.Spec.Source != "" {
-		ch <- event.GenericEvent{Object: &rc}
-	}
+	return &rc, nil
 }
 
 func unmarshalValues(raw map[string]apiextensionsv1.JSON) (map[string]any, error) {

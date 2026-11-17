@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/cert"
+	agentctl "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
@@ -44,7 +45,7 @@ type Configurer struct {
 
 // NewConfigurer creates the webhook server, registers the pod mutator handler,
 // and adds the server to the manager.
-func NewConfigurer(mgr ctrl.Manager, clients *kube.Clients, containerName string, certProvider *cert.Provider, log *slog.Logger) (*Configurer, error) {
+func NewConfigurer(mgr ctrl.Manager, clients *kube.Clients, containerName string, certProvider *cert.Provider, mat *agentctl.Materializer, log *slog.Logger) (*Configurer, error) {
 	certDir, caBundle, err := writeTLS(certProvider, containerName, log)
 	if err != nil {
 		return nil, err
@@ -60,9 +61,10 @@ func NewConfigurer(mgr ctrl.Manager, clients *kube.Clients, containerName string
 
 	srv.Register(PausePath, &webhook.Admission{
 		Handler: &PodMutator{
-			Client:  clients.Client,
-			Decoder: admission.NewDecoder(kube.Scheme),
-			Log:     log,
+			Client:       clients.Client,
+			Materializer: mat,
+			Decoder:      admission.NewDecoder(kube.Scheme),
+			Log:          log,
 		},
 	})
 
@@ -108,7 +110,8 @@ func (c *Configurer) WaitReady(ctx context.Context) error {
 	}
 }
 
-// Ready implements healthz.Checker for the manager's readiness probe.
+func (c *Configurer) Name() string { return "workload-overrides" }
+
 func (c *Configurer) Ready(_ *http.Request) error {
 	if !c.ready.Load() {
 		return fmt.Errorf("workload override webhook is not installed")
@@ -119,7 +122,7 @@ func (c *Configurer) Ready(_ *http.Request) error {
 func (c *Configurer) ensureConfiguration(ctx context.Context) error {
 	url := fmt.Sprintf("https://%s:%d%s", c.containerName, WebhookPort, PausePath)
 	fail := admissionregistrationv1.Fail
-	none := admissionregistrationv1.SideEffectClassNone
+	none := admissionregistrationv1.SideEffectClassNoneOnDryRun
 	never := admissionregistrationv1.NeverReinvocationPolicy
 
 	desired := &admissionregistrationv1.MutatingWebhookConfiguration{

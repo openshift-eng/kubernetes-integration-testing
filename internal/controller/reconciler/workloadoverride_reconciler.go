@@ -240,17 +240,24 @@ func supersededMessage(matched, selected int32, supersededBy map[string]struct{}
 }
 
 func checkOverride(pod *corev1.Pod, wo *v1alpha1.WorkloadOverride) overrideState {
-	if wo.Spec.NoOp {
-		if override.IsNoOp(pod) {
-			return overrideStateApplied
-		}
-		return overrideStatePending
-	}
 	mutated := pod.DeepCopy()
-	outcome, _ := override.ApplyContainerOverrides(mutated, wo.Spec.Containers)
-	if outcome == override.Invalid {
-		return overrideStateInvalid
+
+	if wo.Spec.ServiceAccountName != "" {
+		mutated.Spec.ServiceAccountName = wo.Spec.ServiceAccountName
 	}
+
+	switch {
+	case wo.Spec.NoOp:
+		override.ApplyNoOp(mutated)
+	case wo.Spec.ReplacePod != nil:
+		override.ApplyReplacePod(mutated, wo.Spec.ReplacePod)
+	default:
+		outcome, _ := override.ApplyContainerOverrides(mutated, wo.Spec.Containers)
+		if outcome == override.Invalid {
+			return overrideStateInvalid
+		}
+	}
+
 	if equality.Semantic.DeepEqual(pod.Spec, mutated.Spec) {
 		return overrideStateApplied
 	}

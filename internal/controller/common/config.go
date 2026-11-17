@@ -8,11 +8,12 @@ import (
 )
 
 type Config struct {
-	KubeConfig     *kube.KubeConfig
-	ContainerName  string
-	CacheDir       string
-	CollectionsDir string
-	PodmanSocket   string
+	KubeConfig       *kube.KubeConfig
+	ContainerName    string
+	CacheDir         string
+	CollectionsDir   string
+	PodmanSocket     string
+	BundleServerAddr string
 }
 
 func LoadConfig() (Config, error) {
@@ -30,11 +31,17 @@ func LoadConfig() (Config, error) {
 		containerName, _ = os.Hostname()
 	}
 
+	bundleAddr := os.Getenv("KIT_BUNDLE_SERVER_ADDR")
+	if bundleAddr == "" {
+		bundleAddr = ":8082"
+	}
+
 	return Config{
-		KubeConfig:     kubeConfig,
-		ContainerName:  containerName,
-		CacheDir:       os.Getenv("KIT_CACHE_DIR"),
-		CollectionsDir: os.Getenv("KIT_COLLECTIONS_DIR"),
-		PodmanSocket:   os.Getenv("KIT_PODMAN_SOCKET"),
+		KubeConfig:       kubeConfig,
+		ContainerName:    containerName,
+		CacheDir:         os.Getenv("KIT_CACHE_DIR"),
+		CollectionsDir:   os.Getenv("KIT_COLLECTIONS_DIR"),
+		PodmanSocket:     os.Getenv("KIT_PODMAN_SOCKET"),
+		BundleServerAddr: bundleAddr,
 	}, nil
 }

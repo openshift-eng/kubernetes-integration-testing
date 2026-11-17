@@ -54,10 +54,86 @@ spec:
                   type: object
                 minItems: 1
                 type: array
+              scriptCollections:
+                description: |-
+                  ScriptCollections lists other ResourceCollections whose script
+                  packages are merged into this collection's bundle. Dependencies
+                  are resolved transitively. An Agent's entrypoint must target a
+                  local package, not one from a dependency.
+                items:
+                  type: string
+                maxItems: 32
+                type: array
+              scripts:
+                description: |-
+                  Scripts declares script packages available for Agent CRs.
+                  Each package is loaded from a directory or inline content. Packages with
+                  an entrypoint are runnable (Agent targets them); packages without are
+                  libraries available to runnable packages via require("<package>/<file>").
+                items:
+                  properties:
+                    entrypoint:
+                      description: |-
+                        Entrypoint is the path to the main script file, relative to the
+                        package root. Only valid with root. Packages with an entrypoint are
+                        runnable (Agent CRs can reference them); packages without are
+                        libraries available via require("<package-name>/<file>").
+                      maxLength: 256
+                      type: string
+                    include:
+                      description: |-
+                        Include restricts which files under root are part of the package.
+                        Each entry is a glob pattern matched against the relative path.
+                        Supports ** for recursive matching. Only valid when root is set.
+                      items:
+                        type: string
+                      maxItems: 32
+                      type: array
+                    inline:
+                      description: |-
+                        Inline provides the script content directly in the CR.
+                        Inline packages are always runnable with the inline content as the
+                        entrypoint.
+                      maxLength: 1048576
+                      type: string
+                    name:
+                      description: Name identifies this script package within the
+                        collection.
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                      x-kubernetes-validations:
+                      - message: name must be a valid DNS label
+                        rule: '!format.dns1123Label().validate(self).hasValue()'
+                    root:
+                      description: |-
+                        Root is a directory path relative to the collection root.
+                        All files under root are included unless filtered by include globs.
+                      maxLength: 256
+                      type: string
+                  required:
+                  - name
+                  type: object
+                  x-kubernetes-validations:
+                  - message: exactly one of root or inline must be set
+                    rule: '(has(self.root) && size(self.root) > 0 ? 1 : 0) + (has(self.inline)
+                      && size(self.inline) > 0 ? 1 : 0) == 1'
+                  - message: include is only valid with root
+                    rule: '!(has(self.include) && size(self.include) > 0) || (has(self.root)
+                      && size(self.root) > 0)'
+                  - message: entrypoint is only valid with root
+                    rule: '!(has(self.entrypoint) && size(self.entrypoint) > 0) ||
+                      (has(self.root) && size(self.root) > 0)'
+                maxItems: 16
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               source:
                 description: |-
                   Source is the name of a builtin or filesystem-provided collection.
                   Mutually exclusive with Inline.
+                minLength: 1
                 type: string
               statusPatches:
                 description: |-
@@ -96,8 +172,16 @@ spec:
                 type: object
             type: object
             x-kubernetes-validations:
-            - message: exactly one of source or inline must be set
-              rule: has(self.source) != has(self.inline)
+            - message: source and inline are mutually exclusive
+              rule: '!(has(self.source) && has(self.inline))'
+            - message: one of source, inline, scripts, or scriptCollections must be
+                set
+              rule: has(self.source) || has(self.inline) || (has(self.scripts) &&
+                size(self.scripts) > 0) || (has(self.scriptCollections) && size(self.scriptCollections)
+                > 0)
+            - message: scripts with root require source
+              rule: '!has(self.scripts) || !self.scripts.exists(s, has(s.root) &&
+                size(s.root) > 0) || has(self.source)'
           status:
             properties:
               conditions:
@@ -157,6 +241,13 @@ spec:
                   type: object
                 type: array
               contentHash:
+                description: |-
+                  ContentHash is a deterministic hash of the collection's declared
+                  content: rendered manifests, loaded scripts (with local package
+                  membership), and status patch declarations. It does not include
+                  Agent-level values, runtime, or timeout — those affect
+                  BundleDigest, not ContentHash. The reconciler skips reapply when
+                  the hash and ObservedGeneration are unchanged.
                 type: string
             type: object
         required:

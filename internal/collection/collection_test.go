@@ -27,11 +27,35 @@ func TestLoadBuiltin(t *testing.T) {
 	}
 }
 
-func TestLoadUnknown(t *testing.T) {
-	_, err := Load("nonexistent", nil, nil)
-	if err == nil {
-		t.Fatal("expected error for unknown collection")
-	}
+func TestLoadSourceResolution(t *testing.T) {
+	t.Run("user missing falls back to builtin", func(t *testing.T) {
+		emptyUserFS := fstest.MapFS{}
+		coll, err := Load("openshift-default", emptyUserFS, stubCertFuncMap)
+		require.NoError(t, err)
+		assert.Equal(t, "openshift-default", coll.Name())
+	})
+
+	t.Run("no source returns ErrSourceMissing", func(t *testing.T) {
+		_, err := Load("nonexistent", nil, nil)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrSourceMissing)
+	})
+
+	t.Run("empty name rejected", func(t *testing.T) {
+		_, err := Load("", nil, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must not be empty")
+	})
+}
+
+func TestNewEmptyRendersZeroObjects(t *testing.T) {
+	coll := NewEmpty("scripts-only")
+	assert.Equal(t, "scripts-only", coll.Name())
+
+	result, err := coll.Render(RenderContext{})
+	require.NoError(t, err)
+	assert.Empty(t, result.Objects)
+	assert.Equal(t, EmptyHash, result.Hash)
 }
 
 func TestLoadUserCollection(t *testing.T) {
@@ -314,15 +338,21 @@ func TestLoadInlineBadTemplate(t *testing.T) {
 	}
 }
 
-func TestLoadEmptyCollection(t *testing.T) {
+func TestLoadEmptyCollectionRendersZeroObjects(t *testing.T) {
 	userFS := fstest.MapFS{
 		"empty/.keep": &fstest.MapFile{Data: []byte{}},
 	}
 
-	_, err := Load("empty", userFS, nil)
-	if err == nil {
-		t.Fatal("expected error for empty collection")
-	}
+	coll, err := Load("empty", userFS, nil)
+	require.NoError(t, err)
+	result, err := coll.Render(RenderContext{})
+	require.NoError(t, err)
+	assert.Empty(t, result.Objects)
+	assert.NotEmpty(t, result.Hash)
+
+	result2, err := coll.Render(RenderContext{})
+	require.NoError(t, err)
+	assert.Equal(t, result.Hash, result2.Hash, "empty render hash must be stable")
 }
 
 func TestLoadBadTemplate(t *testing.T) {
