@@ -9,6 +9,7 @@ import (
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/agent/bundle"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
+	agentrbac "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent/rbac"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
@@ -75,23 +76,16 @@ func (m *Materializer) Materialize(ctx context.Context, ag *v1alpha1.Agent) (*Ma
 	name := GeneratedName(ag.Name)
 	ownerRef := agentOwnerRef(ag)
 
-	if err := m.ensureServiceAccount(ctx, name, ns, ownerRef); err != nil {
-		return nil, fmt.Errorf("ensuring service account: %w", err)
+	if err := m.ensureIdentityAndRBAC(ctx, name, ns, ownerRef); err != nil {
+		return nil, err
 	}
-	if err := m.ensureRole(ctx, name, ns, ownerRef); err != nil {
-		return nil, fmt.Errorf("ensuring role: %w", err)
-	}
-	if err := m.ensureRoleBinding(ctx, name, ns, ownerRef); err != nil {
-		return nil, fmt.Errorf("ensuring role binding: %w", err)
-	}
-	if err := m.ensureClusterRole(ctx, name, ownerRef); err != nil {
-		return nil, fmt.Errorf("ensuring cluster role: %w", err)
-	}
-	if err := m.ensureClusterRoleBinding(ctx, name, ns, ownerRef); err != nil {
-		return nil, fmt.Errorf("ensuring cluster role binding: %w", err)
-	}
+
 	if err := m.ensureWorkloadOverride(ctx, ag, name, ownerRef, b.Digest); err != nil {
 		return nil, fmt.Errorf("ensuring workload override: %w", err)
+	}
+
+	if err := m.pruneStaleRBACObjects(ctx, ownerRef.UID, name, ns); err != nil {
+		return nil, fmt.Errorf("pruning stale objects: %w", err)
 	}
 
 	return &MaterializeResult{BundleDigest: b.Digest}, nil
@@ -110,99 +104,132 @@ func (r *clientResolver) Resolve(ctx context.Context, name string) (*v1alpha1.Re
 	return &rc, nil
 }
 
-func (m *Materializer) ensureServiceAccount(ctx context.Context, name, namespace string, ownerRef metav1.OwnerReference) error {
-	sa := &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            name,
-			Namespace:       namespace,
-			OwnerReferences: []metav1.OwnerReference{ownerRef},
-		},
+func (m *Materializer) ensureIdentityAndRBAC(ctx context.Context, name, ns string, ownerRef metav1.OwnerReference) error {
+	sa := buildServiceAccount(name, ns, ownerRef)
+	rbacObjects := agentrbac.Compile(agentrbac.CompileInput{
+		Name:            name,
+		TargetNamespace: ns,
+		OwnerRef:        ownerRef,
+	})
+
+	if err := applyObject(ctx, m.client, sa); err != nil {
+		return fmt.Errorf("ensuring service account: %w", err)
 	}
-	err := m.client.Create(ctx, sa)
-	if apierrors.IsAlreadyExists(err) {
-		return nil
+	for _, obj := range rbacObjects {
+		kind := obj.GetObjectKind().GroupVersionKind().Kind
+		if err := applyObject(ctx, m.client, obj); err != nil {
+			return fmt.Errorf("applying %s %s/%s: %w",
+				kind, obj.GetNamespace(), obj.GetName(), err)
+		}
 	}
-	return err
+	return nil
 }
 
-func (m *Materializer) ensureRole(ctx context.Context, name, namespace string, ownerRef metav1.OwnerReference) error {
-	role := &rbacv1.Role{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            name,
-			Namespace:       namespace,
-			OwnerReferences: []metav1.OwnerReference{ownerRef},
-		},
-		Rules: defaultPolicyRules(),
-	}
-	err := m.client.Create(ctx, role)
-	if apierrors.IsAlreadyExists(err) {
-		return nil
-	}
-	return err
-}
-
-func (m *Materializer) ensureRoleBinding(ctx context.Context, name, namespace string, ownerRef metav1.OwnerReference) error {
-	rb := &rbacv1.RoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            name,
-			Namespace:       namespace,
-			OwnerReferences: []metav1.OwnerReference{ownerRef},
-		},
-		Subjects: []rbacv1.Subject{{
-			Kind:      "ServiceAccount",
-			Name:      name,
-			Namespace: namespace,
-		}},
-		RoleRef: rbacv1.RoleRef{
-			APIGroup: rbacv1.GroupName,
-			Kind:     "Role",
-			Name:     name,
-		},
-	}
-	err := m.client.Create(ctx, rb)
-	if apierrors.IsAlreadyExists(err) {
-		return nil
-	}
-	return err
-}
-
-func (m *Materializer) ensureClusterRole(ctx context.Context, name string, ownerRef metav1.OwnerReference) error {
-	cr := &rbacv1.ClusterRole{
+func buildServiceAccount(name, namespace string, ownerRef metav1.OwnerReference) *corev1.ServiceAccount {
+	return &corev1.ServiceAccount{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: rbacv1.SchemeGroupVersion.String(),
-			Kind:       "ClusterRole",
+			APIVersion: corev1.SchemeGroupVersion.String(),
+			Kind:       "ServiceAccount",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            name,
+			Namespace:       namespace,
+			Labels:          map[string]string{agentrbac.LabelAgentUID: string(ownerRef.UID)},
 			OwnerReferences: []metav1.OwnerReference{ownerRef},
 		},
-		Rules: clusterScopedPolicyRules(),
 	}
-	return applyObject(ctx, m.client, cr)
 }
 
-func (m *Materializer) ensureClusterRoleBinding(ctx context.Context, name, namespace string, ownerRef metav1.OwnerReference) error {
-	crb := &rbacv1.ClusterRoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            name,
-			OwnerReferences: []metav1.OwnerReference{ownerRef},
-		},
-		Subjects: []rbacv1.Subject{{
-			Kind:      "ServiceAccount",
-			Name:      name,
-			Namespace: namespace,
-		}},
-		RoleRef: rbacv1.RoleRef{
-			APIGroup: rbacv1.GroupName,
-			Kind:     "ClusterRole",
-			Name:     name,
-		},
+func isOwnedBy(obj client.Object, uid types.UID) bool {
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.UID == uid {
+			return true
+		}
 	}
-	err := m.client.Create(ctx, crb)
-	if apierrors.IsAlreadyExists(err) {
-		return nil
+	return false
+}
+
+// pruneStaleRBACObjects deletes identity and RBAC objects that carry the
+// agent-uid label and owner reference but are no longer in the desired
+// set (e.g. after a namespace retarget). It runs after the WO apply so
+// a WO failure does not leave the old WO pointing at a deleted SA.
+func (m *Materializer) pruneStaleRBACObjects(ctx context.Context, agentUID types.UID, targetName, targetNS string) error {
+	type objectID struct{ kind, namespace, name string }
+	current := map[objectID]struct{}{
+		{"ServiceAccount", targetNS, targetName}: {},
+		{"Role", targetNS, targetName}:           {},
+		{"RoleBinding", targetNS, targetName}:    {},
+		{"ClusterRole", "", targetName}:          {},
+		{"ClusterRoleBinding", "", targetName}:   {},
 	}
-	return err
+	isStale := func(kind, namespace, name string) bool {
+		_, ok := current[objectID{kind, namespace, name}]
+		return !ok
+	}
+
+	selector := client.MatchingLabels{agentrbac.LabelAgentUID: string(agentUID)}
+
+	var sas corev1.ServiceAccountList
+	if err := m.client.List(ctx, &sas, selector); err != nil {
+		return fmt.Errorf("listing service accounts: %w", err)
+	}
+	for i := range sas.Items {
+		if isStale("ServiceAccount", sas.Items[i].Namespace, sas.Items[i].Name) && isOwnedBy(&sas.Items[i], agentUID) {
+			if err := m.client.Delete(ctx, &sas.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("deleting stale service account %s/%s: %w", sas.Items[i].Namespace, sas.Items[i].Name, err)
+			}
+		}
+	}
+
+	var roles rbacv1.RoleList
+	if err := m.client.List(ctx, &roles, selector); err != nil {
+		return fmt.Errorf("listing roles: %w", err)
+	}
+	for i := range roles.Items {
+		if isStale("Role", roles.Items[i].Namespace, roles.Items[i].Name) && isOwnedBy(&roles.Items[i], agentUID) {
+			if err := m.client.Delete(ctx, &roles.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("deleting stale role %s/%s: %w", roles.Items[i].Namespace, roles.Items[i].Name, err)
+			}
+		}
+	}
+
+	var rbs rbacv1.RoleBindingList
+	if err := m.client.List(ctx, &rbs, selector); err != nil {
+		return fmt.Errorf("listing role bindings: %w", err)
+	}
+	for i := range rbs.Items {
+		if isStale("RoleBinding", rbs.Items[i].Namespace, rbs.Items[i].Name) && isOwnedBy(&rbs.Items[i], agentUID) {
+			if err := m.client.Delete(ctx, &rbs.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("deleting stale role binding %s/%s: %w", rbs.Items[i].Namespace, rbs.Items[i].Name, err)
+			}
+		}
+	}
+
+	var crs rbacv1.ClusterRoleList
+	if err := m.client.List(ctx, &crs, selector); err != nil {
+		return fmt.Errorf("listing cluster roles: %w", err)
+	}
+	for i := range crs.Items {
+		if isStale("ClusterRole", crs.Items[i].Namespace, crs.Items[i].Name) && isOwnedBy(&crs.Items[i], agentUID) {
+			if err := m.client.Delete(ctx, &crs.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("deleting stale cluster role %s: %w", crs.Items[i].Name, err)
+			}
+		}
+	}
+
+	var crbs rbacv1.ClusterRoleBindingList
+	if err := m.client.List(ctx, &crbs, selector); err != nil {
+		return fmt.Errorf("listing cluster role bindings: %w", err)
+	}
+	for i := range crbs.Items {
+		if isStale("ClusterRoleBinding", crbs.Items[i].Namespace, crbs.Items[i].Name) && isOwnedBy(&crbs.Items[i], agentUID) {
+			if err := m.client.Delete(ctx, &crbs.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+				return fmt.Errorf("deleting stale cluster role binding %s: %w", crbs.Items[i].Name, err)
+			}
+		}
+	}
+
+	return nil
 }
 
 func (m *Materializer) ensureWorkloadOverride(ctx context.Context, ag *v1alpha1.Agent, name string, ownerRef metav1.OwnerReference, digest string) error {
@@ -221,9 +248,6 @@ func (m *Materializer) ensureWorkloadOverride(ctx context.Context, ag *v1alpha1.
 		Spec: m.buildWOSpec(ag, bundleURL, digest, saName),
 	}
 
-	// Server-side apply makes concurrent webhook and reconciler materialization
-	// conflict-safe without a read/update resourceVersion race. Force ownership
-	// because Kit owns every field of this generated WorkloadOverride.
 	return applyObject(ctx, m.client, desired)
 }
 
@@ -354,43 +378,11 @@ func convertValues(src map[string]apiextensionsv1.JSON) map[string]json.RawMessa
 	return dst
 }
 
-func defaultPolicyRules() []rbacv1.PolicyRule {
-	allVerbs := []string{"get", "list", "watch", "create", "update", "patch", "delete"}
-	return []rbacv1.PolicyRule{
-		{
-			APIGroups: []string{""},
-			Resources: []string{
-				"pods", "pods/log", "pods/status", "services", "configmaps",
-				"endpoints", "events", "persistentvolumeclaims",
-			},
-			Verbs: allVerbs,
-		},
-		{APIGroups: []string{"apps"}, Resources: []string{"*"}, Verbs: allVerbs},
-		{APIGroups: []string{"batch"}, Resources: []string{"*"}, Verbs: allVerbs},
-	}
-}
-
-// TODO: the OpenShift API groups below are hardcoded for the MCO smoke test.
-// This must be replaced by a per-Agent RBAC spec (e.g. Agent.spec.rbac.clusterRules)
-// so collections declare the access they need instead of granting a fixed superset.
-func clusterScopedPolicyRules() []rbacv1.PolicyRule {
-	readOnly := []string{"get", "list", "watch"}
-	return []rbacv1.PolicyRule{
-		{APIGroups: []string{""}, Resources: []string{"nodes"}, Verbs: []string{"get", "list", "watch", "patch"}},
-		{APIGroups: []string{""}, Resources: []string{"nodes/status", "persistentvolumes", "namespaces"}, Verbs: readOnly},
-		{APIGroups: []string{"kit.openshift.io"}, Resources: []string{"*"}, Verbs: readOnly},
-		// TEST-ONLY: remove when Agent.spec.rbac is implemented
-		{APIGroups: []string{"machineconfiguration.openshift.io"}, Resources: []string{"*"}, Verbs: readOnly},
-		{APIGroups: []string{"machineconfiguration.openshift.io"}, Resources: []string{"machineconfignodes", "machineconfignodes/status"}, Verbs: []string{"patch"}},
-		{APIGroups: []string{"config.openshift.io"}, Resources: []string{"*"}, Verbs: readOnly},
-	}
-}
-
 func applyObject(ctx context.Context, c client.Client, obj client.Object) error {
 	data, err := json.Marshal(obj)
 	if err != nil {
 		return fmt.Errorf("marshaling for server-side apply: %w", err)
 	}
 	patch := client.RawPatch(types.ApplyPatchType, data)
-	return c.Patch(ctx, obj, patch, client.FieldOwner("kit-agent-materializer"), client.ForceOwnership)
+	return c.Patch(ctx, obj, patch, client.FieldOwner(agentrbac.FieldManager), client.ForceOwnership)
 }

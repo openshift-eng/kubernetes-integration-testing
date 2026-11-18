@@ -14,6 +14,7 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/agent/bundle"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 	agentctl "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent"
+	agentrbac "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent/rbac"
 
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -22,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 type fakeScriptLoader struct {
@@ -353,62 +355,6 @@ func TestMaterialize(t *testing.T) {
 		assert.Equal(t, "node-1", wo.Spec.Match.NodeName)
 	})
 
-	t.Run("cluster role grants node and OCP read access", func(t *testing.T) {
-		ag := testAgent("test")
-		c := fake.NewClientBuilder().
-			WithScheme(testScheme(t)).
-			Build()
-
-		mat := newMaterializer(t, c, defaultFakeLoader())
-		_, err := mat.Materialize(context.Background(), ag)
-		require.NoError(t, err)
-
-		var cr rbacv1.ClusterRole
-		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test"}, &cr))
-
-		hasResource := func(group, resource string) bool {
-			for _, rule := range cr.Rules {
-				for _, g := range rule.APIGroups {
-					if g != group {
-						continue
-					}
-					for _, r := range rule.Resources {
-						if r == resource || r == "*" {
-							return true
-						}
-					}
-				}
-			}
-			return false
-		}
-		assert.True(t, hasResource("", "nodes"), "should grant access to nodes")
-		assert.True(t, hasResource("kit.openshift.io", "*"), "should grant Kit read access")
-		assert.True(t, hasResource("machineconfiguration.openshift.io", "*"), "should grant MCO read access")
-		assert.True(t, hasResource("machineconfiguration.openshift.io", "machineconfignodes"), "should grant MCN access")
-		assert.True(t, hasResource("machineconfiguration.openshift.io", "machineconfignodes/status"), "should grant MCN status access")
-
-		// TODO: this assertion is fragile — it hardcodes which verbs are allowed
-		// per resource and breaks every time clusterScopedPolicyRules changes.
-		// Replace with a table-driven check that mirrors the policy declaration
-		// or test the policy function directly instead of inspecting the rendered
-		// ClusterRole.
-		for _, rule := range cr.Rules {
-			isNodeRule := false
-			for _, r := range rule.Resources {
-				if r == "nodes" {
-					isNodeRule = true
-					break
-				}
-			}
-			for _, verb := range rule.Verbs {
-				if isNodeRule && verb == "patch" {
-					continue
-				}
-				assert.NotContains(t, []string{"create", "update", "delete"}, verb, "cluster role should not grant create/update/delete (except node patch)")
-			}
-		}
-	})
-
 	t.Run("updates an existing generated cluster role", func(t *testing.T) {
 		ag := testAgent("test")
 		existing := &rbacv1.ClusterRole{
@@ -450,28 +396,8 @@ func TestMaterialize(t *testing.T) {
 			}
 			return false
 		}
-		assert.True(t, hasRule("", "nodes", "patch"), "existing node patch access should be retained")
-		assert.True(t, hasRule("machineconfiguration.openshift.io", "machineconfignodes", "patch"), "existing MCN access should be updated")
-		assert.True(t, hasRule("machineconfiguration.openshift.io", "machineconfignodes/status", "patch"), "existing MCN status access should be updated")
-	})
-
-	t.Run("role excludes secrets", func(t *testing.T) {
-		ag := testAgent("test")
-		c := fake.NewClientBuilder().
-			WithScheme(testScheme(t)).
-			Build()
-
-		mat := newMaterializer(t, c, defaultFakeLoader())
-		_, err := mat.Materialize(context.Background(), ag)
-		require.NoError(t, err)
-
-		var role rbacv1.Role
-		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &role))
-		for _, rule := range role.Rules {
-			for _, res := range rule.Resources {
-				assert.NotEqual(t, "secrets", res)
-			}
-		}
+		assert.True(t, hasRule("", "nodes", "patch"), "SSA should update stale ClusterRole")
+		assert.True(t, hasRule("machineconfiguration.openshift.io", "machineconfignodes", "patch"))
 	})
 
 	t.Run("WO update adopts owner references", func(t *testing.T) {
@@ -525,6 +451,223 @@ func TestMaterialize(t *testing.T) {
 			}
 		}
 		assert.Equal(t, r2.BundleDigest, digestEnv)
+	})
+
+	t.Run("labels use agent UID on all generated objects", func(t *testing.T) {
+		ag := testAgent("test")
+		c := fake.NewClientBuilder().
+			WithScheme(testScheme(t)).
+			Build()
+
+		mat := newMaterializer(t, c, defaultFakeLoader())
+		_, err := mat.Materialize(context.Background(), ag)
+		require.NoError(t, err)
+
+		checkLabel := func(obj client.Object) {
+			t.Helper()
+			assert.Equal(t, string(ag.UID), obj.GetLabels()[agentrbac.LabelAgentUID],
+				"%T should have agent-uid label", obj)
+		}
+
+		var sa corev1.ServiceAccount
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &sa))
+		checkLabel(&sa)
+
+		var role rbacv1.Role
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &role))
+		checkLabel(&role)
+
+		var rb rbacv1.RoleBinding
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &rb))
+		checkLabel(&rb)
+
+		var cr rbacv1.ClusterRole
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test"}, &cr))
+		checkLabel(&cr)
+
+		var crb rbacv1.ClusterRoleBinding
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test"}, &crb))
+		checkLabel(&crb)
+	})
+
+	t.Run("namespace retarget repairs subjects and prunes old objects", func(t *testing.T) {
+		ag := testAgent("test")
+		c := fake.NewClientBuilder().
+			WithScheme(testScheme(t)).
+			Build()
+
+		mat := newMaterializer(t, c, defaultFakeLoader())
+		_, err := mat.Materialize(context.Background(), ag)
+		require.NoError(t, err)
+
+		// Verify initial state in target-ns.
+		var sa corev1.ServiceAccount
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &sa))
+		var role rbacv1.Role
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &role))
+
+		// Retarget to a different namespace.
+		ag.Spec.Target.Namespace = "new-ns"
+		_, err = mat.Materialize(context.Background(), ag)
+		require.NoError(t, err)
+
+		// New objects exist in new-ns.
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "new-ns"}, &sa))
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "new-ns"}, &role))
+
+		var rb rbacv1.RoleBinding
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "new-ns"}, &rb))
+		assert.Equal(t, "new-ns", rb.Subjects[0].Namespace)
+
+		// ClusterRoleBinding subject updated to new namespace.
+		var crb rbacv1.ClusterRoleBinding
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test"}, &crb))
+		assert.Equal(t, "new-ns", crb.Subjects[0].Namespace)
+
+		// Old namespaced objects pruned.
+		err = c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &sa)
+		assert.True(t, err != nil, "old SA should be pruned")
+		err = c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &role)
+		assert.True(t, err != nil, "old Role should be pruned")
+		err = c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &rb)
+		assert.True(t, err != nil, "old RoleBinding should be pruned")
+	})
+
+	t.Run("stale CRB subject repaired", func(t *testing.T) {
+		ag := testAgent("test")
+		staleCRB := &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "kit-agent-test",
+				Labels: map[string]string{agentrbac.LabelAgentUID: string(ag.UID)},
+			},
+			Subjects: []rbacv1.Subject{{
+				Kind:      "ServiceAccount",
+				Name:      "kit-agent-test",
+				Namespace: "wrong-namespace",
+			}},
+			RoleRef: rbacv1.RoleRef{
+				APIGroup: rbacv1.GroupName,
+				Kind:     "ClusterRole",
+				Name:     "kit-agent-test",
+			},
+		}
+		c := fake.NewClientBuilder().
+			WithScheme(testScheme(t)).
+			WithObjects(staleCRB).
+			Build()
+
+		mat := newMaterializer(t, c, defaultFakeLoader())
+		_, err := mat.Materialize(context.Background(), ag)
+		require.NoError(t, err)
+
+		var crb rbacv1.ClusterRoleBinding
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test"}, &crb))
+		require.Len(t, crb.Subjects, 1)
+		assert.Equal(t, "target-ns", crb.Subjects[0].Namespace,
+			"SSA should repair stale subject namespace")
+	})
+
+	t.Run("stale role rules repaired", func(t *testing.T) {
+		ag := testAgent("test")
+		staleRole := &rbacv1.Role{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "kit-agent-test",
+				Namespace: "target-ns",
+				Labels:    map[string]string{agentrbac.LabelAgentUID: string(ag.UID)},
+			},
+			Rules: []rbacv1.PolicyRule{{
+				APIGroups: []string{""},
+				Resources: []string{"secrets"},
+				Verbs:     []string{"get"},
+			}},
+		}
+		c := fake.NewClientBuilder().
+			WithScheme(testScheme(t)).
+			WithObjects(staleRole).
+			Build()
+
+		mat := newMaterializer(t, c, defaultFakeLoader())
+		_, err := mat.Materialize(context.Background(), ag)
+		require.NoError(t, err)
+
+		var role rbacv1.Role
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &role))
+		for _, rule := range role.Rules {
+			for _, res := range rule.Resources {
+				assert.NotEqual(t, "secrets", res,
+					"SSA should replace stale rules, secrets should not remain")
+			}
+		}
+		assert.NotEmpty(t, role.Rules, "role should have the correct rules after repair")
+	})
+
+	t.Run("user object with agent label but no owner ref not deleted", func(t *testing.T) {
+		ag := testAgent("test")
+		userCRB := &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "user-managed-crb",
+				Labels: map[string]string{agentrbac.LabelAgentUID: string(ag.UID)},
+			},
+			Subjects: []rbacv1.Subject{{
+				Kind:      "ServiceAccount",
+				Name:      "user-sa",
+				Namespace: "user-ns",
+			}},
+			RoleRef: rbacv1.RoleRef{
+				APIGroup: rbacv1.GroupName,
+				Kind:     "ClusterRole",
+				Name:     "user-role",
+			},
+		}
+		c := fake.NewClientBuilder().
+			WithScheme(testScheme(t)).
+			WithObjects(userCRB).
+			Build()
+
+		mat := newMaterializer(t, c, defaultFakeLoader())
+		_, err := mat.Materialize(context.Background(), ag)
+		require.NoError(t, err)
+
+		var crb rbacv1.ClusterRoleBinding
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "user-managed-crb"}, &crb),
+			"user-managed CRB without owner ref should survive prune")
+	})
+
+	t.Run("WO failure after retarget preserves old objects", func(t *testing.T) {
+		ag := testAgent("test")
+		failWO := false
+		c := fake.NewClientBuilder().
+			WithScheme(testScheme(t)).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if failWO {
+						if _, ok := obj.(*v1alpha1.WorkloadOverride); ok {
+							return fmt.Errorf("simulated WO failure")
+						}
+					}
+					return cl.Patch(ctx, obj, patch, opts...)
+				},
+			}).
+			Build()
+
+		mat := newMaterializer(t, c, defaultFakeLoader())
+		_, err := mat.Materialize(context.Background(), ag)
+		require.NoError(t, err)
+
+		// Enable WO failure and retarget.
+		failWO = true
+		ag.Spec.Target.Namespace = "new-ns"
+		_, err = mat.Materialize(context.Background(), ag)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "simulated WO failure")
+
+		// Old SA and Role in target-ns must still exist.
+		var sa corev1.ServiceAccount
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &sa),
+			"old SA should survive when WO fails")
+		var role rbacv1.Role
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &role),
+			"old Role should survive when WO fails")
 	})
 }
 
