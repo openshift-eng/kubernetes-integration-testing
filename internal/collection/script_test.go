@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
+	rbacv1 "k8s.io/api/rbac/v1"
 )
 
 // TestLoadScriptPackageFromDir verifies that directory-based packages are loaded
@@ -349,4 +350,68 @@ func TestLoadScriptPackageSizeLimits(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "inline content exceeds maximum size")
 	})
+}
+
+func TestLoadScriptPackageCapabilityValidation(t *testing.T) {
+	makePkg := func(caps ...v1alpha1.ScriptCapability) *v1alpha1.ScriptPackage {
+		return &v1alpha1.ScriptPackage{
+			Name:         "pkg",
+			Inline:       "code",
+			Capabilities: caps,
+		}
+	}
+	makeCap := func(scope v1alpha1.ScriptCapabilityScope, groups, resources, verbs []string) v1alpha1.ScriptCapability {
+		return v1alpha1.ScriptCapability{
+			Scope:      scope,
+			PolicyRule: rbacv1.PolicyRule{APIGroups: groups, Resources: resources, Verbs: verbs},
+		}
+	}
+	valid := makeCap(v1alpha1.ScopeCluster, []string{""}, []string{"nodes"}, []string{"get", "list"})
+
+	accepted := []struct {
+		name string
+		cap  v1alpha1.ScriptCapability
+	}{
+		{"valid capability", valid},
+		{"subresource via slash", makeCap(v1alpha1.ScopeCluster, []string{""}, []string{"nodes/status"}, []string{"patch"})},
+		{"allNamespaces scope", makeCap(v1alpha1.ScopeAllNamespaces, []string{""}, []string{"pods"}, []string{"get"})},
+		{"targetNamespace scope", makeCap(v1alpha1.ScopeTargetNamespace, []string{""}, []string{"pods"}, []string{"get"})},
+	}
+	for _, tc := range accepted {
+		t.Run(tc.name+" accepted", func(t *testing.T) {
+			_, err := LoadScriptPackage(makePkg(tc.cap), nil)
+			require.NoError(t, err)
+		})
+	}
+
+	t.Run("nil capabilities accepted", func(t *testing.T) {
+		_, err := LoadScriptPackage(makePkg(), nil)
+		require.NoError(t, err)
+	})
+
+	rejected := []struct {
+		name     string
+		cap      v1alpha1.ScriptCapability
+		contains string
+	}{
+		{"invalid scope", makeCap("bogus", []string{""}, []string{"nodes"}, []string{"get"}), "unsupported scope"},
+		{"empty scope", makeCap("", []string{""}, []string{"nodes"}, []string{"get"}), "unsupported scope"},
+		{"resourceNames", v1alpha1.ScriptCapability{Scope: v1alpha1.ScopeCluster, PolicyRule: rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"nodes"}, Verbs: []string{"get"}, ResourceNames: []string{"foo"}}}, "resourceNames"},
+		{"nonResourceURLs", v1alpha1.ScriptCapability{Scope: v1alpha1.ScopeCluster, PolicyRule: rbacv1.PolicyRule{APIGroups: []string{""}, Resources: []string{"nodes"}, Verbs: []string{"get"}, NonResourceURLs: []string{"/api"}}}, "nonResourceURLs"},
+		{"empty apiGroups", makeCap(v1alpha1.ScopeCluster, nil, []string{"nodes"}, []string{"get"}), "apiGroup"},
+		{"empty resources", makeCap(v1alpha1.ScopeCluster, []string{""}, nil, []string{"get"}), "resource"},
+		{"empty verbs", makeCap(v1alpha1.ScopeCluster, []string{""}, []string{"nodes"}, nil), "verbs"},
+		{"too many verbs", makeCap(v1alpha1.ScopeCluster, []string{""}, []string{"nodes"}, []string{"get", "list", "watch", "create", "update", "patch", "delete", "extra"}), "verbs"},
+		{"wildcard apiGroup", makeCap(v1alpha1.ScopeCluster, []string{"*"}, []string{"nodes"}, []string{"get"}), "'*'"},
+		{"wildcard resource", makeCap(v1alpha1.ScopeCluster, []string{""}, []string{"*"}, []string{"get"}), "'*'"},
+		{"empty resource entry", makeCap(v1alpha1.ScopeCluster, []string{""}, []string{""}, []string{"get"}), "empty"},
+		{"unsupported verb", makeCap(v1alpha1.ScopeCluster, []string{""}, []string{"nodes"}, []string{"escalate"}), "unsupported verb"},
+	}
+	for _, tc := range rejected {
+		t.Run("rejects "+tc.name, func(t *testing.T) {
+			_, err := LoadScriptPackage(makePkg(tc.cap), nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.contains)
+		})
+	}
 }
