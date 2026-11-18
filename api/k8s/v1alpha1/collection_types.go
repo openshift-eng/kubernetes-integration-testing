@@ -1,6 +1,7 @@
 package v1alpha1
 
 import (
+	rbacv1 "k8s.io/api/rbac/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -93,6 +94,43 @@ type ScriptPackage struct {
 	// libraries available via require("<package-name>/<file>").
 	// +kubebuilder:validation:MaxLength=256
 	Entrypoint string `json:"entrypoint,omitempty"`
+
+	// Capabilities declares the Kubernetes API access this package needs.
+	// Kit compiles them into generated RBAC and enforces them at runtime.
+	// +kubebuilder:validation:MaxItems=32
+	Capabilities []ScriptCapability `json:"capabilities,omitempty"`
+}
+
+// ScriptCapabilityScope determines where a capability applies and what
+// RBAC objects Kit generates for it.
+// +kubebuilder:validation:Enum=targetNamespace;allNamespaces;cluster
+type ScriptCapabilityScope string
+
+const (
+	// ScopeTargetNamespace restricts access to the Agent's target namespace.
+	ScopeTargetNamespace ScriptCapabilityScope = "targetNamespace"
+	// ScopeAllNamespaces grants access to a namespaced resource across all namespaces.
+	ScopeAllNamespaces ScriptCapabilityScope = "allNamespaces"
+	// ScopeCluster grants access to a cluster-scoped resource.
+	ScopeCluster ScriptCapabilityScope = "cluster"
+)
+
+// ScriptCapability declares access to a set of Kubernetes resources.
+// It embeds rbacv1.PolicyRule so the compiler can consume it directly.
+// Fields not supported in v1 (resourceNames, nonResourceURLs) are
+// rejected by CRD validation. Semantic checks (wildcard rejection,
+// verb allowlist, empty resource) are deferred to the loader.
+// +kubebuilder:validation:XValidation:rule="size(self.apiGroups) >= 1",message="at least one apiGroup is required"
+// +kubebuilder:validation:XValidation:rule="size(self.resources) >= 1",message="at least one resource is required"
+// +kubebuilder:validation:XValidation:rule="size(self.verbs) >= 1 && size(self.verbs) <= 7",message="verbs must have between 1 and 7 entries"
+// +kubebuilder:validation:XValidation:rule="!has(self.resourceNames) || size(self.resourceNames) == 0",message="resourceNames is not supported"
+// +kubebuilder:validation:XValidation:rule="!has(self.nonResourceURLs) || size(self.nonResourceURLs) == 0",message="nonResourceURLs is not supported"
+type ScriptCapability struct {
+	// Scope determines where this capability applies.
+	// +kubebuilder:validation:Required
+	Scope ScriptCapabilityScope `json:"scope"`
+
+	rbacv1.PolicyRule `json:",inline"`
 }
 
 // StatusPatch declares a status to apply to a rendered object after it has been
