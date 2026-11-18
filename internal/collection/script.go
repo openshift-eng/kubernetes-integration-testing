@@ -41,10 +41,10 @@ type ScriptPackageContent struct {
 // AtomicCapability is a single (scope, apiGroup, resource, verb) permission
 // derived by expanding PolicyRule lists in ScriptCapability declarations.
 type AtomicCapability struct {
-	Scope    v1alpha1.ScriptCapabilityScope
-	APIGroup string
-	Resource string
-	Verb     string
+	Scope    v1alpha1.ScriptCapabilityScope `json:"scope"`
+	APIGroup string                         `json:"apiGroup"`
+	Resource string                         `json:"resource"`
+	Verb     string                         `json:"verb"`
 }
 
 func LoadScriptPackage(pkg *v1alpha1.ScriptPackage, fsys fs.FS) (*ScriptPackageContent, error) {

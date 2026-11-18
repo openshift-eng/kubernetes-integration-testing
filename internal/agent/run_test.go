@@ -53,7 +53,12 @@ func buildTestBundle(t *testing.T, timeout *metav1.Duration) *bundle.Bundle {
 			{Path: "main.js", Content: []byte(`exports.main = function(ctx) { ctx.sleep(999999); }`)},
 		},
 	}
-	b, err := bundle.Build([]collection.ScriptPackageContent{pkg}, "test-pkg", nil, "js", timeout)
+	b, err := bundle.Build(bundle.BuildInput{
+		Packages:          []collection.ScriptPackageContent{pkg},
+		EntrypointPackage: "test-pkg",
+		Runtime:           "js",
+		Timeout:           timeout,
+	})
 	require.NoError(t, err)
 	return b
 }

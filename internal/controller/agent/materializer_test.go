@@ -1,7 +1,10 @@
 package agent_test
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"testing"
@@ -27,9 +30,10 @@ import (
 )
 
 type fakeScriptLoader struct {
-	packages      []collection.ScriptPackageContent
-	localPackages map[string]bool
-	err           error
+	packages              []collection.ScriptPackageContent
+	localPackages         map[string]bool
+	effectiveCapabilities []collection.AtomicCapability
+	err                   error
 }
 
 func (f *fakeScriptLoader) Load(_ context.Context, _ string, _ collection.ScriptCollectionResolver) (*collection.LoadResult, error) {
@@ -44,9 +48,10 @@ func (f *fakeScriptLoader) Load(_ context.Context, _ string, _ collection.Script
 		}
 	}
 	return &collection.LoadResult{
-		Packages:      f.packages,
-		LocalPackages: root,
-		ContentHash:   "fake",
+		Packages:              f.packages,
+		LocalPackages:         root,
+		EffectiveCapabilities: f.effectiveCapabilities,
+		ContentHash:           "fake",
 	}, nil
 }
 
@@ -812,4 +817,47 @@ func TestIsWOFresh(t *testing.T) {
 			assert.Equal(t, tc.want, agentctl.IsWOFresh(ag, wo))
 		})
 	}
+}
+
+func TestMaterializerPassesCapabilitiesToBundle(t *testing.T) {
+	caps := []collection.AtomicCapability{
+		{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "get"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "list"},
+	}
+	loader := &fakeScriptLoader{
+		packages: []collection.ScriptPackageContent{{
+			Name:       "test-pkg",
+			Entrypoint: "main.js",
+			Files:      []collection.ScriptFile{{Path: "main.js", Content: []byte(`exports.main = function(ctx) {};`)}},
+		}},
+		effectiveCapabilities: caps,
+	}
+
+	store := testStore(t)
+	k := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	mat := agentctl.NewMaterializer(k, store, loader, "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+
+	ag := testAgent("cap-agent")
+	result, err := mat.Materialize(context.Background(), ag)
+	require.NoError(t, err)
+
+	rc, _, err := store.Open(result.BundleDigest)
+	require.NoError(t, err)
+	defer rc.Close()
+
+	gr, err := gzip.NewReader(rc)
+	require.NoError(t, err)
+	defer gr.Close()
+
+	tr := tar.NewReader(gr)
+	var manifest bundle.Manifest
+	for {
+		hdr, err := tr.Next()
+		require.NoError(t, err)
+		if hdr.Name == "manifest.json" {
+			require.NoError(t, json.NewDecoder(tr).Decode(&manifest))
+			break
+		}
+	}
+	assert.Equal(t, caps, manifest.Capabilities)
 }

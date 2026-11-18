@@ -35,7 +35,7 @@ func TestServer(t *testing.T) {
 			Entrypoint: "main.js",
 			Files:      []collection.ScriptFile{{Path: "main.js", Content: []byte("code")}},
 		}
-		b, err := Build([]collection.ScriptPackageContent{pkg}, "test-pkg", nil, "js", nil)
+		b, err := Build(BuildInput{Packages: []collection.ScriptPackageContent{pkg}, EntrypointPackage: "test-pkg", Runtime: "js"})
 		require.NoError(t, err)
 		require.NoError(t, store.Put("my-agent", b))
 
@@ -78,7 +78,7 @@ func TestServer(t *testing.T) {
 			Entrypoint: "main.js",
 			Files:      []collection.ScriptFile{{Path: "main.js", Content: []byte("x")}},
 		}
-		b, err := Build([]collection.ScriptPackageContent{pkg}, "hdr-pkg", nil, "js", nil)
+		b, err := Build(BuildInput{Packages: []collection.ScriptPackageContent{pkg}, EntrypointPackage: "hdr-pkg", Runtime: "js"})
 		require.NoError(t, err)
 		require.NoError(t, store.Put("hdr-agent", b))
 

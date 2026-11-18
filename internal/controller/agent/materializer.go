@@ -63,7 +63,14 @@ func (m *Materializer) Materialize(ctx context.Context, ag *v1alpha1.Agent) (*Ma
 
 	values := convertValues(ag.Spec.Values)
 
-	b, err := bundle.Build(loaded.Packages, ag.Spec.Script.Package, values, string(ag.Spec.Runtime), ag.Spec.Timeout)
+	b, err := bundle.Build(bundle.BuildInput{
+		Packages:              loaded.Packages,
+		EntrypointPackage:     ag.Spec.Script.Package,
+		Values:                values,
+		Runtime:               string(ag.Spec.Runtime),
+		Timeout:               ag.Spec.Timeout,
+		EffectiveCapabilities: loaded.EffectiveCapabilities,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("building bundle: %w", err)
 	}
