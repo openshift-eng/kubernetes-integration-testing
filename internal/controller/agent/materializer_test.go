@@ -55,11 +55,24 @@ func (f *fakeScriptLoader) Load(_ context.Context, _ string, _ collection.Script
 	}, nil
 }
 
+func testCapabilities() []collection.AtomicCapability {
+	return []collection.AtomicCapability{
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "get"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "list"},
+		{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "get"},
+		{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "patch"},
+	}
+}
+
 func defaultFakeLoader() *fakeScriptLoader {
-	return fakeLoaderWithScript(`exports.main = function(ctx) { return {exitCode: 0}; };`)
+	return fakeLoaderWithCaps(`exports.main = function(ctx) { return {exitCode: 0}; };`, testCapabilities())
 }
 
 func fakeLoaderWithScript(content string) *fakeScriptLoader {
+	return fakeLoaderWithCaps(content, nil)
+}
+
+func fakeLoaderWithCaps(content string, caps []collection.AtomicCapability) *fakeScriptLoader {
 	return &fakeScriptLoader{
 		packages: []collection.ScriptPackageContent{{
 			Name:       "test-pkg",
@@ -68,6 +81,7 @@ func fakeLoaderWithScript(content string) *fakeScriptLoader {
 				{Path: "main.js", Content: []byte(content)},
 			},
 		}},
+		effectiveCapabilities: caps,
 	}
 }
 
@@ -133,7 +147,8 @@ func TestMaterialize(t *testing.T) {
 
 		var role rbacv1.Role
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-mcd-stub", Namespace: "target-ns"}, &role))
-		assert.NotEmpty(t, role.Rules)
+		require.Len(t, role.Rules, 1)
+		assert.Equal(t, []string{"pods"}, role.Rules[0].Resources)
 
 		var rb rbacv1.RoleBinding
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-mcd-stub", Namespace: "target-ns"}, &rb))
@@ -141,7 +156,8 @@ func TestMaterialize(t *testing.T) {
 
 		var cr rbacv1.ClusterRole
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-mcd-stub"}, &cr))
-		assert.NotEmpty(t, cr.Rules)
+		require.Len(t, cr.Rules, 1)
+		assert.Equal(t, []string{"nodes"}, cr.Rules[0].Resources)
 
 		var crb rbacv1.ClusterRoleBinding
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-mcd-stub"}, &crb))
@@ -381,28 +397,10 @@ func TestMaterialize(t *testing.T) {
 
 		var updated rbacv1.ClusterRole
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test"}, &updated))
-		hasRule := func(group, resource, verb string) bool {
-			for _, rule := range updated.Rules {
-				for _, apiGroup := range rule.APIGroups {
-					if apiGroup != group {
-						continue
-					}
-					for _, ruleResource := range rule.Resources {
-						if ruleResource != resource {
-							continue
-						}
-						for _, ruleVerb := range rule.Verbs {
-							if ruleVerb == verb {
-								return true
-							}
-						}
-					}
-				}
-			}
-			return false
-		}
-		assert.True(t, hasRule("", "nodes", "patch"), "SSA should update stale ClusterRole")
-		assert.True(t, hasRule("machineconfiguration.openshift.io", "machineconfignodes", "patch"))
+		require.Len(t, updated.Rules, 1)
+		assert.Equal(t, []string{"nodes"}, updated.Rules[0].Resources)
+		assert.Contains(t, updated.Rules[0].Verbs, "get")
+		assert.Contains(t, updated.Rules[0].Verbs, "patch")
 	})
 
 	t.Run("WO update adopts owner references", func(t *testing.T) {
@@ -597,13 +595,9 @@ func TestMaterialize(t *testing.T) {
 
 		var role rbacv1.Role
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &role))
-		for _, rule := range role.Rules {
-			for _, res := range rule.Resources {
-				assert.NotEqual(t, "secrets", res,
-					"SSA should replace stale rules, secrets should not remain")
-			}
-		}
-		assert.NotEmpty(t, role.Rules, "role should have the correct rules after repair")
+		require.Len(t, role.Rules, 1)
+		assert.Equal(t, []string{"pods"}, role.Rules[0].Resources,
+			"SSA should replace stale rules with capability-derived rules")
 	})
 
 	t.Run("user object with agent label but no owner ref not deleted", func(t *testing.T) {
@@ -843,11 +837,11 @@ func TestMaterializerPassesCapabilitiesToBundle(t *testing.T) {
 
 	rc, _, err := store.Open(result.BundleDigest)
 	require.NoError(t, err)
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	gr, err := gzip.NewReader(rc)
 	require.NoError(t, err)
-	defer gr.Close()
+	defer func() { _ = gr.Close() }()
 
 	tr := tar.NewReader(gr)
 	var manifest bundle.Manifest
@@ -860,4 +854,69 @@ func TestMaterializerPassesCapabilitiesToBundle(t *testing.T) {
 		}
 	}
 	assert.Equal(t, caps, manifest.Capabilities)
+}
+
+func TestMaterializeWithoutCapabilities(t *testing.T) {
+	ag := testAgent("nocaps")
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		Build()
+
+	loader := fakeLoaderWithScript(`exports.main = function(ctx) {};`)
+	mat := newMaterializer(t, c, loader)
+	_, err := mat.Materialize(context.Background(), ag)
+	require.NoError(t, err)
+
+	var sa corev1.ServiceAccount
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-nocaps", Namespace: "target-ns"}, &sa),
+		"SA should always be created")
+
+	var roles rbacv1.RoleList
+	require.NoError(t, c.List(context.Background(), &roles, client.InNamespace("target-ns")))
+	assert.Empty(t, roles.Items, "no Role should be created without capabilities")
+
+	var crs rbacv1.ClusterRoleList
+	require.NoError(t, c.List(context.Background(), &crs))
+	assert.Empty(t, crs.Items, "no ClusterRole should be created without capabilities")
+}
+
+func TestMaterializePrunesRBACOnCapabilityReduction(t *testing.T) {
+	ag := testAgent("reduce")
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		Build()
+
+	store := testStore(t)
+
+	fullCaps := []collection.AtomicCapability{
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "get"},
+		{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "get"},
+	}
+	loader := fakeLoaderWithCaps(`exports.main = function(ctx) {};`, fullCaps)
+	mat := agentctl.NewMaterializer(c, store, loader, "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+
+	_, err := mat.Materialize(context.Background(), ag)
+	require.NoError(t, err)
+
+	var cr rbacv1.ClusterRole
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-reduce"}, &cr),
+		"ClusterRole should exist with cluster capabilities")
+
+	// Remove cluster capabilities, keep only targetNamespace.
+	loader.effectiveCapabilities = []collection.AtomicCapability{
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "get"},
+	}
+	_, err = mat.Materialize(context.Background(), ag)
+	require.NoError(t, err)
+
+	var role rbacv1.Role
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-reduce", Namespace: "target-ns"}, &role),
+		"Role should still exist for targetNamespace capabilities")
+
+	err = c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-reduce"}, &cr)
+	assert.Error(t, err, "ClusterRole should be pruned after removing cluster capabilities")
+
+	var crb rbacv1.ClusterRoleBinding
+	err = c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-reduce"}, &crb)
+	assert.Error(t, err, "ClusterRoleBinding should be pruned after removing cluster capabilities")
 }

@@ -41,7 +41,11 @@ func (f *fakeScriptLoader) Load(_ context.Context, collectionName string, _ coll
 			},
 		}},
 		LocalPackages: map[string]bool{"test-pkg": true},
-		ContentHash:   "fake",
+		EffectiveCapabilities: []collection.AtomicCapability{
+			{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "get"},
+			{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "get"},
+		},
+		ContentHash: "fake",
 	}, nil
 }
 
@@ -160,6 +164,16 @@ func TestAgentReconciler(t *testing.T) {
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{
 			Name: "kit-agent-mcd-stub", Namespace: "openshift-machine-config-operator",
 		}, &rb))
+
+		var cr rbacv1.ClusterRole
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{
+			Name: "kit-agent-mcd-stub",
+		}, &cr))
+
+		var crb rbacv1.ClusterRoleBinding
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{
+			Name: "kit-agent-mcd-stub",
+		}, &crb))
 
 		var wo v1alpha1.WorkloadOverride
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-mcd-stub"}, &wo))

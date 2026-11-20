@@ -6,6 +6,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent/rbac"
 
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -13,7 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
-func testInput() rbac.CompileInput {
+func testInput(caps []collection.AtomicCapability) rbac.CompileInput {
 	return rbac.CompileInput{
 		Name:            "kit-agent-mcd",
 		TargetNamespace: "openshift-mco",
@@ -23,140 +25,192 @@ func testInput() rbac.CompileInput {
 			Name:       "mcd",
 			UID:        types.UID("agent-uid"),
 		},
+		EffectiveCapabilities: caps,
 	}
 }
 
-func TestCompile(t *testing.T) {
-	objects := rbac.Compile(testInput())
-	require.Len(t, objects, 4)
+func TestCompileEmpty(t *testing.T) {
+	objects := rbac.Compile(testInput(nil))
+	assert.Empty(t, objects)
+}
+
+func TestCompileTargetNamespace(t *testing.T) {
+	caps := []collection.AtomicCapability{
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "get"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "list"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "apps", Resource: "deployments", Verb: "get"},
+	}
+	objects := rbac.Compile(testInput(caps))
+	require.Len(t, objects, 2)
 
 	role, ok := objects[0].(*rbacv1.Role)
-	require.True(t, ok, "first object should be a Role")
+	require.True(t, ok)
 	rb, ok := objects[1].(*rbacv1.RoleBinding)
-	require.True(t, ok, "second object should be a RoleBinding")
-	cr, ok := objects[2].(*rbacv1.ClusterRole)
-	require.True(t, ok, "third object should be a ClusterRole")
-	crb, ok := objects[3].(*rbacv1.ClusterRoleBinding)
-	require.True(t, ok, "fourth object should be a ClusterRoleBinding")
+	require.True(t, ok)
 
-	t.Run("names and namespaces", func(t *testing.T) {
+	t.Run("role metadata", func(t *testing.T) {
 		assert.Equal(t, "kit-agent-mcd", role.Name)
 		assert.Equal(t, "openshift-mco", role.Namespace)
-
-		assert.Equal(t, "kit-agent-mcd", rb.Name)
-		assert.Equal(t, "openshift-mco", rb.Namespace)
-
-		assert.Equal(t, "kit-agent-mcd", cr.Name)
-		assert.Empty(t, cr.Namespace)
-
-		assert.Equal(t, "kit-agent-mcd", crb.Name)
-		assert.Empty(t, crb.Namespace)
-	})
-
-	t.Run("labels", func(t *testing.T) {
-		for _, obj := range objects {
-			labels := obj.GetLabels()
-			assert.Equal(t, "agent-uid", labels[rbac.LabelAgentUID], "object %T missing agent-uid label", obj)
-		}
-	})
-
-	t.Run("owner references", func(t *testing.T) {
-		for _, obj := range objects {
-			refs := obj.GetOwnerReferences()
-			require.Len(t, refs, 1, "object %T should have one owner ref", obj)
-			assert.Equal(t, "Agent", refs[0].Kind)
-			assert.Equal(t, "mcd", refs[0].Name)
-			assert.Equal(t, types.UID("agent-uid"), refs[0].UID)
-		}
-	})
-
-	t.Run("TypeMeta set for SSA", func(t *testing.T) {
 		assert.Equal(t, "Role", role.Kind)
 		assert.Equal(t, rbacv1.SchemeGroupVersion.String(), role.APIVersion)
-
-		assert.Equal(t, "RoleBinding", rb.Kind)
-		assert.Equal(t, rbacv1.SchemeGroupVersion.String(), rb.APIVersion)
-
-		assert.Equal(t, "ClusterRole", cr.Kind)
-		assert.Equal(t, rbacv1.SchemeGroupVersion.String(), cr.APIVersion)
-
-		assert.Equal(t, "ClusterRoleBinding", crb.Kind)
-		assert.Equal(t, rbacv1.SchemeGroupVersion.String(), crb.APIVersion)
+		assert.Equal(t, "agent-uid", role.Labels[rbac.LabelAgentUID])
+		require.Len(t, role.OwnerReferences, 1)
+		assert.Equal(t, types.UID("agent-uid"), role.OwnerReferences[0].UID)
 	})
 
-	t.Run("binding subjects", func(t *testing.T) {
+	t.Run("role rules group by apiGroup+resource and union verbs", func(t *testing.T) {
+		require.Len(t, role.Rules, 2)
+		assert.Equal(t, rbacv1.PolicyRule{
+			APIGroups: []string{""},
+			Resources: []string{"pods"},
+			Verbs:     []string{"get", "list"},
+		}, role.Rules[0])
+		assert.Equal(t, rbacv1.PolicyRule{
+			APIGroups: []string{"apps"},
+			Resources: []string{"deployments"},
+			Verbs:     []string{"get"},
+		}, role.Rules[1])
+	})
+
+	t.Run("binding", func(t *testing.T) {
+		assert.Equal(t, "kit-agent-mcd", rb.Name)
+		assert.Equal(t, "openshift-mco", rb.Namespace)
+		assert.Equal(t, "RoleBinding", rb.Kind)
 		require.Len(t, rb.Subjects, 1)
 		assert.Equal(t, "ServiceAccount", rb.Subjects[0].Kind)
 		assert.Equal(t, "kit-agent-mcd", rb.Subjects[0].Name)
 		assert.Equal(t, "openshift-mco", rb.Subjects[0].Namespace)
-
-		require.Len(t, crb.Subjects, 1)
-		assert.Equal(t, "ServiceAccount", crb.Subjects[0].Kind)
-		assert.Equal(t, "kit-agent-mcd", crb.Subjects[0].Name)
-		assert.Equal(t, "openshift-mco", crb.Subjects[0].Namespace)
+		assert.Equal(t, rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "Role",
+			Name:     "kit-agent-mcd",
+		}, rb.RoleRef)
 	})
 
-	t.Run("role refs", func(t *testing.T) {
-		assert.Equal(t, "Role", rb.RoleRef.Kind)
-		assert.Equal(t, "kit-agent-mcd", rb.RoleRef.Name)
-		assert.Equal(t, rbacv1.GroupName, rb.RoleRef.APIGroup)
-
-		assert.Equal(t, "ClusterRole", crb.RoleRef.Kind)
-		assert.Equal(t, "kit-agent-mcd", crb.RoleRef.Name)
-		assert.Equal(t, rbacv1.GroupName, crb.RoleRef.APIGroup)
-	})
-
-	t.Run("role has namespaced rules", func(t *testing.T) {
-		require.NotEmpty(t, role.Rules)
-		hasResource := func(group, resource string) bool {
-			for _, rule := range role.Rules {
-				for _, g := range rule.APIGroups {
-					if g != group {
-						continue
-					}
-					for _, r := range rule.Resources {
-						if r == resource {
-							return true
-						}
-					}
-				}
-			}
-			return false
+	t.Run("no cluster-scoped objects", func(t *testing.T) {
+		for _, obj := range objects {
+			assert.NotEqual(t, "ClusterRole", obj.GetObjectKind().GroupVersionKind().Kind)
+			assert.NotEqual(t, "ClusterRoleBinding", obj.GetObjectKind().GroupVersionKind().Kind)
 		}
-		assert.True(t, hasResource("", "pods"))
-		assert.True(t, hasResource("", "configmaps"))
-		assert.True(t, hasResource("apps", "*"))
-		assert.True(t, hasResource("batch", "*"))
-		assert.False(t, hasResource("", "secrets"))
-	})
-
-	t.Run("cluster role has cluster-scoped rules", func(t *testing.T) {
-		require.NotEmpty(t, cr.Rules)
-		hasResource := func(group, resource string) bool {
-			for _, rule := range cr.Rules {
-				for _, g := range rule.APIGroups {
-					if g != group {
-						continue
-					}
-					for _, r := range rule.Resources {
-						if r == resource || r == "*" {
-							return true
-						}
-					}
-				}
-			}
-			return false
-		}
-		assert.True(t, hasResource("", "nodes"))
-		assert.True(t, hasResource("kit.openshift.io", "*"))
-		assert.True(t, hasResource("machineconfiguration.openshift.io", "machineconfignodes"))
 	})
 }
 
+func TestCompileClusterScope(t *testing.T) {
+	caps := []collection.AtomicCapability{
+		{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "get"},
+		{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "list"},
+	}
+	objects := rbac.Compile(testInput(caps))
+	require.Len(t, objects, 2)
+
+	cr, ok := objects[0].(*rbacv1.ClusterRole)
+	require.True(t, ok)
+	crb, ok := objects[1].(*rbacv1.ClusterRoleBinding)
+	require.True(t, ok)
+
+	t.Run("cluster role metadata", func(t *testing.T) {
+		assert.Equal(t, "kit-agent-mcd", cr.Name)
+		assert.Empty(t, cr.Namespace)
+		assert.Equal(t, "ClusterRole", cr.Kind)
+		assert.Equal(t, "agent-uid", cr.Labels[rbac.LabelAgentUID])
+	})
+
+	t.Run("cluster role rules", func(t *testing.T) {
+		require.Len(t, cr.Rules, 1)
+		assert.Equal(t, rbacv1.PolicyRule{
+			APIGroups: []string{""},
+			Resources: []string{"nodes"},
+			Verbs:     []string{"get", "list"},
+		}, cr.Rules[0])
+	})
+
+	t.Run("cluster role binding", func(t *testing.T) {
+		assert.Equal(t, "kit-agent-mcd", crb.Name)
+		require.Len(t, crb.Subjects, 1)
+		assert.Equal(t, "openshift-mco", crb.Subjects[0].Namespace)
+		assert.Equal(t, rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     "kit-agent-mcd",
+		}, crb.RoleRef)
+	})
+
+	t.Run("no namespaced objects", func(t *testing.T) {
+		for _, obj := range objects {
+			assert.NotEqual(t, "Role", obj.GetObjectKind().GroupVersionKind().Kind)
+			assert.NotEqual(t, "RoleBinding", obj.GetObjectKind().GroupVersionKind().Kind)
+		}
+	})
+}
+
+func TestCompileAllNamespaces(t *testing.T) {
+	caps := []collection.AtomicCapability{
+		{Scope: v1alpha1.ScopeAllNamespaces, APIGroup: "", Resource: "pods", Verb: "get"},
+	}
+	objects := rbac.Compile(testInput(caps))
+	require.Len(t, objects, 2)
+
+	cr := objects[0].(*rbacv1.ClusterRole)
+	require.Len(t, cr.Rules, 1)
+	assert.Equal(t, []string{"pods"}, cr.Rules[0].Resources)
+}
+
+func TestCompileMixedScopes(t *testing.T) {
+	caps := []collection.AtomicCapability{
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "get"},
+		{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "get"},
+		{Scope: v1alpha1.ScopeAllNamespaces, APIGroup: "", Resource: "configmaps", Verb: "list"},
+	}
+	objects := rbac.Compile(testInput(caps))
+	require.Len(t, objects, 4)
+
+	role := objects[0].(*rbacv1.Role)
+	assert.Len(t, role.Rules, 1)
+	assert.Equal(t, []string{"pods"}, role.Rules[0].Resources)
+
+	cr := objects[2].(*rbacv1.ClusterRole)
+	assert.Len(t, cr.Rules, 2)
+}
+
+func TestCompileVerbDedup(t *testing.T) {
+	caps := []collection.AtomicCapability{
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "get"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "get"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "list"},
+	}
+	objects := rbac.Compile(testInput(caps))
+	role := objects[0].(*rbacv1.Role)
+	require.Len(t, role.Rules, 1)
+	assert.Equal(t, []string{"get", "list"}, role.Rules[0].Verbs)
+}
+
+func TestCompileRulesSorted(t *testing.T) {
+	caps := []collection.AtomicCapability{
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "batch", Resource: "jobs", Verb: "get"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "get"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "apps", Resource: "deployments", Verb: "get"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "configmaps", Verb: "get"},
+	}
+	objects := rbac.Compile(testInput(caps))
+	role := objects[0].(*rbacv1.Role)
+	require.Len(t, role.Rules, 4)
+	assert.Equal(t, []string{""}, role.Rules[0].APIGroups)
+	assert.Equal(t, []string{"configmaps"}, role.Rules[0].Resources)
+	assert.Equal(t, []string{""}, role.Rules[1].APIGroups)
+	assert.Equal(t, []string{"pods"}, role.Rules[1].Resources)
+	assert.Equal(t, []string{"apps"}, role.Rules[2].APIGroups)
+	assert.Equal(t, []string{"batch"}, role.Rules[3].APIGroups)
+}
+
 func TestCompileNamespaceChange(t *testing.T) {
-	input := testInput()
+	caps := []collection.AtomicCapability{
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "get"},
+		{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "get"},
+	}
+	input := testInput(caps)
 	input.TargetNamespace = "new-namespace"
 	objects := rbac.Compile(input)
+	require.Len(t, objects, 4)
 
 	role := objects[0].(*rbacv1.Role)
 	rb := objects[1].(*rbacv1.RoleBinding)

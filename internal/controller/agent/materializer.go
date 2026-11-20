@@ -83,7 +83,16 @@ func (m *Materializer) Materialize(ctx context.Context, ag *v1alpha1.Agent) (*Ma
 	name := GeneratedName(ag.Name)
 	ownerRef := agentOwnerRef(ag)
 
-	if err := m.ensureIdentityAndRBAC(ctx, name, ns, ownerRef); err != nil {
+	rbacObjects := agentrbac.Compile(agentrbac.CompileInput{
+		Name:                  name,
+		TargetNamespace:       ns,
+		OwnerRef:              ownerRef,
+		EffectiveCapabilities: loaded.EffectiveCapabilities,
+	})
+
+	desiredSet := desiredObjectSet(name, ns, rbacObjects)
+
+	if err := m.ensureIdentityAndRBAC(ctx, name, ns, ownerRef, rbacObjects); err != nil {
 		return nil, err
 	}
 
@@ -91,7 +100,7 @@ func (m *Materializer) Materialize(ctx context.Context, ag *v1alpha1.Agent) (*Ma
 		return nil, fmt.Errorf("ensuring workload override: %w", err)
 	}
 
-	if err := m.pruneStaleRBACObjects(ctx, ownerRef.UID, name, ns); err != nil {
+	if err := m.pruneStaleRBACObjects(ctx, ownerRef.UID, desiredSet); err != nil {
 		return nil, fmt.Errorf("pruning stale objects: %w", err)
 	}
 
@@ -111,14 +120,8 @@ func (r *clientResolver) Resolve(ctx context.Context, name string) (*v1alpha1.Re
 	return &rc, nil
 }
 
-func (m *Materializer) ensureIdentityAndRBAC(ctx context.Context, name, ns string, ownerRef metav1.OwnerReference) error {
+func (m *Materializer) ensureIdentityAndRBAC(ctx context.Context, name, ns string, ownerRef metav1.OwnerReference, rbacObjects []client.Object) error {
 	sa := buildServiceAccount(name, ns, ownerRef)
-	rbacObjects := agentrbac.Compile(agentrbac.CompileInput{
-		Name:            name,
-		TargetNamespace: ns,
-		OwnerRef:        ownerRef,
-	})
-
 	if err := applyObject(ctx, m.client, sa); err != nil {
 		return fmt.Errorf("ensuring service account: %w", err)
 	}
@@ -156,21 +159,32 @@ func isOwnedBy(obj client.Object, uid types.UID) bool {
 	return false
 }
 
+type objectID struct{ kind, namespace, name string }
+
+// desiredObjectSet snapshots the kind/namespace/name of each object
+// before SSA apply mutates them (Patch clears TypeMeta).
+func desiredObjectSet(saName, saNS string, rbacObjects []client.Object) map[objectID]struct{} {
+	current := map[objectID]struct{}{
+		{"ServiceAccount", saNS, saName}: {},
+	}
+	for _, obj := range rbacObjects {
+		current[objectID{
+			kind:      obj.GetObjectKind().GroupVersionKind().Kind,
+			namespace: obj.GetNamespace(),
+			name:      obj.GetName(),
+		}] = struct{}{}
+	}
+	return current
+}
+
 // pruneStaleRBACObjects deletes identity and RBAC objects that carry the
 // agent-uid label and owner reference but are no longer in the desired
-// set (e.g. after a namespace retarget). It runs after the WO apply so
-// a WO failure does not leave the old WO pointing at a deleted SA.
-func (m *Materializer) pruneStaleRBACObjects(ctx context.Context, agentUID types.UID, targetName, targetNS string) error {
-	type objectID struct{ kind, namespace, name string }
-	current := map[objectID]struct{}{
-		{"ServiceAccount", targetNS, targetName}: {},
-		{"Role", targetNS, targetName}:           {},
-		{"RoleBinding", targetNS, targetName}:    {},
-		{"ClusterRole", "", targetName}:          {},
-		{"ClusterRoleBinding", "", targetName}:   {},
-	}
+// set (e.g. after a namespace retarget or capability reduction). It runs
+// after the WO apply so a WO failure does not leave the old WO pointing
+// at a deleted SA.
+func (m *Materializer) pruneStaleRBACObjects(ctx context.Context, agentUID types.UID, desiredSet map[objectID]struct{}) error {
 	isStale := func(kind, namespace, name string) bool {
-		_, ok := current[objectID{kind, namespace, name}]
+		_, ok := desiredSet[objectID{kind, namespace, name}]
 		return !ok
 	}
 

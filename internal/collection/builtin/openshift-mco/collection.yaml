@@ -8,3 +8,21 @@ spec:
     - name: mcd-agent
       root: scripts/mcd-agent
       entrypoint: main.js
+      capabilities:
+        # Cluster-scoped: read and annotate the node this agent runs on
+        # (list is required by the list-watch loop, patch is used for the
+        # mco current/desired config annotations).
+        - scope: cluster
+          apiGroups: [""]
+          resources: ["nodes"]
+          verbs: ["get", "list", "watch", "patch"]
+        # Cluster-scoped: read MachineConfigNodes and report status on
+        # their status subresource.
+        - scope: cluster
+          apiGroups: ["machineconfiguration.openshift.io"]
+          resources: ["machineconfignodes"]
+          verbs: ["get"]
+        - scope: cluster
+          apiGroups: ["machineconfiguration.openshift.io"]
+          resources: ["machineconfignodes/status"]
+          verbs: ["patch"]
