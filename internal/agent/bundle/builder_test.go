@@ -15,6 +15,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 )
 
@@ -39,6 +40,16 @@ func libraryPackage(name string, files map[string]string) collection.ScriptPacka
 		Name:  name,
 		Files: sf,
 	}
+}
+
+func buildSimple(packages []collection.ScriptPackageContent, entrypoint string, values map[string]json.RawMessage, runtime string, timeout *metav1.Duration) (*Bundle, error) {
+	return Build(BuildInput{
+		Packages:          packages,
+		EntrypointPackage: entrypoint,
+		Values:            values,
+		Runtime:           runtime,
+		Timeout:           timeout,
+	})
 }
 
 func extractTarGz(t *testing.T, b *Bundle) map[string][]byte {
@@ -75,7 +86,7 @@ func TestBuild(t *testing.T) {
 			"lib/state.js": "exports.state = {}",
 		}, "main.js")
 
-		b, err := Build([]collection.ScriptPackageContent{pkg}, "mcd-stub", nil, "js", nil)
+		b, err := buildSimple([]collection.ScriptPackageContent{pkg}, "mcd-stub", nil, "js", nil)
 		require.NoError(t, err)
 		assert.NotEmpty(t, b.Digest)
 		assert.Equal(t, "js", b.Manifest.Runtime)
@@ -99,7 +110,7 @@ func TestBuild(t *testing.T) {
 			"helpers.js": "exports.help = {}",
 		})
 
-		b, err := Build([]collection.ScriptPackageContent{runnable, lib}, "mcd-stub", nil, "js", &metav1.Duration{Duration: 30 * time.Second})
+		b, err := buildSimple([]collection.ScriptPackageContent{runnable, lib}, "mcd-stub", nil, "js", &metav1.Duration{Duration: 30 * time.Second})
 		require.NoError(t, err)
 		assert.Equal(t, 30*time.Second, b.Manifest.Timeout.Duration)
 		require.Len(t, b.Manifest.Packages, 2)
@@ -115,9 +126,9 @@ func TestBuild(t *testing.T) {
 	t.Run("deterministic digest", func(t *testing.T) {
 		pkg := runnablePackage("pkg", map[string]string{"main.js": "code"}, "main.js")
 
-		b1, err := Build([]collection.ScriptPackageContent{pkg}, "pkg", nil, "js", nil)
+		b1, err := buildSimple([]collection.ScriptPackageContent{pkg}, "pkg", nil, "js", nil)
 		require.NoError(t, err)
-		b2, err := Build([]collection.ScriptPackageContent{pkg}, "pkg", nil, "js", nil)
+		b2, err := buildSimple([]collection.ScriptPackageContent{pkg}, "pkg", nil, "js", nil)
 		require.NoError(t, err)
 
 		assert.Equal(t, b1.Digest, b2.Digest)
@@ -127,9 +138,9 @@ func TestBuild(t *testing.T) {
 		a := runnablePackage("aaa", map[string]string{"main.js": "a"}, "main.js")
 		b := libraryPackage("bbb", map[string]string{"lib.js": "b"})
 
-		b1, err := Build([]collection.ScriptPackageContent{a, b}, "aaa", nil, "js", nil)
+		b1, err := buildSimple([]collection.ScriptPackageContent{a, b}, "aaa", nil, "js", nil)
 		require.NoError(t, err)
-		b2, err := Build([]collection.ScriptPackageContent{b, a}, "aaa", nil, "js", nil)
+		b2, err := buildSimple([]collection.ScriptPackageContent{b, a}, "aaa", nil, "js", nil)
 		require.NoError(t, err)
 
 		assert.Equal(t, b1.Digest, b2.Digest)
@@ -142,7 +153,7 @@ func TestBuild(t *testing.T) {
 			"name":     json.RawMessage(`"test"`),
 		}
 
-		b, err := Build([]collection.ScriptPackageContent{pkg}, "pkg", values, "js", nil)
+		b, err := buildSimple([]collection.ScriptPackageContent{pkg}, "pkg", values, "js", nil)
 		require.NoError(t, err)
 
 		files := extractTarGz(t, b)
@@ -155,7 +166,7 @@ func TestBuild(t *testing.T) {
 	t.Run("empty values", func(t *testing.T) {
 		pkg := runnablePackage("pkg", map[string]string{"main.js": "code"}, "main.js")
 
-		b, err := Build([]collection.ScriptPackageContent{pkg}, "pkg", nil, "js", nil)
+		b, err := buildSimple([]collection.ScriptPackageContent{pkg}, "pkg", nil, "js", nil)
 		require.NoError(t, err)
 
 		files := extractTarGz(t, b)
@@ -170,7 +181,7 @@ func TestBuildValidation(t *testing.T) {
 	t.Run("missing entrypointPackage", func(t *testing.T) {
 		pkg := runnablePackage("pkg", map[string]string{"main.js": "code"}, "main.js")
 
-		_, err := Build([]collection.ScriptPackageContent{pkg}, "nonexistent", nil, "js", nil)
+		_, err := buildSimple([]collection.ScriptPackageContent{pkg}, "nonexistent", nil, "js", nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "entrypoint package")
 	})
@@ -178,7 +189,7 @@ func TestBuildValidation(t *testing.T) {
 	t.Run("entrypointPackage no entrypoint file", func(t *testing.T) {
 		lib := libraryPackage("pkg", map[string]string{"util.js": "exports = {}"})
 
-		_, err := Build([]collection.ScriptPackageContent{lib}, "pkg", nil, "js", nil)
+		_, err := buildSimple([]collection.ScriptPackageContent{lib}, "pkg", nil, "js", nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no entrypoint")
 	})
@@ -193,7 +204,7 @@ func TestBuildValidation(t *testing.T) {
 			))
 		}
 
-		_, err := Build(packages, "p", nil, "js", nil)
+		_, err := buildSimple(packages, "p", nil, "js", nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "too many packages")
 	})
@@ -207,13 +218,13 @@ func TestBuildValidation(t *testing.T) {
 		rng.Read(data)
 		pkg := runnablePackage("pkg", map[string]string{"main.js": string(data)}, "main.js")
 
-		_, err := Build([]collection.ScriptPackageContent{pkg}, "pkg", nil, "js", nil)
+		_, err := buildSimple([]collection.ScriptPackageContent{pkg}, "pkg", nil, "js", nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "exceeds maximum")
 	})
 
 	t.Run("empty packages", func(t *testing.T) {
-		_, err := Build(nil, "pkg", nil, "js", nil)
+		_, err := buildSimple(nil, "pkg", nil, "js", nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no packages")
 	})
@@ -222,8 +233,76 @@ func TestBuildValidation(t *testing.T) {
 		pkg1 := runnablePackage("dup", map[string]string{"main.js": "v1"}, "main.js")
 		pkg2 := runnablePackage("dup", map[string]string{"main.js": "v2"}, "main.js")
 
-		_, err := Build([]collection.ScriptPackageContent{pkg1, pkg2}, "dup", nil, "js", nil)
+		_, err := buildSimple([]collection.ScriptPackageContent{pkg1, pkg2}, "dup", nil, "js", nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "duplicate package name")
 	})
+}
+
+func TestBuildCapabilities(t *testing.T) {
+	pkg := runnablePackage("pkg", map[string]string{"main.js": "code"}, "main.js")
+	caps := []collection.AtomicCapability{
+		{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "get"},
+		{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "list"},
+	}
+
+	t.Run("manifest contains capabilities", func(t *testing.T) {
+		b, err := Build(BuildInput{
+			Packages:              []collection.ScriptPackageContent{pkg},
+			EntrypointPackage:     "pkg",
+			Runtime:               "js",
+			EffectiveCapabilities: caps,
+		})
+		require.NoError(t, err)
+		require.Len(t, b.Manifest.Capabilities, 2)
+		assert.Equal(t, caps[0], b.Manifest.Capabilities[0])
+		assert.Equal(t, caps[1], b.Manifest.Capabilities[1])
+
+		files := extractTarGz(t, b)
+		var m Manifest
+		require.NoError(t, json.Unmarshal(files["manifest.json"], &m))
+		assert.Equal(t, caps, m.Capabilities)
+	})
+
+	t.Run("capability-only change alters digest", func(t *testing.T) {
+		b1, err := buildSimple([]collection.ScriptPackageContent{pkg}, "pkg", nil, "js", nil)
+		require.NoError(t, err)
+
+		b2, err := Build(BuildInput{
+			Packages:              []collection.ScriptPackageContent{pkg},
+			EntrypointPackage:     "pkg",
+			Runtime:               "js",
+			EffectiveCapabilities: caps,
+		})
+		require.NoError(t, err)
+
+		assert.NotEqual(t, b1.Digest, b2.Digest)
+	})
+
+	t.Run("absent and empty capabilities produce same digest", func(t *testing.T) {
+		b1, err := buildSimple([]collection.ScriptPackageContent{pkg}, "pkg", nil, "js", nil)
+		require.NoError(t, err)
+
+		b2, err := Build(BuildInput{
+			Packages:              []collection.ScriptPackageContent{pkg},
+			EntrypointPackage:     "pkg",
+			Runtime:               "js",
+			EffectiveCapabilities: []collection.AtomicCapability{},
+		})
+		require.NoError(t, err)
+
+		assert.Equal(t, b1.Digest, b2.Digest)
+	})
+
+	t.Run("manifest omits capabilities when empty", func(t *testing.T) {
+		b, err := buildSimple([]collection.ScriptPackageContent{pkg}, "pkg", nil, "js", nil)
+		require.NoError(t, err)
+
+		files := extractTarGz(t, b)
+		var raw map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(files["manifest.json"], &raw))
+		_, hasCaps := raw["capabilities"]
+		assert.False(t, hasCaps, "manifest should not contain capabilities key when empty")
+	})
+
 }

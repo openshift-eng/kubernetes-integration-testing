@@ -108,11 +108,13 @@ type AgentScriptRef struct {
 const (
 	ConditionAgentReady = "Ready"
 
-	ReasonAgentReady            = "Ready"
-	ReasonAgentNamespacePending = "NamespacePending"
-	ReasonAgentSuperseded       = "Superseded"
-	ReasonAgentCollectionError  = "CollectionError"
-	ReasonAgentBundleError      = "BundleError"
+	ReasonAgentReady               = "Ready"
+	ReasonAgentNamespacePending    = "NamespacePending"
+	ReasonAgentSuperseded          = "Superseded"
+	ReasonAgentCollectionError     = "CollectionError"
+	ReasonAgentBundleError         = "BundleError"
+	ReasonAgentAPITypePending      = "APITypePending"
+	ReasonAgentInvalidCapabilities = "InvalidCapabilities"
 )
 
 type AgentStatus struct {

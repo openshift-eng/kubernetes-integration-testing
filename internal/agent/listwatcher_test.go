@@ -18,6 +18,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
+
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 )
 
 var discardLog = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -56,6 +58,8 @@ func (s *stubKubeClient) Watch(ctx context.Context, gvr schema.GroupVersionResou
 func (s *stubKubeClient) ResolveGVR(schema.GroupVersionKind) (schema.GroupVersionResource, error) {
 	panic("unused")
 }
+
+func (s *stubKubeClient) SetCapabilities(string, []collection.AtomicCapability) {}
 
 func stubItem(name string) unstructured.Unstructured {
 	return unstructured.Unstructured{Object: map[string]interface{}{

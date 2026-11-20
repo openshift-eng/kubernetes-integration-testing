@@ -14,8 +14,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 
+	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/agent"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/agent/kube"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 )
 
 type mockHost struct {
@@ -44,7 +46,26 @@ func newMockHost() *mockHost {
 	scheme := runtime.NewScheme()
 	dynClient := dynamicfake.NewSimpleDynamicClient(scheme)
 	mapper := meta.NewDefaultRESTMapper(nil)
-	return &mockHost{kc: kube.NewClient(dynClient, mapper, kube.NewPolicy())}
+	return &mockHost{kc: kube.NewClient(dynClient, mapper, kube.NewPolicy("", nil))}
+}
+
+// testKubePolicy returns a permissive allowlist for the goja kube tests
+// (configmaps + pods in namespace "default") — capabilities are
+// authoritative, so tests explicitly declare what they need.
+func testKubePolicy() *kube.Policy {
+	return kube.NewPolicy("default", []collection.AtomicCapability{
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "configmaps", Verb: "get"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "configmaps", Verb: "list"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "configmaps", Verb: "watch"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "configmaps", Verb: "create"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "configmaps", Verb: "update"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "configmaps", Verb: "patch"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "configmaps", Verb: "delete"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "configmaps/status", Verb: "patch"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "get"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "list"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "watch"},
+	})
 }
 
 func writeBundle(t *testing.T, files map[string]string) string {

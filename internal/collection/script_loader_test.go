@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -467,4 +468,255 @@ func (r *contextCheckResolver) Resolve(ctx context.Context, name string) (*v1alp
 		return nil, err
 	}
 	return r.inner.Resolve(ctx, name)
+}
+
+func inlineScriptWithCaps(name, content string, caps ...v1alpha1.ScriptCapability) v1alpha1.ScriptPackage {
+	return v1alpha1.ScriptPackage{Name: name, Inline: content, Capabilities: caps}
+}
+
+func cap(scope v1alpha1.ScriptCapabilityScope, apiGroup, resource string, verbs ...string) v1alpha1.ScriptCapability {
+	return v1alpha1.ScriptCapability{
+		Scope: scope,
+		PolicyRule: rbacv1.PolicyRule{
+			APIGroups: []string{apiGroup},
+			Resources: []string{resource},
+			Verbs:     verbs,
+		},
+	}
+}
+
+func TestScriptLoaderEffectiveCapabilities(t *testing.T) {
+	loader := NewScriptLoader("")
+
+	t.Run("single package capabilities", func(t *testing.T) {
+		resolver := mapResolver{
+			"coll": testCollection("coll", []v1alpha1.ScriptPackage{
+				inlineScriptWithCaps("app", "code",
+					cap(v1alpha1.ScopeCluster, "", "nodes", "get", "list"),
+				),
+			}),
+		}
+
+		result, err := loader.Load(context.Background(), "coll", resolver)
+		require.NoError(t, err)
+		require.Len(t, result.EffectiveCapabilities, 2)
+		assert.Equal(t, AtomicCapability{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "get"}, result.EffectiveCapabilities[0])
+		assert.Equal(t, AtomicCapability{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "list"}, result.EffectiveCapabilities[1])
+	})
+
+	t.Run("expands cartesian product", func(t *testing.T) {
+		resolver := mapResolver{
+			"coll": testCollection("coll", []v1alpha1.ScriptPackage{
+				inlineScriptWithCaps("app", "code", v1alpha1.ScriptCapability{
+					Scope: v1alpha1.ScopeTargetNamespace,
+					PolicyRule: rbacv1.PolicyRule{
+						APIGroups: []string{"", "apps"},
+						Resources: []string{"pods", "deployments"},
+						Verbs:     []string{"get"},
+					},
+				}),
+			}),
+		}
+
+		result, err := loader.Load(context.Background(), "coll", resolver)
+		require.NoError(t, err)
+		assert.Len(t, result.EffectiveCapabilities, 4)
+	})
+
+	t.Run("deduplicates across packages", func(t *testing.T) {
+		resolver := mapResolver{
+			"coll": testCollection("coll", []v1alpha1.ScriptPackage{
+				inlineScriptWithCaps("pkg-a", "a",
+					cap(v1alpha1.ScopeCluster, "", "nodes", "get"),
+				),
+				inlineScriptWithCaps("pkg-b", "b",
+					cap(v1alpha1.ScopeCluster, "", "nodes", "get"),
+				),
+			}),
+		}
+
+		result, err := loader.Load(context.Background(), "coll", resolver)
+		require.NoError(t, err)
+		assert.Len(t, result.EffectiveCapabilities, 1)
+	})
+
+	t.Run("merges across dependencies", func(t *testing.T) {
+		resolver := mapResolver{
+			"main": testCollection("main", []v1alpha1.ScriptPackage{
+				inlineScriptWithCaps("app", "main",
+					cap(v1alpha1.ScopeCluster, "", "nodes", "get"),
+				),
+			}, "lib"),
+			"lib": testCollection("lib", []v1alpha1.ScriptPackage{
+				inlineScriptWithCaps("util", "helper",
+					cap(v1alpha1.ScopeCluster, "", "nodes", "list"),
+				),
+			}),
+		}
+
+		result, err := loader.Load(context.Background(), "main", resolver)
+		require.NoError(t, err)
+		assert.Len(t, result.EffectiveCapabilities, 2)
+	})
+
+	t.Run("no capabilities produces empty set", func(t *testing.T) {
+		resolver := mapResolver{
+			"coll": testCollection("coll", []v1alpha1.ScriptPackage{
+				inlineScript("app", "code"),
+			}),
+		}
+
+		result, err := loader.Load(context.Background(), "coll", resolver)
+		require.NoError(t, err)
+		assert.Empty(t, result.EffectiveCapabilities)
+	})
+
+	t.Run("sorted deterministically", func(t *testing.T) {
+		resolver := mapResolver{
+			"coll": testCollection("coll", []v1alpha1.ScriptPackage{
+				inlineScriptWithCaps("app", "code",
+					cap(v1alpha1.ScopeCluster, "apps", "deployments", "get"),
+					cap(v1alpha1.ScopeTargetNamespace, "", "pods", "list"),
+					cap(v1alpha1.ScopeCluster, "", "nodes", "watch"),
+				),
+			}),
+		}
+
+		result, err := loader.Load(context.Background(), "coll", resolver)
+		require.NoError(t, err)
+		require.Len(t, result.EffectiveCapabilities, 3)
+		// scope: cluster < targetNamespace; within cluster: "" < "apps"
+		assert.Equal(t, v1alpha1.ScopeCluster, result.EffectiveCapabilities[0].Scope)
+		assert.Equal(t, "", result.EffectiveCapabilities[0].APIGroup)
+		assert.Equal(t, v1alpha1.ScopeCluster, result.EffectiveCapabilities[1].Scope)
+		assert.Equal(t, "apps", result.EffectiveCapabilities[1].APIGroup)
+		assert.Equal(t, v1alpha1.ScopeTargetNamespace, result.EffectiveCapabilities[2].Scope)
+	})
+}
+
+func TestScriptLoaderCapabilityHash(t *testing.T) {
+	loader := NewScriptLoader("")
+
+	t.Run("changes when capabilities added", func(t *testing.T) {
+		r1, err := loader.Load(context.Background(), "coll", mapResolver{
+			"coll": testCollection("coll", []v1alpha1.ScriptPackage{
+				inlineScript("app", "code"),
+			}),
+		})
+		require.NoError(t, err)
+
+		r2, err := loader.Load(context.Background(), "coll", mapResolver{
+			"coll": testCollection("coll", []v1alpha1.ScriptPackage{
+				inlineScriptWithCaps("app", "code",
+					cap(v1alpha1.ScopeCluster, "", "nodes", "get"),
+				),
+			}),
+		})
+		require.NoError(t, err)
+
+		assert.NotEqual(t, r1.ContentHash, r2.ContentHash)
+	})
+
+	t.Run("same effective set from different groupings", func(t *testing.T) {
+		// Two apiGroups+resources in one rule
+		r1, err := loader.Load(context.Background(), "coll", mapResolver{
+			"coll": testCollection("coll", []v1alpha1.ScriptPackage{
+				inlineScriptWithCaps("app", "code", v1alpha1.ScriptCapability{
+					Scope: v1alpha1.ScopeTargetNamespace,
+					PolicyRule: rbacv1.PolicyRule{
+						APIGroups: []string{"", "apps"},
+						Resources: []string{"pods", "deployments"},
+						Verbs:     []string{"get"},
+					},
+				}),
+			}),
+		})
+		require.NoError(t, err)
+
+		// Same permissions split into separate rules
+		r2, err := loader.Load(context.Background(), "coll", mapResolver{
+			"coll": testCollection("coll", []v1alpha1.ScriptPackage{
+				inlineScriptWithCaps("app", "code",
+					cap(v1alpha1.ScopeTargetNamespace, "", "pods", "get"),
+					cap(v1alpha1.ScopeTargetNamespace, "", "deployments", "get"),
+					cap(v1alpha1.ScopeTargetNamespace, "apps", "pods", "get"),
+					cap(v1alpha1.ScopeTargetNamespace, "apps", "deployments", "get"),
+				),
+			}),
+		})
+		require.NoError(t, err)
+
+		assert.Equal(t, r1.ContentHash, r2.ContentHash)
+	})
+
+	t.Run("moving capability between packages preserves hash", func(t *testing.T) {
+		nodeCap := cap(v1alpha1.ScopeCluster, "", "nodes", "get")
+		podCap := cap(v1alpha1.ScopeTargetNamespace, "", "pods", "list")
+
+		// Both caps in pkg-a
+		r1, err := loader.Load(context.Background(), "coll", mapResolver{
+			"coll": testCollection("coll", []v1alpha1.ScriptPackage{
+				inlineScriptWithCaps("pkg-a", "a", nodeCap, podCap),
+				inlineScript("pkg-b", "b"),
+			}),
+		})
+		require.NoError(t, err)
+
+		// Split caps across packages
+		r2, err := loader.Load(context.Background(), "coll", mapResolver{
+			"coll": testCollection("coll", []v1alpha1.ScriptPackage{
+				inlineScriptWithCaps("pkg-a", "a", nodeCap),
+				inlineScriptWithCaps("pkg-b", "b", podCap),
+			}),
+		})
+		require.NoError(t, err)
+
+		assert.Equal(t, r1.ContentHash, r2.ContentHash)
+	})
+
+	t.Run("moving capability to dependency preserves hash", func(t *testing.T) {
+		nodeCap := cap(v1alpha1.ScopeCluster, "", "nodes", "get")
+
+		// Cap in local package
+		r1, err := loader.Load(context.Background(), "main", mapResolver{
+			"main": testCollection("main", []v1alpha1.ScriptPackage{
+				inlineScriptWithCaps("app", "main", nodeCap),
+			}, "lib"),
+			"lib": testCollection("lib", []v1alpha1.ScriptPackage{
+				inlineScript("util", "helper"),
+			}),
+		})
+		require.NoError(t, err)
+
+		// Same cap in dependency
+		r2, err := loader.Load(context.Background(), "main", mapResolver{
+			"main": testCollection("main", []v1alpha1.ScriptPackage{
+				inlineScript("app", "main"),
+			}, "lib"),
+			"lib": testCollection("lib", []v1alpha1.ScriptPackage{
+				inlineScriptWithCaps("util", "helper", nodeCap),
+			}),
+		})
+		require.NoError(t, err)
+
+		assert.Equal(t, r1.ContentHash, r2.ContentHash)
+	})
+
+	t.Run("absent and empty capabilities produce same hash", func(t *testing.T) {
+		r1, err := loader.Load(context.Background(), "coll", mapResolver{
+			"coll": testCollection("coll", []v1alpha1.ScriptPackage{
+				inlineScript("app", "code"),
+			}),
+		})
+		require.NoError(t, err)
+
+		r2, err := loader.Load(context.Background(), "coll", mapResolver{
+			"coll": testCollection("coll", []v1alpha1.ScriptPackage{
+				inlineScriptWithCaps("app", "code"),
+			}),
+		})
+		require.NoError(t, err)
+
+		assert.Equal(t, r1.ContentHash, r2.ContentHash)
+	})
 }

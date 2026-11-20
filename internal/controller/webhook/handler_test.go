@@ -15,6 +15,7 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/agent/bundle"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 	agentctl "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent"
+	agentrbac "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent/rbac"
 	kitwebhook "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/webhook"
 
 	admissionv1 "k8s.io/api/admission/v1"
@@ -23,6 +24,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	discoveryfake "k8s.io/client-go/discovery/fake"
+	clientgotesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -81,6 +84,12 @@ func testStore(t *testing.T) *bundle.BundleStore {
 	return store
 }
 
+func testScopeValidator() *agentrbac.ScopeValidator {
+	return agentrbac.NewScopeValidator(&discoveryfake.FakeDiscovery{
+		Fake: &clientgotesting.Fake{},
+	})
+}
+
 func testAgent() *v1alpha1.Agent {
 	return &v1alpha1.Agent{
 		ObjectMeta: metav1.ObjectMeta{
@@ -104,7 +113,7 @@ func testAgent() *v1alpha1.Agent {
 
 func trapMaterializer(t *testing.T, c client.Client) *agentctl.Materializer {
 	t.Helper()
-	return agentctl.NewMaterializer(c, testStore(t), failingLoader(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+	return agentctl.NewMaterializer(c, testStore(t), failingLoader(), testScopeValidator(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
 }
 
 func admissionRequest(t *testing.T, pod *corev1.Pod, namespace string, dryRun bool) admission.Request {
@@ -129,7 +138,7 @@ func TestPodMutator(t *testing.T) {
 			WithScheme(scheme).
 			WithObjects(ag).
 			Build()
-		mat := agentctl.NewMaterializer(c, testStore(t), defaultFakeLoader(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+		mat := agentctl.NewMaterializer(c, testStore(t), defaultFakeLoader(), testScopeValidator(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
 
 		mutator := &kitwebhook.PodMutator{
 			Client:       c,
@@ -263,7 +272,7 @@ func TestPodMutator(t *testing.T) {
 			WithScheme(scheme).
 			WithObjects(ag, wo).
 			Build()
-		mat := agentctl.NewMaterializer(c, testStore(t), defaultFakeLoader(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+		mat := agentctl.NewMaterializer(c, testStore(t), defaultFakeLoader(), testScopeValidator(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
 
 		mutator := &kitwebhook.PodMutator{
 			Client:       c,
@@ -328,7 +337,7 @@ func TestPodMutator(t *testing.T) {
 			WithScheme(scheme).
 			WithObjects(ag, wo).
 			Build()
-		mat := agentctl.NewMaterializer(c, testStore(t), defaultFakeLoader(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+		mat := agentctl.NewMaterializer(c, testStore(t), defaultFakeLoader(), testScopeValidator(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
 
 		mutator := &kitwebhook.PodMutator{
 			Client:       c,
@@ -447,7 +456,7 @@ func TestPodMutator(t *testing.T) {
 			WithScheme(scheme).
 			WithObjects(ag).
 			Build()
-		mat := agentctl.NewMaterializer(c, testStore(t), failingLoader(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+		mat := agentctl.NewMaterializer(c, testStore(t), failingLoader(), testScopeValidator(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
 
 		mutator := &kitwebhook.PodMutator{
 			Client:       c,

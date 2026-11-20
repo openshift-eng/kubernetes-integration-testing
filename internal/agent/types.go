@@ -9,6 +9,8 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 )
 
 type Runtime interface {
@@ -31,6 +33,7 @@ type KubeClient interface {
 	Delete(ctx context.Context, gvr schema.GroupVersionResource, namespace, name string) error
 	Watch(ctx context.Context, gvr schema.GroupVersionResource, namespace string, opts metav1.ListOptions) (watch.Interface, error)
 	ResolveGVR(gvk schema.GroupVersionKind) (schema.GroupVersionResource, error)
+	SetCapabilities(targetNamespace string, caps []collection.AtomicCapability)
 }
 
 type AgentRequest struct {

@@ -53,7 +53,12 @@ func buildTestBundle(t *testing.T, timeout *metav1.Duration) *bundle.Bundle {
 			{Path: "main.js", Content: []byte(`exports.main = function(ctx) { ctx.sleep(999999); }`)},
 		},
 	}
-	b, err := bundle.Build([]collection.ScriptPackageContent{pkg}, "test-pkg", nil, "js", timeout)
+	b, err := bundle.Build(bundle.BuildInput{
+		Packages:          []collection.ScriptPackageContent{pkg},
+		EntrypointPackage: "test-pkg",
+		Runtime:           "js",
+		Timeout:           timeout,
+	})
 	require.NoError(t, err)
 	return b
 }
@@ -113,4 +118,69 @@ func TestRunNegativeTimeout(t *testing.T) {
 	err := Run(context.Background(), slog.Default(), afero.NewOsFs(), cfg, factory, &stubKubeClient{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "agent timeout must be positive")
+}
+
+type capturingKubeClient struct {
+	stubKubeClient
+	capturedNamespace string
+	capturedCaps      []collection.AtomicCapability
+}
+
+func (c *capturingKubeClient) SetCapabilities(ns string, caps []collection.AtomicCapability) {
+	c.capturedNamespace = ns
+	c.capturedCaps = caps
+}
+
+type capturingRuntime struct {
+	name string
+	fn   func(AgentRequest, Host) (AgentResult, error)
+}
+
+func (r *capturingRuntime) Name() string { return r.name }
+
+func (r *capturingRuntime) Run(_ context.Context, req AgentRequest, host Host) (AgentResult, error) {
+	return r.fn(req, host)
+}
+
+func TestRunInstallsCapabilitiesFromManifest(t *testing.T) {
+	wantCaps := []collection.AtomicCapability{
+		{Scope: "cluster", APIGroup: "", Resource: "nodes", Verb: "get"},
+		{Scope: "cluster", APIGroup: "", Resource: "nodes", Verb: "patch"},
+	}
+	pkg := collection.ScriptPackageContent{
+		Name:       "test-pkg",
+		Entrypoint: "main.js",
+		Files:      []collection.ScriptFile{{Path: "main.js", Content: []byte(`exports.main = function(ctx) {}`)}},
+	}
+	b, err := bundle.Build(bundle.BuildInput{
+		Packages:              []collection.ScriptPackageContent{pkg},
+		EntrypointPackage:     "test-pkg",
+		Runtime:               "js",
+		EffectiveCapabilities: wantCaps,
+	})
+	require.NoError(t, err)
+	_, url := serveBundleHTTP(t, b)
+
+	fs := afero.NewMemMapFs()
+	require.NoError(t, fs.MkdirAll("/var/run/secrets/kubernetes.io/serviceaccount", 0755))
+	require.NoError(t, afero.WriteFile(fs, "/var/run/secrets/kubernetes.io/serviceaccount/namespace", []byte("my-target-ns"), 0644))
+
+	capKC := &capturingKubeClient{}
+	called := false
+	rt := &capturingRuntime{
+		name: "js",
+		fn: func(_ AgentRequest, host Host) (AgentResult, error) {
+			called = true
+			assert.Equal(t, "my-target-ns", capKC.capturedNamespace)
+			assert.ElementsMatch(t, wantCaps, capKC.capturedCaps)
+			// Verify the host's KubeClient is the same instance that received the caps.
+			assert.Equal(t, capKC, host.Kube())
+			return AgentResult{ExitCode: 0}, nil
+		},
+	}
+
+	cfg := Config{BundleURL: url, BundleDigest: b.Digest}
+	err = Run(context.Background(), slog.Default(), fs, cfg, fakeRuntimeFactory(rt), capKC)
+	require.NoError(t, err)
+	assert.True(t, called, "runtime should have been invoked")
 }

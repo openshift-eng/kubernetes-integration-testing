@@ -50,6 +50,8 @@ func Run(ctx context.Context, log *slog.Logger, fs afero.Fs, cfg Config, runtime
 
 	pod := readPodIdentity(fs)
 
+	kube.SetCapabilities(pod.Namespace, manifest.Capabilities)
+
 	req := AgentRequest{
 		BundleDir:  bundleDir,
 		Entrypoint: manifest.Entrypoint,

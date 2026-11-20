@@ -1,7 +1,10 @@
 package agent_test
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"testing"
@@ -14,20 +17,25 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/agent/bundle"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 	agentctl "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent"
+	agentrbac "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent/rbac"
 
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	discoveryfake "k8s.io/client-go/discovery/fake"
+	clientgotesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 type fakeScriptLoader struct {
-	packages      []collection.ScriptPackageContent
-	localPackages map[string]bool
-	err           error
+	packages              []collection.ScriptPackageContent
+	localPackages         map[string]bool
+	effectiveCapabilities []collection.AtomicCapability
+	err                   error
 }
 
 func (f *fakeScriptLoader) Load(_ context.Context, _ string, _ collection.ScriptCollectionResolver) (*collection.LoadResult, error) {
@@ -42,17 +50,43 @@ func (f *fakeScriptLoader) Load(_ context.Context, _ string, _ collection.Script
 		}
 	}
 	return &collection.LoadResult{
-		Packages:      f.packages,
-		LocalPackages: root,
-		ContentHash:   "fake",
+		Packages:              f.packages,
+		LocalPackages:         root,
+		EffectiveCapabilities: f.effectiveCapabilities,
+		ContentHash:           "fake",
 	}, nil
 }
 
+func testCapabilities() []collection.AtomicCapability {
+	return []collection.AtomicCapability{
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "get"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "list"},
+		{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "get"},
+		{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "patch"},
+	}
+}
+
+func testScopeValidator() *agentrbac.ScopeValidator {
+	return agentrbac.NewScopeValidator(&discoveryfake.FakeDiscovery{
+		Fake: &clientgotesting.Fake{Resources: []*metav1.APIResourceList{{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{
+				{Name: "pods", Namespaced: true},
+				{Name: "nodes", Namespaced: false},
+			},
+		}}},
+	})
+}
+
 func defaultFakeLoader() *fakeScriptLoader {
-	return fakeLoaderWithScript(`exports.main = function(ctx) { return {exitCode: 0}; };`)
+	return fakeLoaderWithCaps(`exports.main = function(ctx) { return {exitCode: 0}; };`, testCapabilities())
 }
 
 func fakeLoaderWithScript(content string) *fakeScriptLoader {
+	return fakeLoaderWithCaps(content, nil)
+}
+
+func fakeLoaderWithCaps(content string, caps []collection.AtomicCapability) *fakeScriptLoader {
 	return &fakeScriptLoader{
 		packages: []collection.ScriptPackageContent{{
 			Name:       "test-pkg",
@@ -61,6 +95,7 @@ func fakeLoaderWithScript(content string) *fakeScriptLoader {
 				{Path: "main.js", Content: []byte(content)},
 			},
 		}},
+		effectiveCapabilities: caps,
 	}
 }
 
@@ -103,7 +138,7 @@ func testAgent(name string) *v1alpha1.Agent {
 
 func newMaterializer(t *testing.T, c client.Client, loader agentctl.ScriptPackageLoader) *agentctl.Materializer {
 	t.Helper()
-	return agentctl.NewMaterializer(c, testStore(t), loader, "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+	return agentctl.NewMaterializer(c, testStore(t), loader, testScopeValidator(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
 }
 
 func TestMaterialize(t *testing.T) {
@@ -126,7 +161,8 @@ func TestMaterialize(t *testing.T) {
 
 		var role rbacv1.Role
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-mcd-stub", Namespace: "target-ns"}, &role))
-		assert.NotEmpty(t, role.Rules)
+		require.Len(t, role.Rules, 1)
+		assert.Equal(t, []string{"pods"}, role.Rules[0].Resources)
 
 		var rb rbacv1.RoleBinding
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-mcd-stub", Namespace: "target-ns"}, &rb))
@@ -134,7 +170,8 @@ func TestMaterialize(t *testing.T) {
 
 		var cr rbacv1.ClusterRole
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-mcd-stub"}, &cr))
-		assert.NotEmpty(t, cr.Rules)
+		require.Len(t, cr.Rules, 1)
+		assert.Equal(t, []string{"nodes"}, cr.Rules[0].Resources)
 
 		var crb rbacv1.ClusterRoleBinding
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-mcd-stub"}, &crb))
@@ -353,62 +390,6 @@ func TestMaterialize(t *testing.T) {
 		assert.Equal(t, "node-1", wo.Spec.Match.NodeName)
 	})
 
-	t.Run("cluster role grants node and OCP read access", func(t *testing.T) {
-		ag := testAgent("test")
-		c := fake.NewClientBuilder().
-			WithScheme(testScheme(t)).
-			Build()
-
-		mat := newMaterializer(t, c, defaultFakeLoader())
-		_, err := mat.Materialize(context.Background(), ag)
-		require.NoError(t, err)
-
-		var cr rbacv1.ClusterRole
-		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test"}, &cr))
-
-		hasResource := func(group, resource string) bool {
-			for _, rule := range cr.Rules {
-				for _, g := range rule.APIGroups {
-					if g != group {
-						continue
-					}
-					for _, r := range rule.Resources {
-						if r == resource || r == "*" {
-							return true
-						}
-					}
-				}
-			}
-			return false
-		}
-		assert.True(t, hasResource("", "nodes"), "should grant access to nodes")
-		assert.True(t, hasResource("kit.openshift.io", "*"), "should grant Kit read access")
-		assert.True(t, hasResource("machineconfiguration.openshift.io", "*"), "should grant MCO read access")
-		assert.True(t, hasResource("machineconfiguration.openshift.io", "machineconfignodes"), "should grant MCN access")
-		assert.True(t, hasResource("machineconfiguration.openshift.io", "machineconfignodes/status"), "should grant MCN status access")
-
-		// TODO: this assertion is fragile — it hardcodes which verbs are allowed
-		// per resource and breaks every time clusterScopedPolicyRules changes.
-		// Replace with a table-driven check that mirrors the policy declaration
-		// or test the policy function directly instead of inspecting the rendered
-		// ClusterRole.
-		for _, rule := range cr.Rules {
-			isNodeRule := false
-			for _, r := range rule.Resources {
-				if r == "nodes" {
-					isNodeRule = true
-					break
-				}
-			}
-			for _, verb := range rule.Verbs {
-				if isNodeRule && verb == "patch" {
-					continue
-				}
-				assert.NotContains(t, []string{"create", "update", "delete"}, verb, "cluster role should not grant create/update/delete (except node patch)")
-			}
-		}
-	})
-
 	t.Run("updates an existing generated cluster role", func(t *testing.T) {
 		ag := testAgent("test")
 		existing := &rbacv1.ClusterRole{
@@ -430,48 +411,10 @@ func TestMaterialize(t *testing.T) {
 
 		var updated rbacv1.ClusterRole
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test"}, &updated))
-		hasRule := func(group, resource, verb string) bool {
-			for _, rule := range updated.Rules {
-				for _, apiGroup := range rule.APIGroups {
-					if apiGroup != group {
-						continue
-					}
-					for _, ruleResource := range rule.Resources {
-						if ruleResource != resource {
-							continue
-						}
-						for _, ruleVerb := range rule.Verbs {
-							if ruleVerb == verb {
-								return true
-							}
-						}
-					}
-				}
-			}
-			return false
-		}
-		assert.True(t, hasRule("", "nodes", "patch"), "existing node patch access should be retained")
-		assert.True(t, hasRule("machineconfiguration.openshift.io", "machineconfignodes", "patch"), "existing MCN access should be updated")
-		assert.True(t, hasRule("machineconfiguration.openshift.io", "machineconfignodes/status", "patch"), "existing MCN status access should be updated")
-	})
-
-	t.Run("role excludes secrets", func(t *testing.T) {
-		ag := testAgent("test")
-		c := fake.NewClientBuilder().
-			WithScheme(testScheme(t)).
-			Build()
-
-		mat := newMaterializer(t, c, defaultFakeLoader())
-		_, err := mat.Materialize(context.Background(), ag)
-		require.NoError(t, err)
-
-		var role rbacv1.Role
-		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &role))
-		for _, rule := range role.Rules {
-			for _, res := range rule.Resources {
-				assert.NotEqual(t, "secrets", res)
-			}
-		}
+		require.Len(t, updated.Rules, 1)
+		assert.Equal(t, []string{"nodes"}, updated.Rules[0].Resources)
+		assert.Contains(t, updated.Rules[0].Verbs, "get")
+		assert.Contains(t, updated.Rules[0].Verbs, "patch")
 	})
 
 	t.Run("WO update adopts owner references", func(t *testing.T) {
@@ -506,7 +449,7 @@ func TestMaterialize(t *testing.T) {
 
 		store := testStore(t)
 		loader := defaultFakeLoader()
-		mat := agentctl.NewMaterializer(c, store, loader, "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+		mat := agentctl.NewMaterializer(c, store, loader, testScopeValidator(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
 		r1, err := mat.Materialize(context.Background(), ag)
 		require.NoError(t, err)
 
@@ -525,6 +468,219 @@ func TestMaterialize(t *testing.T) {
 			}
 		}
 		assert.Equal(t, r2.BundleDigest, digestEnv)
+	})
+
+	t.Run("labels use agent UID on all generated objects", func(t *testing.T) {
+		ag := testAgent("test")
+		c := fake.NewClientBuilder().
+			WithScheme(testScheme(t)).
+			Build()
+
+		mat := newMaterializer(t, c, defaultFakeLoader())
+		_, err := mat.Materialize(context.Background(), ag)
+		require.NoError(t, err)
+
+		checkLabel := func(obj client.Object) {
+			t.Helper()
+			assert.Equal(t, string(ag.UID), obj.GetLabels()[agentrbac.LabelAgentUID],
+				"%T should have agent-uid label", obj)
+		}
+
+		var sa corev1.ServiceAccount
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &sa))
+		checkLabel(&sa)
+
+		var role rbacv1.Role
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &role))
+		checkLabel(&role)
+
+		var rb rbacv1.RoleBinding
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &rb))
+		checkLabel(&rb)
+
+		var cr rbacv1.ClusterRole
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test"}, &cr))
+		checkLabel(&cr)
+
+		var crb rbacv1.ClusterRoleBinding
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test"}, &crb))
+		checkLabel(&crb)
+	})
+
+	t.Run("namespace retarget repairs subjects and prunes old objects", func(t *testing.T) {
+		ag := testAgent("test")
+		c := fake.NewClientBuilder().
+			WithScheme(testScheme(t)).
+			Build()
+
+		mat := newMaterializer(t, c, defaultFakeLoader())
+		_, err := mat.Materialize(context.Background(), ag)
+		require.NoError(t, err)
+
+		// Verify initial state in target-ns.
+		var sa corev1.ServiceAccount
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &sa))
+		var role rbacv1.Role
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &role))
+
+		// Retarget to a different namespace.
+		ag.Spec.Target.Namespace = "new-ns"
+		_, err = mat.Materialize(context.Background(), ag)
+		require.NoError(t, err)
+
+		// New objects exist in new-ns.
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "new-ns"}, &sa))
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "new-ns"}, &role))
+
+		var rb rbacv1.RoleBinding
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "new-ns"}, &rb))
+		assert.Equal(t, "new-ns", rb.Subjects[0].Namespace)
+
+		// ClusterRoleBinding subject updated to new namespace.
+		var crb rbacv1.ClusterRoleBinding
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test"}, &crb))
+		assert.Equal(t, "new-ns", crb.Subjects[0].Namespace)
+
+		// Old namespaced objects pruned.
+		err = c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &sa)
+		assert.True(t, err != nil, "old SA should be pruned")
+		err = c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &role)
+		assert.True(t, err != nil, "old Role should be pruned")
+		err = c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &rb)
+		assert.True(t, err != nil, "old RoleBinding should be pruned")
+	})
+
+	t.Run("stale CRB subject repaired", func(t *testing.T) {
+		ag := testAgent("test")
+		staleCRB := &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "kit-agent-test",
+				Labels: map[string]string{agentrbac.LabelAgentUID: string(ag.UID)},
+			},
+			Subjects: []rbacv1.Subject{{
+				Kind:      "ServiceAccount",
+				Name:      "kit-agent-test",
+				Namespace: "wrong-namespace",
+			}},
+			RoleRef: rbacv1.RoleRef{
+				APIGroup: rbacv1.GroupName,
+				Kind:     "ClusterRole",
+				Name:     "kit-agent-test",
+			},
+		}
+		c := fake.NewClientBuilder().
+			WithScheme(testScheme(t)).
+			WithObjects(staleCRB).
+			Build()
+
+		mat := newMaterializer(t, c, defaultFakeLoader())
+		_, err := mat.Materialize(context.Background(), ag)
+		require.NoError(t, err)
+
+		var crb rbacv1.ClusterRoleBinding
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test"}, &crb))
+		require.Len(t, crb.Subjects, 1)
+		assert.Equal(t, "target-ns", crb.Subjects[0].Namespace,
+			"SSA should repair stale subject namespace")
+	})
+
+	t.Run("stale role rules repaired", func(t *testing.T) {
+		ag := testAgent("test")
+		staleRole := &rbacv1.Role{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "kit-agent-test",
+				Namespace: "target-ns",
+				Labels:    map[string]string{agentrbac.LabelAgentUID: string(ag.UID)},
+			},
+			Rules: []rbacv1.PolicyRule{{
+				APIGroups: []string{""},
+				Resources: []string{"secrets"},
+				Verbs:     []string{"get"},
+			}},
+		}
+		c := fake.NewClientBuilder().
+			WithScheme(testScheme(t)).
+			WithObjects(staleRole).
+			Build()
+
+		mat := newMaterializer(t, c, defaultFakeLoader())
+		_, err := mat.Materialize(context.Background(), ag)
+		require.NoError(t, err)
+
+		var role rbacv1.Role
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &role))
+		require.Len(t, role.Rules, 1)
+		assert.Equal(t, []string{"pods"}, role.Rules[0].Resources,
+			"SSA should replace stale rules with capability-derived rules")
+	})
+
+	t.Run("user object with agent label but no owner ref not deleted", func(t *testing.T) {
+		ag := testAgent("test")
+		userCRB := &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:   "user-managed-crb",
+				Labels: map[string]string{agentrbac.LabelAgentUID: string(ag.UID)},
+			},
+			Subjects: []rbacv1.Subject{{
+				Kind:      "ServiceAccount",
+				Name:      "user-sa",
+				Namespace: "user-ns",
+			}},
+			RoleRef: rbacv1.RoleRef{
+				APIGroup: rbacv1.GroupName,
+				Kind:     "ClusterRole",
+				Name:     "user-role",
+			},
+		}
+		c := fake.NewClientBuilder().
+			WithScheme(testScheme(t)).
+			WithObjects(userCRB).
+			Build()
+
+		mat := newMaterializer(t, c, defaultFakeLoader())
+		_, err := mat.Materialize(context.Background(), ag)
+		require.NoError(t, err)
+
+		var crb rbacv1.ClusterRoleBinding
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "user-managed-crb"}, &crb),
+			"user-managed CRB without owner ref should survive prune")
+	})
+
+	t.Run("WO failure after retarget preserves old objects", func(t *testing.T) {
+		ag := testAgent("test")
+		failWO := false
+		c := fake.NewClientBuilder().
+			WithScheme(testScheme(t)).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					if failWO {
+						if _, ok := obj.(*v1alpha1.WorkloadOverride); ok {
+							return fmt.Errorf("simulated WO failure")
+						}
+					}
+					return cl.Patch(ctx, obj, patch, opts...)
+				},
+			}).
+			Build()
+
+		mat := newMaterializer(t, c, defaultFakeLoader())
+		_, err := mat.Materialize(context.Background(), ag)
+		require.NoError(t, err)
+
+		// Enable WO failure and retarget.
+		failWO = true
+		ag.Spec.Target.Namespace = "new-ns"
+		_, err = mat.Materialize(context.Background(), ag)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "simulated WO failure")
+
+		// Old SA and Role in target-ns must still exist.
+		var sa corev1.ServiceAccount
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &sa),
+			"old SA should survive when WO fails")
+		var role rbacv1.Role
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-test", Namespace: "target-ns"}, &role),
+			"old Role should survive when WO fails")
 	})
 }
 
@@ -669,4 +825,153 @@ func TestIsWOFresh(t *testing.T) {
 			assert.Equal(t, tc.want, agentctl.IsWOFresh(ag, wo))
 		})
 	}
+}
+
+func TestMaterializerPassesCapabilitiesToBundle(t *testing.T) {
+	caps := []collection.AtomicCapability{
+		{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "get"},
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "list"},
+	}
+	loader := &fakeScriptLoader{
+		packages: []collection.ScriptPackageContent{{
+			Name:       "test-pkg",
+			Entrypoint: "main.js",
+			Files:      []collection.ScriptFile{{Path: "main.js", Content: []byte(`exports.main = function(ctx) {};`)}},
+		}},
+		effectiveCapabilities: caps,
+	}
+
+	store := testStore(t)
+	k := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	mat := agentctl.NewMaterializer(k, store, loader, testScopeValidator(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+
+	ag := testAgent("cap-agent")
+	result, err := mat.Materialize(context.Background(), ag)
+	require.NoError(t, err)
+
+	rc, _, err := store.Open(result.BundleDigest)
+	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
+
+	gr, err := gzip.NewReader(rc)
+	require.NoError(t, err)
+	defer func() { _ = gr.Close() }()
+
+	tr := tar.NewReader(gr)
+	var manifest bundle.Manifest
+	for {
+		hdr, err := tr.Next()
+		require.NoError(t, err)
+		if hdr.Name == "manifest.json" {
+			require.NoError(t, json.NewDecoder(tr).Decode(&manifest))
+			break
+		}
+	}
+	assert.Equal(t, caps, manifest.Capabilities)
+}
+
+func TestMaterializeWithoutCapabilities(t *testing.T) {
+	ag := testAgent("nocaps")
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		Build()
+
+	loader := fakeLoaderWithScript(`exports.main = function(ctx) {};`)
+	mat := newMaterializer(t, c, loader)
+	_, err := mat.Materialize(context.Background(), ag)
+	require.NoError(t, err)
+
+	var sa corev1.ServiceAccount
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-nocaps", Namespace: "target-ns"}, &sa),
+		"SA should always be created")
+
+	var roles rbacv1.RoleList
+	require.NoError(t, c.List(context.Background(), &roles, client.InNamespace("target-ns")))
+	assert.Empty(t, roles.Items, "no Role should be created without capabilities")
+
+	var crs rbacv1.ClusterRoleList
+	require.NoError(t, c.List(context.Background(), &crs))
+	assert.Empty(t, crs.Items, "no ClusterRole should be created without capabilities")
+}
+
+func TestMaterializePrunesRBACOnCapabilityReduction(t *testing.T) {
+	ag := testAgent("reduce")
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		Build()
+
+	store := testStore(t)
+
+	fullCaps := []collection.AtomicCapability{
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "get"},
+		{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "get"},
+	}
+	loader := fakeLoaderWithCaps(`exports.main = function(ctx) {};`, fullCaps)
+	mat := agentctl.NewMaterializer(c, store, loader, testScopeValidator(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+
+	_, err := mat.Materialize(context.Background(), ag)
+	require.NoError(t, err)
+
+	var cr rbacv1.ClusterRole
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-reduce"}, &cr),
+		"ClusterRole should exist with cluster capabilities")
+
+	// Remove cluster capabilities, keep only targetNamespace.
+	loader.effectiveCapabilities = []collection.AtomicCapability{
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "get"},
+	}
+	_, err = mat.Materialize(context.Background(), ag)
+	require.NoError(t, err)
+
+	var role rbacv1.Role
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-reduce", Namespace: "target-ns"}, &role),
+		"Role should still exist for targetNamespace capabilities")
+
+	err = c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-reduce"}, &cr)
+	assert.Error(t, err, "ClusterRole should be pruned after removing cluster capabilities")
+
+	var crb rbacv1.ClusterRoleBinding
+	err = c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-reduce"}, &crb)
+	assert.Error(t, err, "ClusterRoleBinding should be pruned after removing cluster capabilities")
+}
+
+func TestMaterializerValidatesCapabilitiesBeforeSideEffects(t *testing.T) {
+	ag := testAgent("invalid-scope")
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		Build()
+	loader := fakeLoaderWithCaps(
+		`exports.main = function(ctx) { return {exitCode: 0}; };`,
+		[]collection.AtomicCapability{{
+			Scope:    v1alpha1.ScopeCluster,
+			APIGroup: "",
+			Resource: "pods",
+			Verb:     "list",
+		}},
+	)
+	mat := agentctl.NewMaterializer(
+		c,
+		testStore(t),
+		loader,
+		testScopeValidator(),
+		"quay.io/kit:latest",
+		"http://controller:8082",
+		slog.New(slog.DiscardHandler),
+	)
+
+	_, err := mat.Materialize(context.Background(), ag)
+	var invalid *agentrbac.InvalidCapabilitiesError
+	require.ErrorAs(t, err, &invalid)
+
+	name := agentctl.GeneratedName(ag.Name)
+	var sa corev1.ServiceAccount
+	assert.Error(t, c.Get(context.Background(), client.ObjectKey{
+		Name: name, Namespace: ag.Spec.Target.Namespace,
+	}, &sa))
+
+	var wo v1alpha1.WorkloadOverride
+	assert.Error(t, c.Get(context.Background(), client.ObjectKey{Name: name}, &wo))
+
+	var cr rbacv1.ClusterRole
+	assert.Error(t, c.Get(context.Background(), client.ObjectKey{Name: name}, &cr))
 }

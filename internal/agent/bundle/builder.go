@@ -17,10 +17,11 @@ import (
 )
 
 type Manifest struct {
-	Runtime    string            `json:"runtime"`
-	Timeout    *metav1.Duration  `json:"timeout,omitempty"`
-	Entrypoint string            `json:"entrypoint"`
-	Packages   []PackageManifest `json:"packages"`
+	Runtime      string                        `json:"runtime"`
+	Timeout      *metav1.Duration              `json:"timeout,omitempty"`
+	Entrypoint   string                        `json:"entrypoint"`
+	Packages     []PackageManifest             `json:"packages"`
+	Capabilities []collection.AtomicCapability `json:"capabilities,omitempty"`
 }
 
 type PackageManifest struct {
@@ -38,18 +39,32 @@ type Bundle struct {
 func (b *Bundle) Reader() io.Reader { return bytes.NewReader(b.data) }
 func (b *Bundle) Size() int         { return len(b.data) }
 
-func Build(packages []collection.ScriptPackageContent, entrypointPackage string, values map[string]json.RawMessage, runtime string, timeout *metav1.Duration) (*Bundle, error) {
-	sorted, err := validateAndSort(packages)
+type BuildInput struct {
+	Packages              []collection.ScriptPackageContent
+	EntrypointPackage     string
+	Values                map[string]json.RawMessage
+	Runtime               string
+	Timeout               *metav1.Duration
+	EffectiveCapabilities []collection.AtomicCapability
+}
+
+func Build(input BuildInput) (*Bundle, error) {
+	sorted, err := validateAndSort(input.Packages)
 	if err != nil {
 		return nil, err
 	}
 
-	manifest, err := buildManifest(sorted, entrypointPackage, runtime, timeout)
+	var caps []collection.AtomicCapability
+	if len(input.EffectiveCapabilities) > 0 {
+		caps = input.EffectiveCapabilities
+	}
+
+	manifest, err := buildManifest(sorted, input.EntrypointPackage, input.Runtime, input.Timeout, caps)
 	if err != nil {
 		return nil, err
 	}
 
-	data, err := packTarGz(sorted, manifest, values)
+	data, err := packTarGz(sorted, manifest, input.Values)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +104,7 @@ func validateAndSort(packages []collection.ScriptPackageContent) ([]collection.S
 	return sorted, nil
 }
 
-func buildManifest(packages []collection.ScriptPackageContent, entrypointPackage string, runtime string, timeout *metav1.Duration) (*Manifest, error) {
+func buildManifest(packages []collection.ScriptPackageContent, entrypointPackage string, runtime string, timeout *metav1.Duration, caps []collection.AtomicCapability) (*Manifest, error) {
 	var entrypointFile string
 	for _, pkg := range packages {
 		if pkg.Name == entrypointPackage {
@@ -102,10 +117,11 @@ func buildManifest(packages []collection.ScriptPackageContent, entrypointPackage
 	}
 
 	manifest := &Manifest{
-		Runtime:    runtime,
-		Timeout:    timeout,
-		Entrypoint: entrypointPackage + "/" + entrypointFile,
-		Packages:   make([]PackageManifest, len(packages)),
+		Runtime:      runtime,
+		Timeout:      timeout,
+		Entrypoint:   entrypointPackage + "/" + entrypointFile,
+		Packages:     make([]PackageManifest, len(packages)),
+		Capabilities: caps,
 	}
 	for i, pkg := range packages {
 		files := make([]string, len(pkg.Files))

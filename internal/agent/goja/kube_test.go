@@ -44,7 +44,7 @@ func kubeMapper() *meta.DefaultRESTMapper {
 
 func newKubeHost(objects ...runtime.Object) *mockHost {
 	dynClient := k8stesting.NewSimpleDynamicClient(kubeScheme(), objects...)
-	return &mockHost{kc: kube.NewClient(dynClient, kubeMapper(), kube.NewPolicy())}
+	return &mockHost{kc: kube.NewClient(dynClient, kubeMapper(), testKubePolicy())}
 }
 
 type kubeFixture struct {
@@ -55,7 +55,7 @@ type kubeFixture struct {
 func newKubeFixture(objects ...runtime.Object) *kubeFixture {
 	dynClient := k8stesting.NewSimpleDynamicClient(kubeScheme(), objects...)
 	return &kubeFixture{
-		host: &mockHost{kc: kube.NewClient(dynClient, kubeMapper(), kube.NewPolicy())},
+		host: &mockHost{kc: kube.NewClient(dynClient, kubeMapper(), testKubePolicy())},
 		fake: dynClient,
 	}
 }
@@ -213,7 +213,7 @@ exports.main = function(ctx) {
 	assert.Equal(t, 0, result.ExitCode)
 }
 
-func TestKubePolicyDeniesSecrets(t *testing.T) {
+func TestKubePolicyDeniesUndeclaredAccess(t *testing.T) {
 	host := newKubeHost()
 
 	result, err := runWithKube(t, map[string]string{
@@ -224,7 +224,7 @@ exports.main = function(ctx) {
     kube.get({group: "", version: "v1", resource: "secrets", namespace: "default", name: "my-secret"});
     return {exitCode: 1, reason: "should have been denied"};
   } catch(e) {
-    if (String(e).indexOf("denied") === -1) return {exitCode: 1, reason: "wrong error: " + e};
+    if (String(e).indexOf("missing capability") === -1) return {exitCode: 1, reason: "wrong error: " + e};
     return {exitCode: 0};
   }
 };`,

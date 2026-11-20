@@ -30,9 +30,10 @@ type ScriptLoader struct {
 // LoadResult contains the fully resolved script packages from a collection
 // and its dependencies, ready to pass to bundle.Build.
 type LoadResult struct {
-	Packages      []ScriptPackageContent
-	LocalPackages map[string]bool
-	ContentHash   string
+	Packages              []ScriptPackageContent
+	LocalPackages         map[string]bool
+	EffectiveCapabilities []AtomicCapability
+	ContentHash           string
 }
 
 // NewScriptLoader creates a loader. collectionsDir is the on-disk root
@@ -124,12 +125,19 @@ func (l *ScriptLoader) Load(
 		packages[i] = sp.content
 	}
 
-	hash := scriptContentHash(packages, localPackages)
+	var allCaps []v1alpha1.ScriptCapability
+	for _, sp := range all {
+		allCaps = append(allCaps, sp.content.Capabilities...)
+	}
+	effectiveCaps := normalizeCapabilities(allCaps)
+
+	hash := scriptContentHash(packages, localPackages, effectiveCaps)
 
 	return &LoadResult{
-		Packages:      packages,
-		LocalPackages: localPackages,
-		ContentHash:   hash,
+		Packages:              packages,
+		LocalPackages:         localPackages,
+		EffectiveCapabilities: effectiveCaps,
+		ContentHash:           hash,
 	}, nil
 }
 
@@ -147,15 +155,54 @@ func (l *ScriptLoader) resolveFS(source string) (fs.FS, error) {
 	return resolveCollectionFS(source, userFS)
 }
 
+// normalizeCapabilities expands each ScriptCapability into the cartesian
+// product of its apiGroups × resources × verbs, deduplicates the resulting
+// atomic permissions, and returns them sorted by (scope, apiGroup, resource,
+// verb). The output is grouping-agnostic: equivalent permission sets produce
+// identical slices regardless of how the input PolicyRules were structured.
+func normalizeCapabilities(caps []v1alpha1.ScriptCapability) []AtomicCapability {
+	seen := make(map[AtomicCapability]struct{})
+	for _, cap := range caps {
+		for _, g := range cap.APIGroups {
+			for _, r := range cap.Resources {
+				for _, v := range cap.Verbs {
+					seen[AtomicCapability{
+						Scope:    cap.Scope,
+						APIGroup: g,
+						Resource: r,
+						Verb:     v,
+					}] = struct{}{}
+				}
+			}
+		}
+	}
+
+	result := make([]AtomicCapability, 0, len(seen))
+	for ac := range seen {
+		result = append(result, ac)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Scope != result[j].Scope {
+			return result[i].Scope < result[j].Scope
+		}
+		if result[i].APIGroup != result[j].APIGroup {
+			return result[i].APIGroup < result[j].APIGroup
+		}
+		if result[i].Resource != result[j].Resource {
+			return result[i].Resource < result[j].Resource
+		}
+		return result[i].Verb < result[j].Verb
+	})
+	return result
+}
+
 // scriptContentHash produces a canonical hash over the resolved script
-// content. It covers what would end up in the bundle plus local
-// package membership: for each package (sorted by name) the package
-// name, declared entrypoint, whether it is a local package, and each
-// file's relative path + content (sorted by path). Collection names
-// and dependency order are excluded so that reorganising collections
-// without changing scripts produces the same hash, but moving a
-// package from local to dependency does change it.
-func scriptContentHash(packages []ScriptPackageContent, localPackages map[string]bool) string {
+// content and effective capabilities. It covers what would end up in
+// the bundle plus local package membership and the effective capability
+// set. Capabilities are hashed by effective permission, not by
+// provenance: moving a capability between packages without changing
+// the effective set does not change the hash.
+func scriptContentHash(packages []ScriptPackageContent, localPackages map[string]bool, effectiveCaps []AtomicCapability) string {
 	if len(packages) == 0 {
 		return EmptyHash
 	}
@@ -194,6 +241,17 @@ func scriptContentHash(packages []ScriptPackageContent, localPackages map[string
 			writeField(f.Content)
 		}
 	}
+
+	if len(effectiveCaps) > 0 {
+		writeUint32(len(effectiveCaps))
+		for _, ac := range effectiveCaps {
+			writeField([]byte(ac.Scope))
+			writeField([]byte(ac.APIGroup))
+			writeField([]byte(ac.Resource))
+			writeField([]byte(ac.Verb))
+		}
+	}
+
 	return hex.EncodeToString(h.Sum(nil))
 }
 

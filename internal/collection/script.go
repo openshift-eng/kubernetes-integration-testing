@@ -32,9 +32,19 @@ type ScriptFile struct {
 }
 
 type ScriptPackageContent struct {
-	Name       string
-	Entrypoint string
-	Files      []ScriptFile
+	Name         string
+	Entrypoint   string
+	Files        []ScriptFile
+	Capabilities []v1alpha1.ScriptCapability
+}
+
+// AtomicCapability is a single (scope, apiGroup, resource, verb) permission
+// derived by expanding PolicyRule lists in ScriptCapability declarations.
+type AtomicCapability struct {
+	Scope    v1alpha1.ScriptCapabilityScope `json:"scope"`
+	APIGroup string                         `json:"apiGroup"`
+	Resource string                         `json:"resource"`
+	Verb     string                         `json:"verb"`
 }
 
 func LoadScriptPackage(pkg *v1alpha1.ScriptPackage, fsys fs.FS) (*ScriptPackageContent, error) {
@@ -81,11 +91,65 @@ func LoadScriptPackage(pkg *v1alpha1.ScriptPackage, fsys fs.FS) (*ScriptPackageC
 		}
 	}
 
+	if err := validateCapabilities(pkg.Name, pkg.Capabilities); err != nil {
+		return nil, err
+	}
+
 	return &ScriptPackageContent{
-		Name:       pkg.Name,
-		Entrypoint: entrypoint,
-		Files:      files,
+		Name:         pkg.Name,
+		Entrypoint:   entrypoint,
+		Files:        files,
+		Capabilities: pkg.Capabilities,
 	}, nil
+}
+
+var allowedVerbs = map[string]bool{
+	"get": true, "list": true, "watch": true,
+	"create": true, "update": true, "patch": true, "delete": true,
+}
+
+func validateCapabilities(pkgName string, caps []v1alpha1.ScriptCapability) error {
+	for i, cap := range caps {
+		switch cap.Scope {
+		case v1alpha1.ScopeTargetNamespace, v1alpha1.ScopeAllNamespaces, v1alpha1.ScopeCluster:
+		default:
+			return fmt.Errorf("script package %q: capability %d: unsupported scope %q", pkgName, i, cap.Scope)
+		}
+		if len(cap.ResourceNames) > 0 {
+			return fmt.Errorf("script package %q: capability %d: resourceNames is not supported", pkgName, i)
+		}
+		if len(cap.NonResourceURLs) > 0 {
+			return fmt.Errorf("script package %q: capability %d: nonResourceURLs is not supported", pkgName, i)
+		}
+		if len(cap.APIGroups) == 0 {
+			return fmt.Errorf("script package %q: capability %d: at least one apiGroup is required", pkgName, i)
+		}
+		if len(cap.Resources) == 0 {
+			return fmt.Errorf("script package %q: capability %d: at least one resource is required", pkgName, i)
+		}
+		if len(cap.Verbs) == 0 || len(cap.Verbs) > 7 {
+			return fmt.Errorf("script package %q: capability %d: verbs must have between 1 and 7 entries", pkgName, i)
+		}
+		for _, g := range cap.APIGroups {
+			if g == "*" {
+				return fmt.Errorf("script package %q: capability %d: apiGroup must not be '*'", pkgName, i)
+			}
+		}
+		for _, r := range cap.Resources {
+			if r == "" {
+				return fmt.Errorf("script package %q: capability %d: resource must not be empty", pkgName, i)
+			}
+			if strings.Contains(r, "*") {
+				return fmt.Errorf("script package %q: capability %d: resource %q must not contain '*'", pkgName, i, r)
+			}
+		}
+		for _, v := range cap.Verbs {
+			if !allowedVerbs[v] {
+				return fmt.Errorf("script package %q: capability %d: unsupported verb %q", pkgName, i, v)
+			}
+		}
+	}
+	return nil
 }
 
 func loadScriptDir(root string, include []string, fsys fs.FS) ([]ScriptFile, error) {
