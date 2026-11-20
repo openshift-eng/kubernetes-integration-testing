@@ -13,6 +13,7 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/agent/bundle"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 	agentctl "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent"
+	agentrbac "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent/rbac"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/reconciler"
 
 	corev1 "k8s.io/api/core/v1"
@@ -21,13 +22,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	discoveryfake "k8s.io/client-go/discovery/fake"
+	clientgotesting "k8s.io/client-go/testing"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 type fakeScriptLoader struct {
-	calledWith []string
+	calledWith            []string
+	effectiveCapabilities []collection.AtomicCapability
 }
 
 func (f *fakeScriptLoader) Load(_ context.Context, collectionName string, _ collection.ScriptCollectionResolver) (*collection.LoadResult, error) {
@@ -40,12 +44,9 @@ func (f *fakeScriptLoader) Load(_ context.Context, collectionName string, _ coll
 				{Path: "main.js", Content: []byte(`exports.main = function(ctx) {};`)},
 			},
 		}},
-		LocalPackages: map[string]bool{"test-pkg": true},
-		EffectiveCapabilities: []collection.AtomicCapability{
-			{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "get"},
-			{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "get"},
-		},
-		ContentHash: "fake",
+		LocalPackages:         map[string]bool{"test-pkg": true},
+		EffectiveCapabilities: f.effectiveCapabilities,
+		ContentHash:           "fake",
 	}, nil
 }
 
@@ -70,8 +71,20 @@ func agentTestSetup(t *testing.T, objects ...client.Object) (client.WithWatch, *
 	store, err := bundle.NewBundleStore(afero.NewMemMapFs(), "/bundles", slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 
-	loader := &fakeScriptLoader{}
-	mat := agentctl.NewMaterializer(c, store, loader, "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+	loader := &fakeScriptLoader{effectiveCapabilities: []collection.AtomicCapability{
+		{Scope: v1alpha1.ScopeTargetNamespace, APIGroup: "", Resource: "pods", Verb: "get"},
+		{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "get"},
+	}}
+	scopeValidator := agentrbac.NewScopeValidator(&discoveryfake.FakeDiscovery{
+		Fake: &clientgotesting.Fake{Resources: []*metav1.APIResourceList{{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{
+				{Name: "pods", Namespaced: true},
+				{Name: "nodes", Namespaced: false},
+			},
+		}}},
+	})
+	mat := agentctl.NewMaterializer(c, store, loader, scopeValidator, "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
 	return c, mat, loader
 }
 
@@ -177,6 +190,55 @@ func TestAgentReconciler(t *testing.T) {
 
 		var wo v1alpha1.WorkloadOverride
 		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-mcd-stub"}, &wo))
+	})
+
+	t.Run("missing API type reports pending and requeues", func(t *testing.T) {
+		ag := testAgentCR()
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "openshift-machine-config-operator"}}
+		c, mat, loader := agentTestSetup(t, ag, ns)
+		loader.effectiveCapabilities = []collection.AtomicCapability{{
+			Scope:    v1alpha1.ScopeCluster,
+			APIGroup: "example.io",
+			Resource: "widgets",
+			Verb:     "get",
+		}}
+
+		result := reconcileAgent(t, c, mat, "mcd-stub")
+		assert.NotZero(t, result.RequeueAfter)
+
+		var updated v1alpha1.Agent
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "mcd-stub"}, &updated))
+		cond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionAgentReady)
+		require.NotNil(t, cond)
+		assert.Equal(t, metav1.ConditionFalse, cond.Status)
+		assert.Equal(t, v1alpha1.ReasonAgentAPITypePending, cond.Reason)
+		assert.Empty(t, updated.Status.BundleDigest)
+
+		var wo v1alpha1.WorkloadOverride
+		assert.Error(t, c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-mcd-stub"}, &wo))
+	})
+
+	t.Run("scope conflict reports invalid without immediate requeue", func(t *testing.T) {
+		ag := testAgentCR()
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "openshift-machine-config-operator"}}
+		c, mat, loader := agentTestSetup(t, ag, ns)
+		loader.effectiveCapabilities = []collection.AtomicCapability{{
+			Scope:    v1alpha1.ScopeCluster,
+			APIGroup: "",
+			Resource: "pods",
+			Verb:     "list",
+		}}
+
+		result := reconcileAgent(t, c, mat, "mcd-stub")
+		assert.Zero(t, result.RequeueAfter)
+
+		var updated v1alpha1.Agent
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "mcd-stub"}, &updated))
+		cond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionAgentReady)
+		require.NotNil(t, cond)
+		assert.Equal(t, metav1.ConditionFalse, cond.Status)
+		assert.Equal(t, v1alpha1.ReasonAgentInvalidCapabilities, cond.Reason)
+		assert.Empty(t, updated.Status.BundleDigest)
 	})
 
 	t.Run("deleted agent is ignored", func(t *testing.T) {

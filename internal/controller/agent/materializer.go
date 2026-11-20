@@ -28,26 +28,28 @@ type ScriptPackageLoader interface {
 }
 
 type Materializer struct {
-	client        client.Client
-	store         *bundle.BundleStore
-	scriptLoader  ScriptPackageLoader
-	agentImage    string
-	bundleBaseURL string
-	log           *slog.Logger
+	client         client.Client
+	store          *bundle.BundleStore
+	scriptLoader   ScriptPackageLoader
+	scopeValidator *agentrbac.ScopeValidator
+	agentImage     string
+	bundleBaseURL  string
+	log            *slog.Logger
 }
 
 type MaterializeResult struct {
 	BundleDigest string
 }
 
-func NewMaterializer(c client.Client, store *bundle.BundleStore, loader ScriptPackageLoader, agentImage, bundleBaseURL string, log *slog.Logger) *Materializer {
+func NewMaterializer(c client.Client, store *bundle.BundleStore, loader ScriptPackageLoader, scopeValidator *agentrbac.ScopeValidator, agentImage, bundleBaseURL string, log *slog.Logger) *Materializer {
 	return &Materializer{
-		client:        c,
-		store:         store,
-		scriptLoader:  loader,
-		agentImage:    agentImage,
-		bundleBaseURL: bundleBaseURL,
-		log:           log,
+		client:         c,
+		store:          store,
+		scriptLoader:   loader,
+		scopeValidator: scopeValidator,
+		agentImage:     agentImage,
+		bundleBaseURL:  bundleBaseURL,
+		log:            log,
 	}
 }
 
@@ -59,6 +61,10 @@ func (m *Materializer) Materialize(ctx context.Context, ag *v1alpha1.Agent) (*Ma
 
 	if !loaded.LocalPackages[ag.Spec.Script.Package] {
 		return nil, fmt.Errorf("entrypoint package %q is not in collection %q", ag.Spec.Script.Package, ag.Spec.Script.Collection)
+	}
+
+	if err := m.scopeValidator.Validate(ctx, loaded.EffectiveCapabilities); err != nil {
+		return nil, err
 	}
 
 	values := convertValues(ag.Spec.Values)

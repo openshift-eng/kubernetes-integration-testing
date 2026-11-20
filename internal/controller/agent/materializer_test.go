@@ -24,6 +24,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	discoveryfake "k8s.io/client-go/discovery/fake"
+	clientgotesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -62,6 +64,18 @@ func testCapabilities() []collection.AtomicCapability {
 		{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "get"},
 		{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "patch"},
 	}
+}
+
+func testScopeValidator() *agentrbac.ScopeValidator {
+	return agentrbac.NewScopeValidator(&discoveryfake.FakeDiscovery{
+		Fake: &clientgotesting.Fake{Resources: []*metav1.APIResourceList{{
+			GroupVersion: "v1",
+			APIResources: []metav1.APIResource{
+				{Name: "pods", Namespaced: true},
+				{Name: "nodes", Namespaced: false},
+			},
+		}}},
+	})
 }
 
 func defaultFakeLoader() *fakeScriptLoader {
@@ -124,7 +138,7 @@ func testAgent(name string) *v1alpha1.Agent {
 
 func newMaterializer(t *testing.T, c client.Client, loader agentctl.ScriptPackageLoader) *agentctl.Materializer {
 	t.Helper()
-	return agentctl.NewMaterializer(c, testStore(t), loader, "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+	return agentctl.NewMaterializer(c, testStore(t), loader, testScopeValidator(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
 }
 
 func TestMaterialize(t *testing.T) {
@@ -435,7 +449,7 @@ func TestMaterialize(t *testing.T) {
 
 		store := testStore(t)
 		loader := defaultFakeLoader()
-		mat := agentctl.NewMaterializer(c, store, loader, "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+		mat := agentctl.NewMaterializer(c, store, loader, testScopeValidator(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
 		r1, err := mat.Materialize(context.Background(), ag)
 		require.NoError(t, err)
 
@@ -829,7 +843,7 @@ func TestMaterializerPassesCapabilitiesToBundle(t *testing.T) {
 
 	store := testStore(t)
 	k := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	mat := agentctl.NewMaterializer(k, store, loader, "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+	mat := agentctl.NewMaterializer(k, store, loader, testScopeValidator(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
 
 	ag := testAgent("cap-agent")
 	result, err := mat.Materialize(context.Background(), ag)
@@ -893,7 +907,7 @@ func TestMaterializePrunesRBACOnCapabilityReduction(t *testing.T) {
 		{Scope: v1alpha1.ScopeCluster, APIGroup: "", Resource: "nodes", Verb: "get"},
 	}
 	loader := fakeLoaderWithCaps(`exports.main = function(ctx) {};`, fullCaps)
-	mat := agentctl.NewMaterializer(c, store, loader, "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
+	mat := agentctl.NewMaterializer(c, store, loader, testScopeValidator(), "quay.io/kit:latest", "http://controller:8082", slog.New(slog.DiscardHandler))
 
 	_, err := mat.Materialize(context.Background(), ag)
 	require.NoError(t, err)
@@ -919,4 +933,45 @@ func TestMaterializePrunesRBACOnCapabilityReduction(t *testing.T) {
 	var crb rbacv1.ClusterRoleBinding
 	err = c.Get(context.Background(), client.ObjectKey{Name: "kit-agent-reduce"}, &crb)
 	assert.Error(t, err, "ClusterRoleBinding should be pruned after removing cluster capabilities")
+}
+
+func TestMaterializerValidatesCapabilitiesBeforeSideEffects(t *testing.T) {
+	ag := testAgent("invalid-scope")
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		Build()
+	loader := fakeLoaderWithCaps(
+		`exports.main = function(ctx) { return {exitCode: 0}; };`,
+		[]collection.AtomicCapability{{
+			Scope:    v1alpha1.ScopeCluster,
+			APIGroup: "",
+			Resource: "pods",
+			Verb:     "list",
+		}},
+	)
+	mat := agentctl.NewMaterializer(
+		c,
+		testStore(t),
+		loader,
+		testScopeValidator(),
+		"quay.io/kit:latest",
+		"http://controller:8082",
+		slog.New(slog.DiscardHandler),
+	)
+
+	_, err := mat.Materialize(context.Background(), ag)
+	var invalid *agentrbac.InvalidCapabilitiesError
+	require.ErrorAs(t, err, &invalid)
+
+	name := agentctl.GeneratedName(ag.Name)
+	var sa corev1.ServiceAccount
+	assert.Error(t, c.Get(context.Background(), client.ObjectKey{
+		Name: name, Namespace: ag.Spec.Target.Namespace,
+	}, &sa))
+
+	var wo v1alpha1.WorkloadOverride
+	assert.Error(t, c.Get(context.Background(), client.ObjectKey{Name: name}, &wo))
+
+	var cr rbacv1.ClusterRole
+	assert.Error(t, c.Get(context.Background(), client.ObjectKey{Name: name}, &cr))
 }

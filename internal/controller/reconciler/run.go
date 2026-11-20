@@ -14,6 +14,7 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/cert"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/collection"
 	agentctl "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent"
+	agentrbac "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent/rbac"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/controller/common"
 	kitwebhook "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/webhook"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/image"
@@ -66,8 +67,9 @@ func Start(ctx context.Context, log *slog.Logger, bd *bootstrap.BootstrapData, c
 	// informer cache hasn't synced a just-created ResourceCollection or WO,
 	// Materialize would fail with NotFound and reject the pod.
 	scriptLoader := collection.NewScriptLoader(cfg.CollectionsDir)
-	reconcilerMat := agentctl.NewMaterializer(mgr.GetClient(), bundleStore, scriptLoader, bd.ClusterConfig.ControllerImageRef, bundleBaseURL, log)
-	webhookMat := agentctl.NewMaterializer(clients.Client, bundleStore, scriptLoader, bd.ClusterConfig.ControllerImageRef, bundleBaseURL, log)
+	scopeValidator := agentrbac.NewScopeValidator(clients.Discovery)
+	reconcilerMat := agentctl.NewMaterializer(mgr.GetClient(), bundleStore, scriptLoader, scopeValidator, bd.ClusterConfig.ControllerImageRef, bundleBaseURL, log)
+	webhookMat := agentctl.NewMaterializer(clients.Client, bundleStore, scriptLoader, scopeValidator, bd.ClusterConfig.ControllerImageRef, bundleBaseURL, log)
 
 	if err := setupReconcilers(ctx, mgr, clients, cfg, bd, registry, certProvider, shutdowner, bundleStore, reconcilerMat, scriptLoader, log); err != nil {
 		return err

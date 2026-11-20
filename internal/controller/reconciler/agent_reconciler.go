@@ -2,10 +2,13 @@ package reconciler
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"time"
 
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	agentctl "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent"
+	agentrbac "github.com/openshift-eng/kubernetes-integration-testing/internal/controller/agent/rbac"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -24,6 +27,8 @@ type agentReconciler struct {
 	materializer *agentctl.Materializer
 	log          *slog.Logger
 }
+
+const apiTypePendingRequeueAfter = 5 * time.Second
 
 func NewAgentReconciler(c client.Client, mat *agentctl.Materializer, log *slog.Logger) *agentReconciler {
 	return &agentReconciler{client: c, materializer: mat, log: log}
@@ -51,6 +56,31 @@ func (r *agentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 	result, err := r.materializer.Materialize(ctx, &ag)
 	if err != nil {
+		var pending *agentrbac.APITypePendingError
+		if errors.As(err, &pending) {
+			if _, patchErr := r.patchStatus(ctx, &ag, "", metav1.Condition{
+				Type:               v1alpha1.ConditionAgentReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             v1alpha1.ReasonAgentAPITypePending,
+				Message:            err.Error(),
+				ObservedGeneration: ag.Generation,
+			}); patchErr != nil {
+				return ctrl.Result{}, patchErr
+			}
+			return ctrl.Result{RequeueAfter: apiTypePendingRequeueAfter}, nil
+		}
+
+		var invalid *agentrbac.InvalidCapabilitiesError
+		if errors.As(err, &invalid) {
+			return r.patchStatus(ctx, &ag, "", metav1.Condition{
+				Type:               v1alpha1.ConditionAgentReady,
+				Status:             metav1.ConditionFalse,
+				Reason:             v1alpha1.ReasonAgentInvalidCapabilities,
+				Message:            err.Error(),
+				ObservedGeneration: ag.Generation,
+			})
+		}
+
 		reason := v1alpha1.ReasonAgentCollectionError
 		_, patchErr := r.patchStatus(ctx, &ag, "", metav1.Condition{
 			Type:               v1alpha1.ConditionAgentReady,
