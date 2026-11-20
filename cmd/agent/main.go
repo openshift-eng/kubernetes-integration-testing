@@ -54,7 +54,10 @@ func main() {
 	}
 	mapper := restmapper.NewDiscoveryRESTMapper(groupResources)
 
-	kubeClient := kube.NewClient(dynClient, mapper, kube.NewPolicy())
+	// Policy starts empty — agent.Run replaces it with the
+	// bundle-derived allowlist (capabilities are authoritative, no
+	// hardcoded denylist).
+	kubeClient := kube.NewClient(dynClient, mapper, kube.NewPolicy("", nil))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
