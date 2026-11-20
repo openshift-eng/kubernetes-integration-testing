@@ -9,6 +9,7 @@ service Daemon {
   rpc DestroyCluster(DestroyClusterRequest) returns (DestroyClusterResponse);
   rpc ListClusters(ListClustersRequest) returns (ListClustersResponse);
   rpc GetClusterKubeConfig(GetClusterKubeConfigRequest) returns (GetClusterKubeConfigResponse);
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
 }
 
 message CreateClusterRequest {
@@ -41,3 +42,7 @@ message GetClusterKubeConfigResponse {
   string path = 1;
   string content = 2;
 }
+
+message ShutdownRequest {}
+
+message ShutdownResponse {}

@@ -23,6 +23,7 @@ const (
 	Daemon_DestroyCluster_FullMethodName       = "/kit.Daemon/DestroyCluster"
 	Daemon_ListClusters_FullMethodName         = "/kit.Daemon/ListClusters"
 	Daemon_GetClusterKubeConfig_FullMethodName = "/kit.Daemon/GetClusterKubeConfig"
+	Daemon_Shutdown_FullMethodName             = "/kit.Daemon/Shutdown"
 )
 
 // DaemonClient is the client API for Daemon service.
@@ -33,6 +34,7 @@ type DaemonClient interface {
 	DestroyCluster(ctx context.Context, in *DestroyClusterRequest, opts ...grpc.CallOption) (*DestroyClusterResponse, error)
 	ListClusters(ctx context.Context, in *ListClustersRequest, opts ...grpc.CallOption) (*ListClustersResponse, error)
 	GetClusterKubeConfig(ctx context.Context, in *GetClusterKubeConfigRequest, opts ...grpc.CallOption) (*GetClusterKubeConfigResponse, error)
+	Shutdown(ctx context.Context, in *ShutdownRequest, opts ...grpc.CallOption) (*ShutdownResponse, error)
 }
 
 type daemonClient struct {
@@ -83,6 +85,16 @@ func (c *daemonClient) GetClusterKubeConfig(ctx context.Context, in *GetClusterK
 	return out, nil
 }
 
+func (c *daemonClient) Shutdown(ctx context.Context, in *ShutdownRequest, opts ...grpc.CallOption) (*ShutdownResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ShutdownResponse)
+	err := c.cc.Invoke(ctx, Daemon_Shutdown_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DaemonServer is the server API for Daemon service.
 // All implementations must embed UnimplementedDaemonServer
 // for forward compatibility.
@@ -91,6 +103,7 @@ type DaemonServer interface {
 	DestroyCluster(context.Context, *DestroyClusterRequest) (*DestroyClusterResponse, error)
 	ListClusters(context.Context, *ListClustersRequest) (*ListClustersResponse, error)
 	GetClusterKubeConfig(context.Context, *GetClusterKubeConfigRequest) (*GetClusterKubeConfigResponse, error)
+	Shutdown(context.Context, *ShutdownRequest) (*ShutdownResponse, error)
 	mustEmbedUnimplementedDaemonServer()
 }
 
@@ -112,6 +125,9 @@ func (UnimplementedDaemonServer) ListClusters(context.Context, *ListClustersRequ
 }
 func (UnimplementedDaemonServer) GetClusterKubeConfig(context.Context, *GetClusterKubeConfigRequest) (*GetClusterKubeConfigResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetClusterKubeConfig not implemented")
+}
+func (UnimplementedDaemonServer) Shutdown(context.Context, *ShutdownRequest) (*ShutdownResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Shutdown not implemented")
 }
 func (UnimplementedDaemonServer) mustEmbedUnimplementedDaemonServer() {}
 func (UnimplementedDaemonServer) testEmbeddedByValue()                {}
@@ -206,6 +222,24 @@ func _Daemon_GetClusterKubeConfig_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Daemon_Shutdown_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ShutdownRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DaemonServer).Shutdown(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Daemon_Shutdown_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DaemonServer).Shutdown(ctx, req.(*ShutdownRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Daemon_ServiceDesc is the grpc.ServiceDesc for Daemon service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -228,6 +262,10 @@ var Daemon_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetClusterKubeConfig",
 			Handler:    _Daemon_GetClusterKubeConfig_Handler,
+		},
+		{
+			MethodName: "Shutdown",
+			Handler:    _Daemon_Shutdown_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

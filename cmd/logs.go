@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/openshift-eng/kubernetes-integration-testing/pkg/client"
 )
 
 var follow bool
@@ -17,7 +19,10 @@ var logsCmd = &cobra.Command{
 	Use:   "logs",
 	Short: "Show daemon logs",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		path := appPaths.Log()
+		path, err := client.DaemonLogPath()
+		if err != nil {
+			return err
+		}
 
 		f, err := os.Open(path)
 		if err != nil {

@@ -11,8 +11,8 @@ import (
 
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/imageref"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/naming"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/podman"
+	"github.com/openshift-eng/kubernetes-integration-testing/pkg/naming"
 )
 
 type PodmanControllerLauncher struct {

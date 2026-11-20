@@ -111,6 +111,37 @@ kubectl logs -n openshift-machine-config-operator <pod-name>
 ./bin/kit cluster destroy test-cluster
 ```
 
+### Using kit from Go
+
+The CLI is a thin wrapper over the public client package,
+`github.com/openshift-eng/kubernetes-integration-testing/pkg/client`. It
+connects to the daemon (starting it if needed) and offers the same
+operations:
+
+```go
+import "github.com/openshift-eng/kubernetes-integration-testing/pkg/client"
+
+c, err := client.Connect(ctx)
+if err != nil {
+    return err
+}
+defer func() { _ = c.Close() }()
+
+cl, err := c.Create(ctx,
+    client.WithName("test-cluster"),
+    client.WithPullSecret("/path/to/pull-secret"),
+)
+// cl.Kubeconfig is the path of the cluster kubeconfig file.
+```
+
+Connect starts the daemon if needed and only returns once the daemon
+answers RPCs, so a returned Client is ready to use. Set a deadline on the
+context to bound the wait.
+
+Programs that are not the kit binary itself (for example test binaries)
+must tell the client where to find the kit executable to spawn the
+daemon: set `KIT_BINARY` or pass `client.WithBinary(path)`.
+
 ## Architecture
 
 - **kwok** simulates the Kubernetes control plane (etcd, API server, controller-manager, scheduler) as podman containers on a shared podman network.

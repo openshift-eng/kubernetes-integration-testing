@@ -12,8 +12,8 @@ import (
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/bootstrap"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/imageref"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/naming"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/pullsecret"
+	"github.com/openshift-eng/kubernetes-integration-testing/pkg/naming"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"

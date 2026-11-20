@@ -13,23 +13,39 @@ import (
 	"k8s.io/utils/ptr"
 )
 
+// Apply applies obj with server-side apply under the "kit-controller"
+// field manager.
 func Apply(ctx context.Context, client dynamic.ResourceInterface, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	return ApplyAs(ctx, client, obj, "kit-controller")
+}
+
+// ApplyAs applies obj with server-side apply under the given field
+// manager.
+func ApplyAs(ctx context.Context, client dynamic.ResourceInterface, obj *unstructured.Unstructured, fieldManager string) (*unstructured.Unstructured, error) {
 	data, err := json.Marshal(obj)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling %s %s: %w", obj.GetKind(), obj.GetName(), err)
 	}
 	return client.Patch(ctx, obj.GetName(), types.ApplyPatchType, data, metav1.PatchOptions{
-		FieldManager: "kit-controller",
+		FieldManager: fieldManager,
 		Force:        ptr.To(true),
 	})
 }
 
+// ApplyWithMapper resolves the resource for obj and applies it under the
+// "kit-controller" field manager.
 func ApplyWithMapper(ctx context.Context, client dynamic.Interface, mapper meta.RESTMapper, obj *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	return ApplyWithMapperAs(ctx, client, mapper, obj, "kit-controller")
+}
+
+// ApplyWithMapperAs resolves the resource for obj and applies it under
+// the given field manager.
+func ApplyWithMapperAs(ctx context.Context, client dynamic.Interface, mapper meta.RESTMapper, obj *unstructured.Unstructured, fieldManager string) (*unstructured.Unstructured, error) {
 	res, err := ResourceClient(client, mapper, obj)
 	if err != nil {
 		return nil, err
 	}
-	return Apply(ctx, res, obj)
+	return ApplyAs(ctx, res, obj, fieldManager)
 }
 
 func UpdateStatus(ctx context.Context, dynClient dynamic.Interface, mapper meta.RESTMapper, obj *unstructured.Unstructured, status map[string]interface{}) error {

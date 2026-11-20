@@ -11,13 +11,14 @@ import (
 	pb "github.com/openshift-eng/kubernetes-integration-testing/api/grpc"
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/cluster"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/naming"
+	"github.com/openshift-eng/kubernetes-integration-testing/pkg/naming"
 )
 
 type server struct {
 	pb.UnimplementedDaemonServer
 	clusterManager cluster.Manager
 	log            *slog.Logger
+	shutdown       func()
 }
 
 func (s *server) CreateCluster(ctx context.Context, req *pb.CreateClusterRequest) (*pb.CreateClusterResponse, error) {
@@ -80,4 +81,14 @@ func (s *server) GetClusterKubeConfig(_ context.Context, req *pb.GetClusterKubeC
 		resp.Content = string(data)
 	}
 	return resp, nil
+}
+
+// Shutdown asks the daemon to terminate gracefully. Asking the daemon to
+// stop itself over its own protocol is the identity check: only the real
+// daemon answers it. The response is delivered before the server stops
+// because GracefulStop waits for in-flight RPCs.
+func (s *server) Shutdown(ctx context.Context, _ *pb.ShutdownRequest) (*pb.ShutdownResponse, error) {
+	s.log.Info("shutdown requested by client")
+	s.shutdown()
+	return &pb.ShutdownResponse{}, nil
 }
