@@ -157,8 +157,25 @@ type InlineTemplate struct {
 }
 
 const (
-	ConditionCollectionApplied      = "Applied"
+	// ConditionCollectionReady is the aggregate readiness condition:
+	// ContentReady AND (no apply work OR Applied).
+	ConditionCollectionReady = "Ready"
+	// ConditionCollectionApplied reports whether the collection's
+	// declarative content (templates and status patches) is live on the
+	// cluster.
+	ConditionCollectionApplied = "Applied"
+	// ConditionCollectionContentReady reports whether the collection's
+	// content renders and hashes successfully.
 	ConditionCollectionContentReady = "ContentReady"
+
+	// ReasonCollectionAppliedNotRequested marks Applied=Unknown on a
+	// collection with apply work that no DeploymentPlan step has
+	// requested.
+	ReasonCollectionAppliedNotRequested = "AppliedNotRequested"
+	// ReasonCollectionAppliedPlanPending marks Applied=Unknown on a
+	// collection referenced only by DeploymentPlan steps that have not
+	// been reached yet.
+	ReasonCollectionAppliedPlanPending = "AppliedPlanPending"
 )
 
 type ResourceCollectionStatus struct {
@@ -166,10 +183,14 @@ type ResourceCollectionStatus struct {
 	// content: rendered manifests, loaded scripts (with local package
 	// membership), and status patch declarations. It does not include
 	// Agent-level values, runtime, or timeout — those affect
-	// BundleDigest, not ContentHash. The reconciler skips reapply when
-	// the hash and ObservedGeneration are unchanged.
-	ContentHash string             `json:"contentHash,omitempty"`
-	Conditions  []metav1.Condition `json:"conditions,omitempty"`
+	// BundleDigest, not ContentHash. It is written together with the
+	// status conditions, and the reconciler skips the apply when it
+	// already matches the rendered content of an applied collection.
+	ContentHash string `json:"contentHash,omitempty"`
+
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true

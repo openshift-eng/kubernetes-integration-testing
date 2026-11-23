@@ -26,12 +26,15 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/restmapper"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
@@ -85,15 +88,27 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	isReferencedByPlan, err := r.isReferencedByPlan(ctx, rc.Name)
+	// Rendering can create certificates and secrets, so collections that
+	// nothing consumes are not rendered.
+	planRefs, err := r.planRequestState(ctx, rc.Name)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	isReferencedByAgent, err := r.isReferencedByAgent(ctx, rc.Name)
-	if err != nil {
-		return ctrl.Result{}, err
+	consumed := planRefs.referenced
+	if !consumed {
+		consumed, err = r.isReferencedByAgent(ctx, rc.Name)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
 	}
-	if !isReferencedByPlan && !isReferencedByAgent {
+	if !consumed {
+		consumed, err = r.isReferencedByCollection(ctx, rc.Name)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	if !consumed {
+		r.markNotReferenced(&rc)
 		return ctrl.Result{}, nil
 	}
 
@@ -111,14 +126,23 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 	}
 
+	hasApplyWork := hasCollectionApplyWork(&rc)
+	prevApplied := meta.IsStatusConditionTrue(rc.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+
+	// Frozen: already applied and no live request. The last apply still
+	// describes the cluster, and nothing reapplies until a plan asks
+	// again. Leave the status untouched.
+	if hasApplyWork && prevApplied && !planRefs.requested {
+		return ctrl.Result{}, nil
+	}
+
 	renderResult, err := r.render(&rc, &kc)
 	if err != nil {
 		reason := "RenderFailed"
 		if errors.Is(err, collection.ErrSourceMissing) {
 			reason = "SourceMissing"
 		}
-		r.setContentConditions(&rc, isReferencedByPlan,
-			metav1.ConditionFalse, reason, err.Error())
+		r.setContentFailure(&rc, reason, err.Error())
 		return ctrl.Result{}, err
 	}
 
@@ -128,76 +152,213 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if errors.Is(err, collection.ErrSourceMissing) {
 			reason = "SourceMissing"
 		}
-		r.setContentConditions(&rc, isReferencedByPlan,
-			metav1.ConditionFalse, reason, err.Error())
+		r.setContentFailure(&rc, reason, err.Error())
 		return ctrl.Result{}, err
 	}
 
-	if rc.Status.ContentHash == contentHash && rc.Status.ContentHash != "" {
-		contentCond := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionContentReady)
-		if contentCond != nil && contentCond.Status == metav1.ConditionTrue && contentCond.ObservedGeneration == rc.Generation {
-			if !isReferencedByPlan {
-				return ctrl.Result{}, nil
+	// The current content is live when the last successful apply recorded
+	// this very content hash. Collections without apply work are
+	// trivially live.
+	applied := !hasApplyWork
+	if hasApplyWork && planRefs.requested {
+		if prevApplied && rc.Status.ContentHash == contentHash && rc.Status.ContentHash != "" {
+			applied = true
+		} else {
+			r.log.Info("applying resource collection", "name", rc.Name, "oldHash", rc.Status.ContentHash, "newHash", contentHash)
+			if err := r.apply(ctx, renderResult); err != nil {
+				r.setApplyFailure(&rc, "ApplyFailed", err.Error())
+				return ctrl.Result{}, err
 			}
-			appliedCond := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionApplied)
-			if appliedCond != nil && appliedCond.Status == metav1.ConditionTrue && appliedCond.Reason == "Applied" && appliedCond.ObservedGeneration == rc.Generation {
-				return ctrl.Result{}, nil
+
+			if len(rc.Spec.StatusPatches) > 0 {
+				if err := r.applyStatusPatches(ctx, &rc, &kc, renderResult); err != nil {
+					r.setApplyFailure(&rc, "StatusPatchFailed", err.Error())
+					return ctrl.Result{}, err
+				}
 			}
+			applied = true
 		}
 	}
 
-	if isReferencedByPlan {
-		r.log.Info("applying resource collection", "name", rc.Name, "oldHash", rc.Status.ContentHash, "newHash", contentHash)
-		if err := r.apply(ctx, renderResult); err != nil {
-			r.setApplyFailure(&rc, "ApplyFailed", err.Error())
-			return ctrl.Result{}, err
-		}
-
-		if len(rc.Spec.StatusPatches) > 0 {
-			if err := r.applyStatusPatches(ctx, &rc, &kc, renderResult); err != nil {
-				r.setApplyFailure(&rc, "StatusPatchFailed", err.Error())
-				return ctrl.Result{}, err
-			}
-		}
+	desired := desiredCollectionConditions(&rc, hasApplyWork, planRefs.pending, applied)
+	if collectionStatusCurrent(&rc, contentHash, desired) {
+		return ctrl.Result{}, nil
 	}
 
 	base := rc.DeepCopy()
 	rc.Status.ContentHash = contentHash
-	meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
-		Type:               v1alpha1.ConditionCollectionContentReady,
-		Status:             metav1.ConditionTrue,
-		Reason:             "Ready",
-		ObservedGeneration: rc.Generation,
-	})
-	if isReferencedByPlan {
-		meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
-			Type:               v1alpha1.ConditionCollectionApplied,
-			Status:             metav1.ConditionTrue,
-			Reason:             "Applied",
-			ObservedGeneration: rc.Generation,
-		})
+	for _, cond := range desired {
+		meta.SetStatusCondition(&rc.Status.Conditions, cond)
 	}
 	if err := r.client.Status().Patch(ctx, &rc, client.MergeFrom(base)); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	r.log.Info("reconciled resource collection", "name", rc.Name, "isReferencedByPlan", isReferencedByPlan, "isReferencedByAgent", isReferencedByAgent)
+	r.log.Info("reconciled resource collection", "name", rc.Name, "requested", planRefs.requested, "applied", applied)
 	return ctrl.Result{}, nil
 }
 
-func (r *collectionReconciler) setContentConditions(rc *v1alpha1.ResourceCollection, hasPlan bool, status metav1.ConditionStatus, reason, message string) {
+// planReferences summarizes how DeploymentPlans reference a collection
+// by spec.
+type planReferences struct {
+	// referenced is true when any step names the collection, whatever
+	// its phase.
+	referenced bool
+	// requested is true when a referencing step is in flight (Requested
+	// or Failed).
+	requested bool
+	// pending is true when a referencing step has not been reached yet
+	// (Pending, or no status).
+	pending bool
+}
+
+// planRequestState reports how DeploymentPlans reference the collection.
+func (r *collectionReconciler) planRequestState(ctx context.Context, name string) (planReferences, error) {
+	var planList v1alpha1.DeploymentPlanList
+	if err := r.client.List(ctx, &planList); err != nil {
+		return planReferences{}, fmt.Errorf("listing DeploymentPlan: %w", err)
+	}
+	var refs planReferences
+	for _, plan := range planList.Items {
+		for i, step := range plan.Spec.Steps {
+			if step.Collection == nil || step.Collection.Source != name {
+				continue
+			}
+			refs.referenced = true
+			if i >= len(plan.Status.Steps) {
+				refs.pending = true
+				continue
+			}
+			switch plan.Status.Steps[i].Phase {
+			case v1alpha1.StepRequested, v1alpha1.StepFailed:
+				refs.requested = true
+			case v1alpha1.StepPending:
+				refs.pending = true
+			}
+		}
+	}
+	return refs, nil
+}
+
+// hasCollectionApplyWork reports whether the collection declares content
+// a DeploymentPlan can request to apply: templates or status patches.
+func hasCollectionApplyWork(rc *v1alpha1.ResourceCollection) bool {
+	return rc.Spec.Source != "" || len(rc.Spec.Inline) > 0 || len(rc.Spec.StatusPatches) > 0
+}
+
+// markNotReferenced stamps a collection that nothing consumes with
+// Ready=Unknown so its lack of status is explicit. Transitional wait
+// states (AppliedPlanPending, AppliedNotRequested) are also rewritten:
+// their messages name consumers that no longer exist, which is reachable
+// by creating and deleting plans on a live cluster. Anything else — in
+// particular a successful last apply — is left untouched.
+func (r *collectionReconciler) markNotReferenced(rc *v1alpha1.ResourceCollection) {
+	ready := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionReady)
+	if ready != nil &&
+		ready.Reason != v1alpha1.ReasonCollectionAppliedPlanPending &&
+		ready.Reason != v1alpha1.ReasonCollectionAppliedNotRequested {
+		return
+	}
+
 	base := rc.DeepCopy()
-	meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
-		Type:               v1alpha1.ConditionCollectionContentReady,
-		Status:             status,
-		Reason:             reason,
-		Message:            message,
-		ObservedGeneration: rc.Generation,
-	})
-	if hasPlan {
+	stampNotReferenced := func(condType string) {
 		meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
-			Type:               v1alpha1.ConditionCollectionApplied,
-			Status:             status,
+			Type:               condType,
+			Status:             metav1.ConditionUnknown,
+			Reason:             "NotReferenced",
+			Message:            "no plan, agent, or collection references this collection",
+			ObservedGeneration: rc.Generation,
+		})
+	}
+	stampNotReferenced(v1alpha1.ConditionCollectionReady)
+	if applied := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionApplied); applied != nil &&
+		(applied.Reason == v1alpha1.ReasonCollectionAppliedPlanPending || applied.Reason == v1alpha1.ReasonCollectionAppliedNotRequested) {
+		stampNotReferenced(v1alpha1.ConditionCollectionApplied)
+	}
+	if err := r.client.Status().Patch(context.Background(), rc, client.MergeFrom(base)); err != nil {
+		r.log.Error("patching collection status", "name", rc.Name, "error", err)
+	}
+}
+
+// desiredCollectionConditions computes the conditions describing the
+// collection's own state after a successful render: ContentReady reflects
+// content validity, Applied reports whether the apply work (templates and
+// status patches) is live on the cluster — Unknown while no plan has
+// requested it — and Ready aggregates both.
+func desiredCollectionConditions(rc *v1alpha1.ResourceCollection, hasApplyWork, planPending, applied bool) []metav1.Condition {
+	conds := []metav1.Condition{{
+		Type:               v1alpha1.ConditionCollectionContentReady,
+		Status:             metav1.ConditionTrue,
+		Reason:             "Ready",
+		ObservedGeneration: rc.Generation,
+	}}
+
+	appliedCond := metav1.Condition{
+		Type:               v1alpha1.ConditionCollectionApplied,
+		ObservedGeneration: rc.Generation,
+	}
+	readyCond := metav1.Condition{
+		Type:               v1alpha1.ConditionCollectionReady,
+		ObservedGeneration: rc.Generation,
+	}
+	switch {
+	case applied:
+		if !hasApplyWork {
+			appliedCond.Status, appliedCond.Reason = metav1.ConditionTrue, "NothingToApply"
+			appliedCond.Message = "collection has nothing to apply"
+		} else {
+			appliedCond.Status, appliedCond.Reason = metav1.ConditionTrue, "Applied"
+		}
+		readyCond.Status, readyCond.Reason = metav1.ConditionTrue, "Ready"
+	case planPending:
+		appliedCond.Status, appliedCond.Reason = metav1.ConditionUnknown, v1alpha1.ReasonCollectionAppliedPlanPending
+		appliedCond.Message = "referenced by a DeploymentPlan step that has not been reached yet"
+		readyCond.Status, readyCond.Reason = metav1.ConditionUnknown, v1alpha1.ReasonCollectionAppliedPlanPending
+		readyCond.Message = appliedCond.Message
+	default:
+		appliedCond.Status, appliedCond.Reason = metav1.ConditionUnknown, v1alpha1.ReasonCollectionAppliedNotRequested
+		appliedCond.Message = "no DeploymentPlan has requested this collection"
+		readyCond.Status, readyCond.Reason = metav1.ConditionUnknown, v1alpha1.ReasonCollectionAppliedNotRequested
+		readyCond.Message = appliedCond.Message
+	}
+	return append(conds, appliedCond, readyCond)
+}
+
+// collectionStatusCurrent reports whether the stored status already
+// describes the desired conditions for contentHash, so the reconciler can
+// skip the status write (and the reconcile it would trigger).
+func collectionStatusCurrent(rc *v1alpha1.ResourceCollection, contentHash string, desired []metav1.Condition) bool {
+	if contentHash == "" || rc.Status.ContentHash != contentHash {
+		return false
+	}
+	for _, want := range desired {
+		got := meta.FindStatusCondition(rc.Status.Conditions, want.Type)
+		if got == nil {
+			return false
+		}
+		if got.Status != want.Status || got.Reason != want.Reason ||
+			got.Message != want.Message || got.ObservedGeneration != want.ObservedGeneration {
+			return false
+		}
+	}
+	return true
+}
+
+// setContentFailure records a content failure (render or hash): the Ready
+// aggregate mirrors it and Applied is marked False so a requesting
+// DeploymentPlan step fails fast with the content error instead of
+// waiting. ContentHash is left untouched: it still describes the last
+// content that rendered successfully.
+func (r *collectionReconciler) setContentFailure(rc *v1alpha1.ResourceCollection, reason, message string) {
+	base := rc.DeepCopy()
+	for _, condType := range []string{
+		v1alpha1.ConditionCollectionContentReady,
+		v1alpha1.ConditionCollectionReady,
+		v1alpha1.ConditionCollectionApplied,
+	} {
+		meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
+			Type:               condType,
+			Status:             metav1.ConditionFalse,
 			Reason:             reason,
 			Message:            message,
 			ObservedGeneration: rc.Generation,
@@ -208,6 +369,8 @@ func (r *collectionReconciler) setContentConditions(rc *v1alpha1.ResourceCollect
 	}
 }
 
+// setApplyFailure records an apply failure: content is valid but not
+// live on the cluster.
 func (r *collectionReconciler) setApplyFailure(rc *v1alpha1.ResourceCollection, reason, message string) {
 	base := rc.DeepCopy()
 	meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
@@ -216,13 +379,18 @@ func (r *collectionReconciler) setApplyFailure(rc *v1alpha1.ResourceCollection, 
 		Reason:             "Ready",
 		ObservedGeneration: rc.Generation,
 	})
-	meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
-		Type:               v1alpha1.ConditionCollectionApplied,
-		Status:             metav1.ConditionFalse,
-		Reason:             reason,
-		Message:            message,
-		ObservedGeneration: rc.Generation,
-	})
+	for _, condType := range []string{
+		v1alpha1.ConditionCollectionApplied,
+		v1alpha1.ConditionCollectionReady,
+	} {
+		meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
+			Type:               condType,
+			Status:             metav1.ConditionFalse,
+			Reason:             reason,
+			Message:            message,
+			ObservedGeneration: rc.Generation,
+		})
+	}
 	if err := r.client.Status().Patch(context.Background(), rc, client.MergeFrom(base)); err != nil {
 		r.log.Error("patching collection status", "name", rc.Name, "error", err)
 	}
@@ -447,6 +615,10 @@ func (r *collectionReconciler) isReferencedByCollection(ctx context.Context, nam
 	return false, nil
 }
 
+// isReferencedByPlan reports whether any live plan references the
+// collection from an in-flight step (Requested or Failed). Used for
+// deletion protection: completed (Ready) steps do not count, so a
+// finished plan does not keep its collections undeletable.
 func (r *collectionReconciler) isReferencedByPlan(ctx context.Context, name string) (bool, error) {
 	var planList v1alpha1.DeploymentPlanList
 	if err := r.client.List(ctx, &planList); err != nil {
@@ -465,6 +637,9 @@ func (r *collectionReconciler) isReferencedByPlan(ctx context.Context, name stri
 	return false, nil
 }
 
+// isReferencedByAgent reports whether any live Agent resolves scripts
+// from the collection. Used by the consumption filter and for deletion
+// protection.
 func (r *collectionReconciler) isReferencedByAgent(ctx context.Context, name string) (bool, error) {
 	var agentList v1alpha1.AgentList
 	if err := r.client.List(ctx, &agentList); err != nil {
@@ -479,10 +654,12 @@ func (r *collectionReconciler) isReferencedByAgent(ctx context.Context, name str
 }
 
 func (r *collectionReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) error {
-	builder := ctrl.NewControllerManagedBy(mgr).
+	bldr := ctrl.NewControllerManagedBy(mgr).
 		Named("resourcecollection").
 		For(&v1alpha1.ResourceCollection{}).
 		Watches(&v1alpha1.DeploymentPlan{}, handler.EnqueueRequestsFromMapFunc(r.planToCollections)).
+		Watches(&v1alpha1.Agent{}, handler.EnqueueRequestsFromMapFunc(r.agentToCollection),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&v1alpha1.ResourceCollection{}, handler.EnqueueRequestsFromMapFunc(r.collectionScriptMapping))
 
 	for _, name := range collection.BuiltinNames() {
@@ -505,28 +682,39 @@ func (r *collectionReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Ma
 		if err != nil {
 			r.log.Warn("filesystem watcher not available, changes on disk won't trigger reconcile", "error", err)
 		} else {
-			builder = builder.WatchesRawSource(source.Channel(ch, &handler.EnqueueRequestForObject{}))
+			bldr = bldr.WatchesRawSource(source.Channel(ch, &handler.EnqueueRequestForObject{}))
 		}
 	}
 
-	return builder.Complete(r)
+	return bldr.Complete(r)
 }
 
-func (r *collectionReconciler) planToCollections(ctx context.Context, obj client.Object) []ctrl.Request {
+// planToCollections enqueues every collection a plan references, so a
+// collection becomes evaluated (and later requested) as soon as a plan
+// names it, whatever the step phase.
+func (r *collectionReconciler) planToCollections(_ context.Context, obj client.Object) []ctrl.Request {
 	plan, ok := obj.(*v1alpha1.DeploymentPlan)
 	if !ok {
 		return nil
 	}
 	var requests []ctrl.Request
-	for i, stepStatus := range plan.Status.Steps {
-		if stepStatus.Phase != v1alpha1.StepRequested && stepStatus.Phase != v1alpha1.StepFailed {
-			continue
-		}
-		if i < len(plan.Spec.Steps) && plan.Spec.Steps[i].Collection != nil {
-			requests = append(requests, ctrl.Request{NamespacedName: client.ObjectKey{Name: plan.Spec.Steps[i].Collection.Source}})
+	for _, step := range plan.Spec.Steps {
+		if step.Collection != nil {
+			requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{Name: step.Collection.Source}})
 		}
 	}
 	return requests
+}
+
+// agentToCollection enqueues the collection an Agent resolves scripts
+// from, so collections consumed only by agents are evaluated when the
+// Agent appears.
+func (r *collectionReconciler) agentToCollection(_ context.Context, obj client.Object) []ctrl.Request {
+	agent, ok := obj.(*v1alpha1.Agent)
+	if !ok {
+		return nil
+	}
+	return []ctrl.Request{{NamespacedName: types.NamespacedName{Name: agent.Spec.Script.Collection}}}
 }
 
 // collectionScriptMapping enqueues both directions when a collection changes:
