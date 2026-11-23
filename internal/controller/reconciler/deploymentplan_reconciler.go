@@ -105,15 +105,25 @@ func (r *deploymentPlanReconciler) reconcileCollectionStep(ctx context.Context, 
 	}
 
 	cond := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionApplied)
-	if cond != nil && cond.Status == metav1.ConditionFalse {
+	switch {
+	case cond == nil:
+		// The collection has not reconciled yet; its status updates
+		// re-enqueue the plan.
+		return ctrl.Result{}, nil
+	case cond.Status == metav1.ConditionTrue:
+		if cond.ObservedGeneration != rc.Generation {
+			// Stale: the collection re-renders when its generation
+			// changes. Wait for the fresh verdict.
+			return ctrl.Result{RequeueAfter: collectionStepPendingRequeue}, nil
+		}
+		return ctrl.Result{}, r.setStepPhase(ctx, plan, idx, v1alpha1.StepReady, "")
+	case cond.Status == metav1.ConditionUnknown:
+		// No plan step has applied the collection yet. Wait for its
+		// reconciler instead of failing the step.
+		return ctrl.Result{RequeueAfter: collectionStepPendingRequeue}, nil
+	default:
 		return r.failStepWithRetry(ctx, plan, idx, fmt.Sprintf("collection %q failed: %s", source, cond.Message))
 	}
-
-	if cond == nil || cond.Status != metav1.ConditionTrue {
-		return ctrl.Result{}, nil
-	}
-
-	return ctrl.Result{}, r.setStepPhase(ctx, plan, idx, v1alpha1.StepReady, "")
 }
 
 func (r *deploymentPlanReconciler) reconcileReleaseStep(ctx context.Context, plan *v1alpha1.DeploymentPlan, idx int, step *v1alpha1.ReleaseStep) (ctrl.Result, error) {
@@ -175,6 +185,10 @@ func (r *deploymentPlanReconciler) newMapper() (meta.RESTMapper, error) {
 }
 
 const stepRetryInterval = 10 * time.Second
+
+// collectionStepPendingRequeue polls a collection step whose collection
+// has not been requested or applied yet.
+const collectionStepPendingRequeue = 5 * time.Second
 
 func (r *deploymentPlanReconciler) failStepWithRetry(ctx context.Context, plan *v1alpha1.DeploymentPlan, idx int, msg string) (ctrl.Result, error) {
 	if err := r.setStepPhase(ctx, plan, idx, v1alpha1.StepFailed, msg); err != nil {

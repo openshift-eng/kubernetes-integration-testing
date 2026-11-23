@@ -318,14 +318,18 @@ spec:
                   - type
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               contentHash:
                 description: |-
                   ContentHash is a deterministic hash of the collection's declared
                   content: rendered manifests, loaded scripts (with local package
                   membership), and status patch declarations. It does not include
                   Agent-level values, runtime, or timeout — those affect
-                  BundleDigest, not ContentHash. The reconciler skips reapply when
-                  the hash and ObservedGeneration are unchanged.
+                  BundleDigest, not ContentHash. It is written together with the
+                  status conditions, and the reconciler skips the apply when it
+                  already matches the rendered content of an applied collection.
                 type: string
             type: object
         required:
