@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc/codes"
@@ -17,6 +18,9 @@ var (
 	clusterWorkers    int
 	clusterImage      string
 	clusterFeatureSet string
+	clusterFiles      []string
+	clusterNoWait     bool
+	clusterTimeout    time.Duration
 )
 
 var clusterCmd = &cobra.Command{
@@ -29,7 +33,10 @@ var clusterCreateCmd = &cobra.Command{
 	Short: "Create a cluster",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		ctx := context.Background()
+		// The resource timeout bounds apply and readiness waits; the RPC
+		// gets that plus room for the cluster provisioning itself.
+		ctx, cancel := context.WithTimeout(context.Background(), clusterTimeout+15*time.Minute)
+		defer cancel()
 
 		c, err := client.Connect(ctx)
 		if err != nil {
@@ -37,19 +44,29 @@ var clusterCreateCmd = &cobra.Command{
 		}
 		defer closeDaemon(c)
 
-		cl, err := c.Create(ctx,
+		opts := []client.CreateOption{
 			client.WithName(args[0]),
 			client.WithProvider(clusterProvider),
 			client.WithImage(clusterImage),
 			client.WithFeatureSet(clusterFeatureSet),
 			client.WithWorkers(clusterWorkers),
 			client.WithPullSecret(clusterPullSecret),
-		)
+			client.WithWait(!clusterNoWait),
+			client.WithTimeout(clusterTimeout),
+		}
+		if len(clusterFiles) > 0 {
+			opts = append(opts, client.WithResources(client.FromFiles(clusterFiles...)))
+		}
+
+		cl, err := c.Create(ctx, opts...)
 		if err != nil {
 			return grpcError(err)
 		}
 
 		fmt.Printf("Cluster created (kubeconfig: %s)\n", cl.Kubeconfig)
+		if cl.AppliedResources > 0 {
+			fmt.Printf("  applied %d kit resources\n", cl.AppliedResources)
+		}
 		return nil
 	},
 }
@@ -160,6 +177,9 @@ func init() {
 	clusterCreateCmd.Flags().IntVar(&clusterWorkers, "workers", 1, "number of worker nodes")
 	clusterCreateCmd.Flags().StringVar(&clusterImage, "image", "", "release image to deploy operators from")
 	clusterCreateCmd.Flags().StringVar(&clusterFeatureSet, "feature-set", "", "feature set (Default, TechPreviewNoUpgrade)")
+	clusterCreateCmd.Flags().StringArrayVarP(&clusterFiles, "file", "f", nil, "kit CR manifest file, directory, or '-' for stdin; may be repeated")
+	clusterCreateCmd.Flags().BoolVar(&clusterNoWait, "no-wait", false, "apply resources but do not wait for them to become ready")
+	clusterCreateCmd.Flags().DurationVar(&clusterTimeout, "timeout", 10*time.Minute, "time bound for applying resources and waiting for them to become ready")
 	clusterKubeconfigCmd.Flags().BoolVar(&kubeconfigOutput, "output", false, "print kubeconfig content instead of path")
 	clusterCmd.AddCommand(clusterCreateCmd)
 	clusterCmd.AddCommand(clusterDestroyCmd)

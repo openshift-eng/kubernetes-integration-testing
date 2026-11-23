@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -144,6 +145,77 @@ func TestCreatePreservesRPCError(t *testing.T) {
 	s, ok := status.FromError(err)
 	require.True(t, ok, "gRPC status must be extractable from the returned error")
 	assert.Equal(t, codes.Unavailable, s.Code())
+}
+
+func TestCreateWithResources(t *testing.T) {
+	fake := &fakeDaemon{
+		createResp: &pb.CreateClusterResponse{Kubeconfig: "/tmp/kubeconfig"},
+	}
+	c := newTestClient(fake)
+
+	cl, err := c.Create(context.Background(),
+		WithName("my-cluster"),
+		WithPullSecret("/secrets/pull-secret"),
+		WithResources(
+			FromString("apiVersion: kit.openshift.io/v1alpha1\nkind: ResourceCollection\nmetadata:\n  name: coll\nspec: {}\n"),
+			FromString("apiVersion: kit.openshift.io/v1alpha1\nkind: DeploymentPlan\nmetadata:\n  name: plan\nspec:\n  steps:\n  - name: s\n    collection:\n      source: coll\n"),
+		),
+		WithTimeout(5*time.Minute),
+	)
+	require.NoError(t, err)
+
+	// The resources travel in order, as single JSON documents.
+	require.Len(t, fake.createReq.GetResources(), 2)
+	assert.JSONEq(t, `{"apiVersion":"kit.openshift.io/v1alpha1","kind":"ResourceCollection","metadata":{"name":"coll"},"spec":{}}`, string(fake.createReq.GetResources()[0]))
+	assert.JSONEq(t, `{"apiVersion":"kit.openshift.io/v1alpha1","kind":"DeploymentPlan","metadata":{"name":"plan"},"spec":{"steps":[{"name":"s","collection":{"source":"coll"}}]}}`, string(fake.createReq.GetResources()[1]))
+
+	assert.True(t, fake.createReq.GetWaitResources())
+	assert.EqualValues(t, 300, fake.createReq.GetTimeoutSeconds())
+
+	// The client reports how many resources it sent.
+	assert.Equal(t, 2, cl.AppliedResources)
+}
+
+func TestCreateWaitDefaults(t *testing.T) {
+	fake := &fakeDaemon{
+		createResp: &pb.CreateClusterResponse{Kubeconfig: "/tmp/kubeconfig"},
+	}
+	c := newTestClient(fake)
+
+	_, err := c.Create(context.Background(), WithName("my-cluster"))
+	require.NoError(t, err)
+	assert.True(t, fake.createReq.GetWaitResources())
+	assert.EqualValues(t, 600, fake.createReq.GetTimeoutSeconds())
+
+	_, err = c.Create(context.Background(), WithName("my-cluster"), WithWait(false))
+	require.NoError(t, err)
+	assert.False(t, fake.createReq.GetWaitResources())
+}
+
+func TestCreateRejectsKitClusterResource(t *testing.T) {
+	fake := &fakeDaemon{}
+	c := newTestClient(fake)
+
+	_, err := c.Create(context.Background(),
+		WithName("my-cluster"),
+		WithResources(FromString("apiVersion: kit.openshift.io/v1alpha1\nkind: KitCluster\nmetadata:\n  name: cluster\nspec:\n  clusterName: other\n  provider: kwok\n")),
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "configured through the create options")
+	assert.Zero(t, fake.createCalls)
+}
+
+func TestCreateRejectsInvalidResource(t *testing.T) {
+	fake := &fakeDaemon{}
+	c := newTestClient(fake)
+
+	_, err := c.Create(context.Background(),
+		WithName("my-cluster"),
+		WithResources(FromString("kind: DeploymentPlan\nmetadata:\n  name: a\n")),
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing apiVersion")
+	assert.Zero(t, fake.createCalls)
 }
 
 func TestDestroy(t *testing.T) {

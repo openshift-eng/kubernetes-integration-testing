@@ -93,7 +93,7 @@ func (r *deploymentPlanReconciler) initStepStatuses(ctx context.Context, plan *v
 			Phase: v1alpha1.StepPending,
 		}
 	}
-	meta.RemoveStatusCondition(&plan.Status.Conditions, v1alpha1.ConditionPlanReady)
+	setPlanProgressCondition(plan)
 	return r.client.Status().Patch(ctx, plan, client.MergeFrom(base))
 }
 
@@ -201,7 +201,38 @@ func (r *deploymentPlanReconciler) setStepPhase(ctx context.Context, plan *v1alp
 	base := plan.DeepCopy()
 	plan.Status.Steps[idx].Phase = phase
 	plan.Status.Steps[idx].Message = message
+	setPlanProgressCondition(plan)
 	return r.client.Status().Patch(ctx, plan, client.MergeFrom(base))
+}
+
+// setPlanProgressCondition keeps the plan-level Ready condition in step
+// with the step statuses: False as soon as a step fails, Unknown while
+// steps are still running. The all-steps-ready True is set by Reconcile
+// itself, so the condition always exists with a meaningful state.
+func setPlanProgressCondition(plan *v1alpha1.DeploymentPlan) {
+	ready := 0
+	for _, s := range plan.Status.Steps {
+		if s.Phase == v1alpha1.StepReady {
+			ready++
+		}
+	}
+	cond := metav1.Condition{
+		Type:               v1alpha1.ConditionPlanReady,
+		Status:             metav1.ConditionUnknown,
+		Reason:             v1alpha1.ReasonPlanStepsInProgress,
+		Message:            fmt.Sprintf("%d/%d steps ready", ready, len(plan.Status.Steps)),
+		ObservedGeneration: plan.Generation,
+	}
+	for i, s := range plan.Status.Steps {
+		if s.Phase != v1alpha1.StepFailed || i >= len(plan.Spec.Steps) {
+			continue
+		}
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = v1alpha1.ReasonPlanStepFailed
+		cond.Message = fmt.Sprintf("step %q failed: %s", plan.Spec.Steps[i].Name, s.Message)
+		break
+	}
+	meta.SetStatusCondition(&plan.Status.Conditions, cond)
 }
 
 func (r *deploymentPlanReconciler) collectionToPlan(ctx context.Context, obj client.Object) []ctrl.Request {

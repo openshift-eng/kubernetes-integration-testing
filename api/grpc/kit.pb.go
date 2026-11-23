@@ -103,93 +103,16 @@ func (x *CreateClusterRequest) GetTimeoutSeconds() int32 {
 	return 0
 }
 
-type AppliedResource struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Kind          string                 `protobuf:"bytes,1,opt,name=kind,proto3" json:"kind,omitempty"`
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	Namespace     string                 `protobuf:"bytes,3,opt,name=namespace,proto3" json:"namespace,omitempty"`
-	Ready         bool                   `protobuf:"varint,4,opt,name=ready,proto3" json:"ready,omitempty"`
-	Message       string                 `protobuf:"bytes,5,opt,name=message,proto3" json:"message,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *AppliedResource) Reset() {
-	*x = AppliedResource{}
-	mi := &file_api_grpc_kit_proto_msgTypes[1]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *AppliedResource) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*AppliedResource) ProtoMessage() {}
-
-func (x *AppliedResource) ProtoReflect() protoreflect.Message {
-	mi := &file_api_grpc_kit_proto_msgTypes[1]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use AppliedResource.ProtoReflect.Descriptor instead.
-func (*AppliedResource) Descriptor() ([]byte, []int) {
-	return file_api_grpc_kit_proto_rawDescGZIP(), []int{1}
-}
-
-func (x *AppliedResource) GetKind() string {
-	if x != nil {
-		return x.Kind
-	}
-	return ""
-}
-
-func (x *AppliedResource) GetName() string {
-	if x != nil {
-		return x.Name
-	}
-	return ""
-}
-
-func (x *AppliedResource) GetNamespace() string {
-	if x != nil {
-		return x.Namespace
-	}
-	return ""
-}
-
-func (x *AppliedResource) GetReady() bool {
-	if x != nil {
-		return x.Ready
-	}
-	return false
-}
-
-func (x *AppliedResource) GetMessage() string {
-	if x != nil {
-		return x.Message
-	}
-	return ""
-}
-
 type CreateClusterResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Kubeconfig    string                 `protobuf:"bytes,1,opt,name=kubeconfig,proto3" json:"kubeconfig,omitempty"`
-	Applied       []*AppliedResource     `protobuf:"bytes,2,rep,name=applied,proto3" json:"applied,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CreateClusterResponse) Reset() {
 	*x = CreateClusterResponse{}
-	mi := &file_api_grpc_kit_proto_msgTypes[2]
+	mi := &file_api_grpc_kit_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -201,7 +124,7 @@ func (x *CreateClusterResponse) String() string {
 func (*CreateClusterResponse) ProtoMessage() {}
 
 func (x *CreateClusterResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_grpc_kit_proto_msgTypes[2]
+	mi := &file_api_grpc_kit_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -214,7 +137,7 @@ func (x *CreateClusterResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateClusterResponse.ProtoReflect.Descriptor instead.
 func (*CreateClusterResponse) Descriptor() ([]byte, []int) {
-	return file_api_grpc_kit_proto_rawDescGZIP(), []int{2}
+	return file_api_grpc_kit_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *CreateClusterResponse) GetKubeconfig() string {
@@ -222,13 +145,6 @@ func (x *CreateClusterResponse) GetKubeconfig() string {
 		return x.Kubeconfig
 	}
 	return ""
-}
-
-func (x *CreateClusterResponse) GetApplied() []*AppliedResource {
-	if x != nil {
-		return x.Applied
-	}
-	return nil
 }
 
 type DestroyClusterRequest struct {
@@ -240,7 +156,7 @@ type DestroyClusterRequest struct {
 
 func (x *DestroyClusterRequest) Reset() {
 	*x = DestroyClusterRequest{}
-	mi := &file_api_grpc_kit_proto_msgTypes[3]
+	mi := &file_api_grpc_kit_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -252,7 +168,7 @@ func (x *DestroyClusterRequest) String() string {
 func (*DestroyClusterRequest) ProtoMessage() {}
 
 func (x *DestroyClusterRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_grpc_kit_proto_msgTypes[3]
+	mi := &file_api_grpc_kit_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -265,7 +181,7 @@ func (x *DestroyClusterRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DestroyClusterRequest.ProtoReflect.Descriptor instead.
 func (*DestroyClusterRequest) Descriptor() ([]byte, []int) {
-	return file_api_grpc_kit_proto_rawDescGZIP(), []int{3}
+	return file_api_grpc_kit_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *DestroyClusterRequest) GetName() string {
@@ -283,7 +199,7 @@ type DestroyClusterResponse struct {
 
 func (x *DestroyClusterResponse) Reset() {
 	*x = DestroyClusterResponse{}
-	mi := &file_api_grpc_kit_proto_msgTypes[4]
+	mi := &file_api_grpc_kit_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -295,7 +211,7 @@ func (x *DestroyClusterResponse) String() string {
 func (*DestroyClusterResponse) ProtoMessage() {}
 
 func (x *DestroyClusterResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_grpc_kit_proto_msgTypes[4]
+	mi := &file_api_grpc_kit_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -308,7 +224,7 @@ func (x *DestroyClusterResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DestroyClusterResponse.ProtoReflect.Descriptor instead.
 func (*DestroyClusterResponse) Descriptor() ([]byte, []int) {
-	return file_api_grpc_kit_proto_rawDescGZIP(), []int{4}
+	return file_api_grpc_kit_proto_rawDescGZIP(), []int{3}
 }
 
 type ListClustersRequest struct {
@@ -319,7 +235,7 @@ type ListClustersRequest struct {
 
 func (x *ListClustersRequest) Reset() {
 	*x = ListClustersRequest{}
-	mi := &file_api_grpc_kit_proto_msgTypes[5]
+	mi := &file_api_grpc_kit_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -331,7 +247,7 @@ func (x *ListClustersRequest) String() string {
 func (*ListClustersRequest) ProtoMessage() {}
 
 func (x *ListClustersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_grpc_kit_proto_msgTypes[5]
+	mi := &file_api_grpc_kit_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -344,7 +260,7 @@ func (x *ListClustersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListClustersRequest.ProtoReflect.Descriptor instead.
 func (*ListClustersRequest) Descriptor() ([]byte, []int) {
-	return file_api_grpc_kit_proto_rawDescGZIP(), []int{5}
+	return file_api_grpc_kit_proto_rawDescGZIP(), []int{4}
 }
 
 type ListClustersResponse struct {
@@ -356,7 +272,7 @@ type ListClustersResponse struct {
 
 func (x *ListClustersResponse) Reset() {
 	*x = ListClustersResponse{}
-	mi := &file_api_grpc_kit_proto_msgTypes[6]
+	mi := &file_api_grpc_kit_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -368,7 +284,7 @@ func (x *ListClustersResponse) String() string {
 func (*ListClustersResponse) ProtoMessage() {}
 
 func (x *ListClustersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_grpc_kit_proto_msgTypes[6]
+	mi := &file_api_grpc_kit_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -381,7 +297,7 @@ func (x *ListClustersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListClustersResponse.ProtoReflect.Descriptor instead.
 func (*ListClustersResponse) Descriptor() ([]byte, []int) {
-	return file_api_grpc_kit_proto_rawDescGZIP(), []int{6}
+	return file_api_grpc_kit_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ListClustersResponse) GetNames() []string {
@@ -401,7 +317,7 @@ type GetClusterKubeConfigRequest struct {
 
 func (x *GetClusterKubeConfigRequest) Reset() {
 	*x = GetClusterKubeConfigRequest{}
-	mi := &file_api_grpc_kit_proto_msgTypes[7]
+	mi := &file_api_grpc_kit_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -413,7 +329,7 @@ func (x *GetClusterKubeConfigRequest) String() string {
 func (*GetClusterKubeConfigRequest) ProtoMessage() {}
 
 func (x *GetClusterKubeConfigRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_grpc_kit_proto_msgTypes[7]
+	mi := &file_api_grpc_kit_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -426,7 +342,7 @@ func (x *GetClusterKubeConfigRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetClusterKubeConfigRequest.ProtoReflect.Descriptor instead.
 func (*GetClusterKubeConfigRequest) Descriptor() ([]byte, []int) {
-	return file_api_grpc_kit_proto_rawDescGZIP(), []int{7}
+	return file_api_grpc_kit_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *GetClusterKubeConfigRequest) GetName() string {
@@ -453,7 +369,7 @@ type GetClusterKubeConfigResponse struct {
 
 func (x *GetClusterKubeConfigResponse) Reset() {
 	*x = GetClusterKubeConfigResponse{}
-	mi := &file_api_grpc_kit_proto_msgTypes[8]
+	mi := &file_api_grpc_kit_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -465,7 +381,7 @@ func (x *GetClusterKubeConfigResponse) String() string {
 func (*GetClusterKubeConfigResponse) ProtoMessage() {}
 
 func (x *GetClusterKubeConfigResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_grpc_kit_proto_msgTypes[8]
+	mi := &file_api_grpc_kit_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -478,7 +394,7 @@ func (x *GetClusterKubeConfigResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetClusterKubeConfigResponse.ProtoReflect.Descriptor instead.
 func (*GetClusterKubeConfigResponse) Descriptor() ([]byte, []int) {
-	return file_api_grpc_kit_proto_rawDescGZIP(), []int{8}
+	return file_api_grpc_kit_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *GetClusterKubeConfigResponse) GetPath() string {
@@ -503,7 +419,7 @@ type ShutdownRequest struct {
 
 func (x *ShutdownRequest) Reset() {
 	*x = ShutdownRequest{}
-	mi := &file_api_grpc_kit_proto_msgTypes[9]
+	mi := &file_api_grpc_kit_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -515,7 +431,7 @@ func (x *ShutdownRequest) String() string {
 func (*ShutdownRequest) ProtoMessage() {}
 
 func (x *ShutdownRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_api_grpc_kit_proto_msgTypes[9]
+	mi := &file_api_grpc_kit_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -528,7 +444,7 @@ func (x *ShutdownRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShutdownRequest.ProtoReflect.Descriptor instead.
 func (*ShutdownRequest) Descriptor() ([]byte, []int) {
-	return file_api_grpc_kit_proto_rawDescGZIP(), []int{9}
+	return file_api_grpc_kit_proto_rawDescGZIP(), []int{8}
 }
 
 type ShutdownResponse struct {
@@ -539,7 +455,7 @@ type ShutdownResponse struct {
 
 func (x *ShutdownResponse) Reset() {
 	*x = ShutdownResponse{}
-	mi := &file_api_grpc_kit_proto_msgTypes[10]
+	mi := &file_api_grpc_kit_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -551,7 +467,7 @@ func (x *ShutdownResponse) String() string {
 func (*ShutdownResponse) ProtoMessage() {}
 
 func (x *ShutdownResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_api_grpc_kit_proto_msgTypes[10]
+	mi := &file_api_grpc_kit_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -564,7 +480,7 @@ func (x *ShutdownResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShutdownResponse.ProtoReflect.Descriptor instead.
 func (*ShutdownResponse) Descriptor() ([]byte, []int) {
-	return file_api_grpc_kit_proto_rawDescGZIP(), []int{10}
+	return file_api_grpc_kit_proto_rawDescGZIP(), []int{9}
 }
 
 var File_api_grpc_kit_proto protoreflect.FileDescriptor
@@ -578,18 +494,11 @@ const file_api_grpc_kit_proto_rawDesc = "" +
 	"pullSecret\x12\x1c\n" +
 	"\tresources\x18\x03 \x03(\fR\tresources\x12%\n" +
 	"\x0ewait_resources\x18\x04 \x01(\bR\rwaitResources\x12'\n" +
-	"\x0ftimeout_seconds\x18\x05 \x01(\x05R\x0etimeoutSeconds\"\x87\x01\n" +
-	"\x0fAppliedResource\x12\x12\n" +
-	"\x04kind\x18\x01 \x01(\tR\x04kind\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1c\n" +
-	"\tnamespace\x18\x03 \x01(\tR\tnamespace\x12\x14\n" +
-	"\x05ready\x18\x04 \x01(\bR\x05ready\x12\x18\n" +
-	"\amessage\x18\x05 \x01(\tR\amessage\"g\n" +
+	"\x0ftimeout_seconds\x18\x05 \x01(\x05R\x0etimeoutSeconds\"7\n" +
 	"\x15CreateClusterResponse\x12\x1e\n" +
 	"\n" +
 	"kubeconfig\x18\x01 \x01(\tR\n" +
-	"kubeconfig\x12.\n" +
-	"\aapplied\x18\x02 \x03(\v2\x14.kit.AppliedResourceR\aapplied\"+\n" +
+	"kubeconfig\"+\n" +
 	"\x15DestroyClusterRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\"\x18\n" +
 	"\x16DestroyClusterResponse\"\x15\n" +
@@ -623,37 +532,35 @@ func file_api_grpc_kit_proto_rawDescGZIP() []byte {
 	return file_api_grpc_kit_proto_rawDescData
 }
 
-var file_api_grpc_kit_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_api_grpc_kit_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_api_grpc_kit_proto_goTypes = []any{
 	(*CreateClusterRequest)(nil),         // 0: kit.CreateClusterRequest
-	(*AppliedResource)(nil),              // 1: kit.AppliedResource
-	(*CreateClusterResponse)(nil),        // 2: kit.CreateClusterResponse
-	(*DestroyClusterRequest)(nil),        // 3: kit.DestroyClusterRequest
-	(*DestroyClusterResponse)(nil),       // 4: kit.DestroyClusterResponse
-	(*ListClustersRequest)(nil),          // 5: kit.ListClustersRequest
-	(*ListClustersResponse)(nil),         // 6: kit.ListClustersResponse
-	(*GetClusterKubeConfigRequest)(nil),  // 7: kit.GetClusterKubeConfigRequest
-	(*GetClusterKubeConfigResponse)(nil), // 8: kit.GetClusterKubeConfigResponse
-	(*ShutdownRequest)(nil),              // 9: kit.ShutdownRequest
-	(*ShutdownResponse)(nil),             // 10: kit.ShutdownResponse
+	(*CreateClusterResponse)(nil),        // 1: kit.CreateClusterResponse
+	(*DestroyClusterRequest)(nil),        // 2: kit.DestroyClusterRequest
+	(*DestroyClusterResponse)(nil),       // 3: kit.DestroyClusterResponse
+	(*ListClustersRequest)(nil),          // 4: kit.ListClustersRequest
+	(*ListClustersResponse)(nil),         // 5: kit.ListClustersResponse
+	(*GetClusterKubeConfigRequest)(nil),  // 6: kit.GetClusterKubeConfigRequest
+	(*GetClusterKubeConfigResponse)(nil), // 7: kit.GetClusterKubeConfigResponse
+	(*ShutdownRequest)(nil),              // 8: kit.ShutdownRequest
+	(*ShutdownResponse)(nil),             // 9: kit.ShutdownResponse
 }
 var file_api_grpc_kit_proto_depIdxs = []int32{
-	1,  // 0: kit.CreateClusterResponse.applied:type_name -> kit.AppliedResource
-	0,  // 1: kit.Daemon.CreateCluster:input_type -> kit.CreateClusterRequest
-	3,  // 2: kit.Daemon.DestroyCluster:input_type -> kit.DestroyClusterRequest
-	5,  // 3: kit.Daemon.ListClusters:input_type -> kit.ListClustersRequest
-	7,  // 4: kit.Daemon.GetClusterKubeConfig:input_type -> kit.GetClusterKubeConfigRequest
-	9,  // 5: kit.Daemon.Shutdown:input_type -> kit.ShutdownRequest
-	2,  // 6: kit.Daemon.CreateCluster:output_type -> kit.CreateClusterResponse
-	4,  // 7: kit.Daemon.DestroyCluster:output_type -> kit.DestroyClusterResponse
-	6,  // 8: kit.Daemon.ListClusters:output_type -> kit.ListClustersResponse
-	8,  // 9: kit.Daemon.GetClusterKubeConfig:output_type -> kit.GetClusterKubeConfigResponse
-	10, // 10: kit.Daemon.Shutdown:output_type -> kit.ShutdownResponse
-	6,  // [6:11] is the sub-list for method output_type
-	1,  // [1:6] is the sub-list for method input_type
-	1,  // [1:1] is the sub-list for extension type_name
-	1,  // [1:1] is the sub-list for extension extendee
-	0,  // [0:1] is the sub-list for field type_name
+	0, // 0: kit.Daemon.CreateCluster:input_type -> kit.CreateClusterRequest
+	2, // 1: kit.Daemon.DestroyCluster:input_type -> kit.DestroyClusterRequest
+	4, // 2: kit.Daemon.ListClusters:input_type -> kit.ListClustersRequest
+	6, // 3: kit.Daemon.GetClusterKubeConfig:input_type -> kit.GetClusterKubeConfigRequest
+	8, // 4: kit.Daemon.Shutdown:input_type -> kit.ShutdownRequest
+	1, // 5: kit.Daemon.CreateCluster:output_type -> kit.CreateClusterResponse
+	3, // 6: kit.Daemon.DestroyCluster:output_type -> kit.DestroyClusterResponse
+	5, // 7: kit.Daemon.ListClusters:output_type -> kit.ListClustersResponse
+	7, // 8: kit.Daemon.GetClusterKubeConfig:output_type -> kit.GetClusterKubeConfigResponse
+	9, // 9: kit.Daemon.Shutdown:output_type -> kit.ShutdownResponse
+	5, // [5:10] is the sub-list for method output_type
+	0, // [0:5] is the sub-list for method input_type
+	0, // [0:0] is the sub-list for extension type_name
+	0, // [0:0] is the sub-list for extension extendee
+	0, // [0:0] is the sub-list for field type_name
 }
 
 func init() { file_api_grpc_kit_proto_init() }
@@ -667,7 +574,7 @@ func file_api_grpc_kit_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_grpc_kit_proto_rawDesc), len(file_api_grpc_kit_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -18,6 +19,10 @@ type Cluster struct {
 	Name string
 	// Kubeconfig is the path, on the daemon host, of the kubeconfig file.
 	Kubeconfig string
+	// AppliedResources is the number of resources requested at creation.
+	// A successful Create means all of them were applied (and Ready, when
+	// waiting was not disabled).
+	AppliedResources int
 }
 
 // CreateOption customizes Create.
@@ -30,6 +35,9 @@ type createOptions struct {
 	featureSet string
 	workers    int
 	pullSecret string
+	resources  []ResourceSource
+	wait       bool
+	timeout    time.Duration
 }
 
 // WithName sets the cluster name. Required.
@@ -62,10 +70,30 @@ func WithPullSecret(path string) CreateOption {
 	return func(o *createOptions) { o.pullSecret = path }
 }
 
+// WithResources adds sources of kit CRs to apply once the cluster is up.
+// Only kit CRs are accepted; the KitCluster itself is configured through
+// the other options.
+func WithResources(sources ...ResourceSource) CreateOption {
+	return func(o *createOptions) { o.resources = append(o.resources, sources...) }
+}
+
+// WithWait controls whether Create blocks until the applied resources
+// report Ready. Defaults to true.
+func WithWait(wait bool) CreateOption {
+	return func(o *createOptions) { o.wait = wait }
+}
+
+// WithTimeout bounds the resource apply and wait phase. Defaults to
+// 10m. Values under one second fall back to the daemon default.
+func WithTimeout(d time.Duration) CreateOption {
+	return func(o *createOptions) { o.timeout = d }
+}
+
 // Create creates a cluster with the given options. It blocks until the
-// cluster is up and returns it with its kubeconfig path.
+// cluster is up, applies any requested resources (by default waiting for
+// them to become Ready) and returns the cluster with its kubeconfig path.
 func (c *Client) Create(ctx context.Context, opts ...CreateOption) (*Cluster, error) {
-	o := createOptions{provider: "kwok", workers: 1}
+	o := createOptions{provider: "kwok", workers: 1, wait: true, timeout: 10 * time.Minute}
 	for _, opt := range opts {
 		opt(&o)
 	}
@@ -75,6 +103,20 @@ func (c *Client) Create(ctx context.Context, opts ...CreateOption) (*Cluster, er
 	}
 	if err := naming.ValidateClusterName(o.name); err != nil {
 		return nil, err
+	}
+
+	var resources [][]byte
+	for _, src := range o.resources {
+		ms, err := src.Load()
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range ms {
+			if m.Kind == "KitCluster" {
+				return nil, fmt.Errorf("%s %s: the KitCluster is configured through the create options (name, provider, image, feature set, workers), not through resources", m.Kind, m.Name)
+			}
+			resources = append(resources, m.JSON)
+		}
 	}
 
 	kc := v1alpha1.KitCluster{
@@ -97,14 +139,18 @@ func (c *Client) Create(ctx context.Context, opts ...CreateOption) (*Cluster, er
 	}
 
 	resp, err := c.pb.CreateCluster(ctx, &pb.CreateClusterRequest{
-		Manifest:   manifest,
-		PullSecret: o.pullSecret,
+		Manifest:       manifest,
+		PullSecret:     o.pullSecret,
+		Resources:      resources,
+		WaitResources:  o.wait,
+		TimeoutSeconds: int32(o.timeout / time.Second),
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	return &Cluster{Name: o.name, Kubeconfig: resp.GetKubeconfig()}, nil
+	cl := &Cluster{Name: o.name, Kubeconfig: resp.GetKubeconfig(), AppliedResources: len(resources)}
+	return cl, nil
 }
 
 // Destroy destroys the cluster named name.

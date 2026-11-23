@@ -51,6 +51,13 @@ const (
 
 const (
 	ConditionPlanReady = "Ready"
+
+	// ReasonPlanStepsInProgress marks Ready=Unknown while the plan's
+	// steps are still being executed.
+	ReasonPlanStepsInProgress = "StepsInProgress"
+	// ReasonPlanStepFailed marks Ready=False when a step failed and is
+	// waiting for its retry.
+	ReasonPlanStepFailed = "StepFailed"
 )
 
 type DeploymentPlanStatus struct {

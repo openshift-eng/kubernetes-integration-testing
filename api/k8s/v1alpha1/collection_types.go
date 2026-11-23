@@ -157,11 +157,12 @@ type InlineTemplate struct {
 }
 
 const (
-	// ConditionCollectionReady is the aggregate readiness condition:
-	// ContentReady AND (no apply work OR Applied).
+	// ConditionCollectionReady reports whether the collection is healthy:
+	// its content renders and hashes. Whether the content is live on the
+	// cluster is reported by ConditionCollectionApplied.
 	ConditionCollectionReady = "Ready"
 	// ConditionCollectionApplied reports whether the collection's
-	// declarative content (templates and status patches) is live on the
+	// declared content (templates and status patches) is live on the
 	// cluster.
 	ConditionCollectionApplied = "Applied"
 	// ConditionCollectionContentReady reports whether the collection's
@@ -169,24 +170,30 @@ const (
 	ConditionCollectionContentReady = "ContentReady"
 
 	// ReasonCollectionAppliedNotRequested marks Applied=Unknown on a
-	// collection with apply work that no DeploymentPlan step has
-	// requested.
+	// collection with apply work that no plan step has requested yet.
 	ReasonCollectionAppliedNotRequested = "AppliedNotRequested"
 	// ReasonCollectionAppliedPlanPending marks Applied=Unknown on a
-	// collection referenced only by DeploymentPlan steps that have not
-	// been reached yet.
+	// collection referenced only by plan steps that have not been
+	// reached yet.
 	ReasonCollectionAppliedPlanPending = "AppliedPlanPending"
+	// ReasonCollectionAppliedOutdated marks Applied=Unknown on a
+	// collection whose applied content is still live but no longer
+	// matches its current content.
+	ReasonCollectionAppliedOutdated = "AppliedOutdated"
+	// ReasonCollectionNotReferenced marks Ready=Unknown on a collection
+	// that nothing references.
+	ReasonCollectionNotReferenced = "NotReferenced"
 )
 
 type ResourceCollectionStatus struct {
 	// ContentHash is a deterministic hash of the collection's declared
-	// content: rendered manifests, loaded scripts (with local package
-	// membership), and status patch declarations. It does not include
-	// Agent-level values, runtime, or timeout — those affect
-	// BundleDigest, not ContentHash. It is written together with the
-	// status conditions, and the reconciler skips the apply when it
-	// already matches the rendered content of an applied collection.
+	// content: rendered manifests, scripts, and status patches.
 	ContentHash string `json:"contentHash,omitempty"`
+
+	// AppliedHash is the ContentHash of the content that is live on the
+	// cluster; empty means the collection was never applied. It differs
+	// from ContentHash when the content changed after the last apply.
+	AppliedHash string `json:"appliedHash,omitempty"`
 
 	// +listType=map
 	// +listMapKey=type

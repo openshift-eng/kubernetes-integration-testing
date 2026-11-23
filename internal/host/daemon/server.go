@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	pb "github.com/openshift-eng/kubernetes-integration-testing/api/grpc"
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
@@ -33,15 +34,35 @@ func (s *server) CreateCluster(ctx context.Context, req *pb.CreateClusterRequest
 		return nil, err
 	}
 
+	// Resources are parsed and validated before the cluster is created,
+	// so that invalid input fails without leaving a cluster behind.
+	objs, err := prepareResources(req.GetResources())
+	if err != nil {
+		return nil, err
+	}
+
 	// TODO: validate full KitCluster spec (provider, featureSet, workers, image, defaultCA)
 	// against the CRD OpenAPI schema once the daemon accepts KIT CRs at startup.
 
-	s.log.Info("creating cluster", "name", kc.Spec.ClusterName, "provider", kc.Spec.Provider)
+	s.log.Info("creating cluster", "name", kc.Spec.ClusterName, "provider", kc.Spec.Provider, "resources", len(objs))
 
 	c, err := s.clusterManager.Create(ctx, &kc, req.GetPullSecret())
 	if err != nil {
 		s.log.Error("cluster creation failed", "name", kc.Spec.ClusterName, "error", err)
 		return nil, err
+	}
+
+	if len(objs) > 0 {
+		timeout := defaultResourceTimeout
+		if t := req.GetTimeoutSeconds(); t > 0 {
+			timeout = time.Duration(t) * time.Second
+		}
+		if err := applyResources(ctx, s.log, c.KubeConfig(), objs, req.GetWaitResources(), timeout); err != nil {
+			// The cluster is left running for debugging on purpose: the
+			// failure may be in the applied resources, and inspecting a
+			// live cluster beats reading a log.
+			return nil, fmt.Errorf("%w (cluster %q was left running for debugging; destroy it with `kit cluster destroy %s`)", err, kc.Spec.ClusterName, kc.Spec.ClusterName)
+		}
 	}
 
 	return &pb.CreateClusterResponse{Kubeconfig: c.KubeConfig()}, nil
