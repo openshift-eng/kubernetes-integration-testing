@@ -22,11 +22,20 @@ const (
 )
 
 type CreateClusterRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Manifest      []byte                 `protobuf:"bytes,1,opt,name=manifest,proto3" json:"manifest,omitempty"`
-	PullSecret    string                 `protobuf:"bytes,2,opt,name=pull_secret,json=pullSecret,proto3" json:"pull_secret,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Manifest   []byte                 `protobuf:"bytes,1,opt,name=manifest,proto3" json:"manifest,omitempty"`
+	PullSecret string                 `protobuf:"bytes,2,opt,name=pull_secret,json=pullSecret,proto3" json:"pull_secret,omitempty"`
+	// resources are ordered single-document manifests (JSON or YAML)
+	// applied to the cluster after bootstrap. They are parsed and validated
+	// before the cluster is created.
+	Resources [][]byte `protobuf:"bytes,3,rep,name=resources,proto3" json:"resources,omitempty"`
+	// wait_resources blocks until the applied resources report Ready.
+	WaitResources bool `protobuf:"varint,4,opt,name=wait_resources,json=waitResources,proto3" json:"wait_resources,omitempty"`
+	// timeout_seconds bounds the resource apply and wait phase. Zero
+	// selects the daemon default.
+	TimeoutSeconds int32 `protobuf:"varint,5,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *CreateClusterRequest) Reset() {
@@ -71,6 +80,27 @@ func (x *CreateClusterRequest) GetPullSecret() string {
 		return x.PullSecret
 	}
 	return ""
+}
+
+func (x *CreateClusterRequest) GetResources() [][]byte {
+	if x != nil {
+		return x.Resources
+	}
+	return nil
+}
+
+func (x *CreateClusterRequest) GetWaitResources() bool {
+	if x != nil {
+		return x.WaitResources
+	}
+	return false
+}
+
+func (x *CreateClusterRequest) GetTimeoutSeconds() int32 {
+	if x != nil {
+		return x.TimeoutSeconds
+	}
+	return 0
 }
 
 type CreateClusterResponse struct {
@@ -381,15 +411,90 @@ func (x *GetClusterKubeConfigResponse) GetContent() string {
 	return ""
 }
 
+type ShutdownRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShutdownRequest) Reset() {
+	*x = ShutdownRequest{}
+	mi := &file_api_grpc_kit_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShutdownRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShutdownRequest) ProtoMessage() {}
+
+func (x *ShutdownRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_api_grpc_kit_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShutdownRequest.ProtoReflect.Descriptor instead.
+func (*ShutdownRequest) Descriptor() ([]byte, []int) {
+	return file_api_grpc_kit_proto_rawDescGZIP(), []int{8}
+}
+
+type ShutdownResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShutdownResponse) Reset() {
+	*x = ShutdownResponse{}
+	mi := &file_api_grpc_kit_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShutdownResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShutdownResponse) ProtoMessage() {}
+
+func (x *ShutdownResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_api_grpc_kit_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShutdownResponse.ProtoReflect.Descriptor instead.
+func (*ShutdownResponse) Descriptor() ([]byte, []int) {
+	return file_api_grpc_kit_proto_rawDescGZIP(), []int{9}
+}
+
 var File_api_grpc_kit_proto protoreflect.FileDescriptor
 
 const file_api_grpc_kit_proto_rawDesc = "" +
 	"\n" +
-	"\x12api/grpc/kit.proto\x12\x03kit\"S\n" +
+	"\x12api/grpc/kit.proto\x12\x03kit\"\xc1\x01\n" +
 	"\x14CreateClusterRequest\x12\x1a\n" +
 	"\bmanifest\x18\x01 \x01(\fR\bmanifest\x12\x1f\n" +
 	"\vpull_secret\x18\x02 \x01(\tR\n" +
-	"pullSecret\"7\n" +
+	"pullSecret\x12\x1c\n" +
+	"\tresources\x18\x03 \x03(\fR\tresources\x12%\n" +
+	"\x0ewait_resources\x18\x04 \x01(\bR\rwaitResources\x12'\n" +
+	"\x0ftimeout_seconds\x18\x05 \x01(\x05R\x0etimeoutSeconds\"7\n" +
 	"\x15CreateClusterResponse\x12\x1e\n" +
 	"\n" +
 	"kubeconfig\x18\x01 \x01(\tR\n" +
@@ -405,12 +510,15 @@ const file_api_grpc_kit_proto_rawDesc = "" +
 	"\acontent\x18\x02 \x01(\bR\acontent\"L\n" +
 	"\x1cGetClusterKubeConfigResponse\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x18\n" +
-	"\acontent\x18\x02 \x01(\tR\acontent2\xbd\x02\n" +
+	"\acontent\x18\x02 \x01(\tR\acontent\"\x11\n" +
+	"\x0fShutdownRequest\"\x12\n" +
+	"\x10ShutdownResponse2\xf6\x02\n" +
 	"\x06Daemon\x12F\n" +
 	"\rCreateCluster\x12\x19.kit.CreateClusterRequest\x1a\x1a.kit.CreateClusterResponse\x12I\n" +
 	"\x0eDestroyCluster\x12\x1a.kit.DestroyClusterRequest\x1a\x1b.kit.DestroyClusterResponse\x12C\n" +
 	"\fListClusters\x12\x18.kit.ListClustersRequest\x1a\x19.kit.ListClustersResponse\x12[\n" +
-	"\x14GetClusterKubeConfig\x12 .kit.GetClusterKubeConfigRequest\x1a!.kit.GetClusterKubeConfigResponseBBZ@github.com/openshift-eng/kubernetes-integration-testing/api/grpcb\x06proto3"
+	"\x14GetClusterKubeConfig\x12 .kit.GetClusterKubeConfigRequest\x1a!.kit.GetClusterKubeConfigResponse\x127\n" +
+	"\bShutdown\x12\x14.kit.ShutdownRequest\x1a\x15.kit.ShutdownResponseBBZ@github.com/openshift-eng/kubernetes-integration-testing/api/grpcb\x06proto3"
 
 var (
 	file_api_grpc_kit_proto_rawDescOnce sync.Once
@@ -424,7 +532,7 @@ func file_api_grpc_kit_proto_rawDescGZIP() []byte {
 	return file_api_grpc_kit_proto_rawDescData
 }
 
-var file_api_grpc_kit_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_api_grpc_kit_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_api_grpc_kit_proto_goTypes = []any{
 	(*CreateClusterRequest)(nil),         // 0: kit.CreateClusterRequest
 	(*CreateClusterResponse)(nil),        // 1: kit.CreateClusterResponse
@@ -434,18 +542,22 @@ var file_api_grpc_kit_proto_goTypes = []any{
 	(*ListClustersResponse)(nil),         // 5: kit.ListClustersResponse
 	(*GetClusterKubeConfigRequest)(nil),  // 6: kit.GetClusterKubeConfigRequest
 	(*GetClusterKubeConfigResponse)(nil), // 7: kit.GetClusterKubeConfigResponse
+	(*ShutdownRequest)(nil),              // 8: kit.ShutdownRequest
+	(*ShutdownResponse)(nil),             // 9: kit.ShutdownResponse
 }
 var file_api_grpc_kit_proto_depIdxs = []int32{
 	0, // 0: kit.Daemon.CreateCluster:input_type -> kit.CreateClusterRequest
 	2, // 1: kit.Daemon.DestroyCluster:input_type -> kit.DestroyClusterRequest
 	4, // 2: kit.Daemon.ListClusters:input_type -> kit.ListClustersRequest
 	6, // 3: kit.Daemon.GetClusterKubeConfig:input_type -> kit.GetClusterKubeConfigRequest
-	1, // 4: kit.Daemon.CreateCluster:output_type -> kit.CreateClusterResponse
-	3, // 5: kit.Daemon.DestroyCluster:output_type -> kit.DestroyClusterResponse
-	5, // 6: kit.Daemon.ListClusters:output_type -> kit.ListClustersResponse
-	7, // 7: kit.Daemon.GetClusterKubeConfig:output_type -> kit.GetClusterKubeConfigResponse
-	4, // [4:8] is the sub-list for method output_type
-	0, // [0:4] is the sub-list for method input_type
+	8, // 4: kit.Daemon.Shutdown:input_type -> kit.ShutdownRequest
+	1, // 5: kit.Daemon.CreateCluster:output_type -> kit.CreateClusterResponse
+	3, // 6: kit.Daemon.DestroyCluster:output_type -> kit.DestroyClusterResponse
+	5, // 7: kit.Daemon.ListClusters:output_type -> kit.ListClustersResponse
+	7, // 8: kit.Daemon.GetClusterKubeConfig:output_type -> kit.GetClusterKubeConfigResponse
+	9, // 9: kit.Daemon.Shutdown:output_type -> kit.ShutdownResponse
+	5, // [5:10] is the sub-list for method output_type
+	0, // [0:5] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
@@ -462,7 +574,7 @@ func file_api_grpc_kit_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_grpc_kit_proto_rawDesc), len(file_api_grpc_kit_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   8,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -9,11 +9,21 @@ service Daemon {
   rpc DestroyCluster(DestroyClusterRequest) returns (DestroyClusterResponse);
   rpc ListClusters(ListClustersRequest) returns (ListClustersResponse);
   rpc GetClusterKubeConfig(GetClusterKubeConfigRequest) returns (GetClusterKubeConfigResponse);
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
 }
 
 message CreateClusterRequest {
   bytes manifest = 1;
   string pull_secret = 2;
+  // resources are ordered single-document manifests (JSON or YAML)
+  // applied to the cluster after bootstrap. They are parsed and validated
+  // before the cluster is created.
+  repeated bytes resources = 3;
+  // wait_resources blocks until the applied resources report Ready.
+  bool wait_resources = 4;
+  // timeout_seconds bounds the resource apply and wait phase. Zero
+  // selects the daemon default.
+  int32 timeout_seconds = 5;
 }
 
 message CreateClusterResponse {
@@ -41,3 +51,7 @@ message GetClusterKubeConfigResponse {
   string path = 1;
   string content = 2;
 }
+
+message ShutdownRequest {}
+
+message ShutdownResponse {}

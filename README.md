@@ -66,16 +66,19 @@ There are two providers: **kwok** (lightweight, simulated control plane) and **k
 
 ### Deploying operators
 
-Operator deployment is driven by `KitCluster` spec and `DeploymentPlan` resources. After creating a cluster, patch the `KitCluster` with the release image and feature set, then apply a `DeploymentPlan`:
+Operator deployment is driven by `KitCluster` spec and `DeploymentPlan` resources. The simplest path is passing the release image and the kit CRs (deployment plans, resource collections) directly to `create`: the cluster comes up with everything applied and ready, in one command.
 
 ```bash
-export KUBECONFIG=$(./bin/kit cluster kubeconfig test-cluster)
-
-oc patch kitcluster test-cluster --type merge -p \
-  '{"spec":{"image":"registry.ci.openshift.org/ocp/release-5:5.1.0-0.nightly-2026-10-21-040310", "featureSet":"TechPreviewNoUpgrade"}}'
-
-oc apply -f deploymentplan.yaml
+./bin/kit cluster create test-cluster \
+  --pull-secret ~/mco-dev/pull-secret \
+  --image quay.io/openshift-release-dev/ocp-release:5.0.0-x86_64 \
+  --feature-set TechPreviewNoUpgrade \
+  -f deploymentplan.yaml
 ```
+
+`-f` is repeatable and accepts a file, a directory, or `-` for stdin; each may contain several YAML documents. By default the command waits until the applied resources report Ready (`--no-wait` skips the wait, `--timeout` bounds it). Only kit CRs are accepted: kit CRDs are installed by the controller during bootstrap and payload CRDs come from the release image, so neither is passed as a resource.
+
+On failure the cluster is left running for debugging; destroy it with `kit cluster destroy`.
 
 A `DeploymentPlan` declares an ordered sequence of steps. Each step is either a `ResourceCollection` (rendered templates) or a set of manifests filtered from the release image:
 
@@ -110,6 +113,43 @@ kubectl logs -n openshift-machine-config-operator <pod-name>
 ```bash
 ./bin/kit cluster destroy test-cluster
 ```
+
+### Using kit from Go
+
+The CLI is a thin wrapper over the public client package,
+`github.com/openshift-eng/kubernetes-integration-testing/pkg/client`. It
+connects to the daemon (starting it if needed) and offers the same
+operations:
+
+```go
+import "github.com/openshift-eng/kubernetes-integration-testing/pkg/client"
+
+c, err := client.Connect(ctx)
+if err != nil {
+    return err
+}
+defer func() { _ = c.Close() }()
+
+cl, err := c.Create(ctx,
+    client.WithName("test-cluster"),
+    client.WithPullSecret("/path/to/pull-secret"),
+    client.WithResources(client.FromFS(manifests, "deploymentplan.yaml")),
+)
+// cl.Kubeconfig is the path of the cluster kubeconfig file, and
+// cl.Applied lists the resources applied at creation.
+```
+
+where `manifests` is an `embed.FS` (`//go:embed`), so a suite ships its
+kit CRs inside the binary. `client.FromFiles` and `client.FromString`
+are available for paths and inline manifests.
+
+Connect starts the daemon if needed and only returns once the daemon
+answers RPCs, so a returned Client is ready to use. Set a deadline on the
+context to bound the wait.
+
+Programs that are not the kit binary itself (for example test binaries)
+must tell the client where to find the kit executable to spawn the
+daemon: set `KIT_BINARY` or pass `client.WithBinary(path)`.
 
 ## Architecture
 

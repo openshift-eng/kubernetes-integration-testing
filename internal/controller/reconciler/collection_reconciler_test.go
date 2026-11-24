@@ -8,6 +8,7 @@ package reconciler_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"testing"
@@ -315,12 +316,12 @@ func TestCollectionSourceMissingViaAgent(t *testing.T) {
 	assert.Equal(t, "SourceMissing", contentCond.Reason)
 
 	appliedCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionApplied)
-	require.NotNil(t, appliedCond, "Applied should report the content failure")
-	assert.Equal(t, metav1.ConditionFalse, appliedCond.Status)
-	assert.Equal(t, "SourceMissing", appliedCond.Reason)
+	require.NotNil(t, appliedCond)
+	assert.Equal(t, metav1.ConditionUnknown, appliedCond.Status, "nothing requested an apply, so Applied must not look degraded")
+	assert.Equal(t, v1alpha1.ReasonCollectionAppliedNotRequested, appliedCond.Reason)
 
 	readyCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionReady)
-	require.NotNil(t, readyCond, "Ready should mirror the content failure")
+	require.NotNil(t, readyCond, "Ready should report the content failure")
 	assert.Equal(t, metav1.ConditionFalse, readyCond.Status)
 	assert.Equal(t, "SourceMissing", readyCond.Reason)
 }
@@ -476,11 +477,6 @@ func reconcileCollectionWith(t *testing.T, kubeClient client.Client, clients *ku
 	return result
 }
 
-func recordingClients() (*kube.Clients, *recordingDynClient) {
-	dyn := &recordingDynClient{history: &applyHistory{}}
-	return &kube.Clients{Dynamic: dyn, Discovery: &fakeDiscovery{}}, dyn
-}
-
 // TestCollectionUnreferencedNotRendered verifies the consumption filter:
 // a collection nothing references is not rendered (rendering can create
 // certificates and secrets) and only gets Ready=Unknown/NotReferenced.
@@ -542,8 +538,8 @@ func TestCollectionTemplatesNotRequested(t *testing.T) {
 
 	readyCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionReady)
 	require.NotNil(t, readyCond)
-	assert.Equal(t, metav1.ConditionUnknown, readyCond.Status)
-	assert.Equal(t, v1alpha1.ReasonCollectionAppliedNotRequested, readyCond.Reason)
+	assert.Equal(t, metav1.ConditionTrue, readyCond.Status, "own health must not depend on consumers")
+	assert.Equal(t, "Ready", readyCond.Reason)
 
 	assert.Empty(t, dyn.appliedNames, "unrequested collection must not apply")
 }
@@ -570,23 +566,23 @@ func TestCollectionTemplatesPlanPending(t *testing.T) {
 
 	readyCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionReady)
 	require.NotNil(t, readyCond)
-	assert.Equal(t, metav1.ConditionUnknown, readyCond.Status)
-	assert.Equal(t, v1alpha1.ReasonCollectionAppliedPlanPending, readyCond.Reason)
+	assert.Equal(t, metav1.ConditionTrue, readyCond.Status, "own health must not depend on plan progress")
+	assert.Equal(t, "Ready", readyCond.Reason)
 
 	assert.Empty(t, dyn.appliedNames, "pending step must not trigger an apply")
 }
 
 // TestCollectionNotReferencedClearsStaleWaitState verifies that when the
-// last consumer disappears (e.g. a plan is deleted), transitional wait
-// states are rewritten: their messages name consumers that no longer
-// exist.
+// last consumer disappears (e.g. a plan is deleted), Applied wait states
+// are rewritten: their messages name consumers that no longer exist. The
+// collection's own health stays as it was.
 func TestCollectionNotReferencedClearsStaleWaitState(t *testing.T) {
 	rc := templateCollection("template-coll", "v1")
 	rc.Status = v1alpha1.ResourceCollectionStatus{
 		Conditions: []metav1.Condition{
 			{Type: v1alpha1.ConditionCollectionContentReady, Status: metav1.ConditionTrue, Reason: "Ready"},
 			{Type: v1alpha1.ConditionCollectionApplied, Status: metav1.ConditionUnknown, Reason: v1alpha1.ReasonCollectionAppliedPlanPending},
-			{Type: v1alpha1.ConditionCollectionReady, Status: metav1.ConditionUnknown, Reason: v1alpha1.ReasonCollectionAppliedPlanPending},
+			{Type: v1alpha1.ConditionCollectionReady, Status: metav1.ConditionTrue, Reason: "Ready"},
 		},
 	}
 
@@ -596,12 +592,15 @@ func TestCollectionNotReferencedClearsStaleWaitState(t *testing.T) {
 	var updated v1alpha1.ResourceCollection
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: "template-coll"}, &updated))
 
-	for _, condType := range []string{v1alpha1.ConditionCollectionReady, v1alpha1.ConditionCollectionApplied} {
-		cond := meta.FindStatusCondition(updated.Status.Conditions, condType)
-		require.NotNil(t, cond, "%s should still be present", condType)
-		assert.Equal(t, metav1.ConditionUnknown, cond.Status)
-		assert.Equal(t, "NotReferenced", cond.Reason)
-	}
+	appliedCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+	require.NotNil(t, appliedCond, "Applied should be rewritten")
+	assert.Equal(t, metav1.ConditionUnknown, appliedCond.Status)
+	assert.Equal(t, v1alpha1.ReasonCollectionNotReferenced, appliedCond.Reason)
+
+	readyCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionReady)
+	require.NotNil(t, readyCond, "Ready should be kept")
+	assert.Equal(t, metav1.ConditionTrue, readyCond.Status)
+	assert.Equal(t, "Ready", readyCond.Reason)
 }
 
 // TestCollectionNotReferencedLeavesAppliedStatus verifies that losing the
@@ -661,14 +660,235 @@ func TestCollectionPlanRequestedAppliesTemplates(t *testing.T) {
 	assert.Equal(t, []string{"demo"}, dyn.appliedNames)
 }
 
-// TestCollectionCompletedPlanFreezesOnEdit verifies that editing a
-// collection after its plan step completed does not reapply: the status
-// keeps describing the last apply.
-func TestCollectionCompletedPlanFreezesOnEdit(t *testing.T) {
+// TestCollectionApplyFailureKeepsReady verifies that a failing apply is
+// reported only through Applied: applies run on plan request, so the
+// collection's own health (Ready) must not depend on them.
+func TestCollectionApplyFailureKeepsReady(t *testing.T) {
+	rc := templateCollection("template-coll", "v1")
+	plan := planWithStepPhase("test-plan", "template-coll", v1alpha1.StepRequested)
+
+	clients, dyn := recordingClients()
+	dyn.applyErr = errors.New("boom")
+	kubeClient := newCollectionClient(t, rc, plan, readyKitCluster("test-cluster"))
+
+	_, err := reconciler.NewCollectionReconciler(kubeClient, slog.New(slog.DiscardHandler), clients, nil, &stubScriptLoader{}, "", "", nil).
+		Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "template-coll"}})
+	require.Error(t, err, "the apply error is returned so the reconcile retries")
+
+	var updated v1alpha1.ResourceCollection
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: "template-coll"}, &updated))
+
+	appliedCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+	require.NotNil(t, appliedCond)
+	assert.Equal(t, metav1.ConditionFalse, appliedCond.Status)
+	assert.Equal(t, "ApplyFailed", appliedCond.Reason)
+	assert.Contains(t, appliedCond.Message, "boom")
+
+	readyCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionReady)
+	require.NotNil(t, readyCond)
+	assert.Equal(t, metav1.ConditionTrue, readyCond.Status, "own health must not depend on the apply")
+	assert.Equal(t, "Ready", readyCond.Reason)
+
+	contentCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionContentReady)
+	require.NotNil(t, contentCond)
+	assert.Equal(t, metav1.ConditionTrue, contentCond.Status)
+}
+
+// brokenTemplateCollection returns a template collection whose content
+// fails to render.
+func brokenTemplateCollection(name string) *v1alpha1.ResourceCollection {
+	rc := templateCollection(name, "v1")
+	rc.Spec.Inline = []v1alpha1.InlineTemplate{{Content: "kind: Foo\nname: {{ .Broken"}}
+	return rc
+}
+
+// reconcileCollectionExpectError reconciles a collection whose reconcile
+// is expected to fail and returns its updated status.
+func reconcileCollectionExpectError(t *testing.T, kubeClient client.Client, name string) v1alpha1.ResourceCollection {
+	t.Helper()
+	clients, _ := recordingClients()
+	_, err := reconciler.NewCollectionReconciler(kubeClient, slog.New(slog.DiscardHandler), clients, nil, &stubScriptLoader{}, "", "", nil).
+		Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: name}})
+	require.Error(t, err)
+	var updated v1alpha1.ResourceCollection
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: name}, &updated))
+	return updated
+}
+
+// TestCollectionContentFailureAfterApplyIsOutdated verifies that when the
+// content of an applied collection stops rendering and no plan requests
+// it, Applied reports the old content as outdated instead of degraded:
+// nothing was attempted and the old content is still live.
+func TestCollectionContentFailureAfterApplyIsOutdated(t *testing.T) {
+	oldHash := inlineContentHash(t, fmt.Sprintf(fooTemplate, "old"))
+	rc := brokenTemplateCollection("template-coll")
+	rc.Status = v1alpha1.ResourceCollectionStatus{
+		ContentHash: oldHash,
+		AppliedHash: oldHash,
+		Conditions: []metav1.Condition{
+			{Type: v1alpha1.ConditionCollectionContentReady, Status: metav1.ConditionTrue, Reason: "Ready"},
+			{Type: v1alpha1.ConditionCollectionApplied, Status: metav1.ConditionTrue, Reason: "Applied"},
+			{Type: v1alpha1.ConditionCollectionReady, Status: metav1.ConditionTrue, Reason: "Ready"},
+		},
+	}
+	plan := planWithStepPhase("test-plan", "template-coll", v1alpha1.StepReady)
+
+	kubeClient := newCollectionClient(t, rc, plan, readyKitCluster("test-cluster"))
+	updated := reconcileCollectionExpectError(t, kubeClient, "template-coll")
+
+	appliedCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+	require.NotNil(t, appliedCond)
+	assert.Equal(t, metav1.ConditionUnknown, appliedCond.Status)
+	assert.Equal(t, v1alpha1.ReasonCollectionAppliedOutdated, appliedCond.Reason)
+
+	readyCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionReady)
+	require.NotNil(t, readyCond)
+	assert.Equal(t, metav1.ConditionFalse, readyCond.Status, "broken content is the collection's own health")
+	assert.Equal(t, "RenderFailed", readyCond.Reason)
+
+	assert.Equal(t, oldHash, updated.Status.ContentHash, "a render failure leaves ContentHash untouched")
+	assert.Equal(t, oldHash, updated.Status.AppliedHash, "AppliedHash keeps describing the live content")
+}
+
+// TestCollectionContentFailureNeverAppliedKeepsWaitState verifies that a
+// never-applied collection with broken content keeps its Applied wait
+// state: nothing was attempted, so Applied must not look degraded.
+func TestCollectionContentFailureNeverAppliedKeepsWaitState(t *testing.T) {
+	rc := brokenTemplateCollection("template-coll")
+	plan := planWithStepPhase("test-plan", "template-coll", v1alpha1.StepPending)
+
+	kubeClient := newCollectionClient(t, rc, plan, readyKitCluster("test-cluster"))
+	updated := reconcileCollectionExpectError(t, kubeClient, "template-coll")
+
+	appliedCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+	require.NotNil(t, appliedCond)
+	assert.Equal(t, metav1.ConditionUnknown, appliedCond.Status)
+	assert.Equal(t, v1alpha1.ReasonCollectionAppliedPlanPending, appliedCond.Reason)
+
+	readyCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionReady)
+	require.NotNil(t, readyCond)
+	assert.Equal(t, metav1.ConditionFalse, readyCond.Status)
+	assert.Equal(t, "RenderFailed", readyCond.Reason)
+}
+
+// TestCollectionApplyFailureKeepsAppliedMemory verifies that a failed
+// apply does not erase the record of an earlier successful one: the old
+// content is still live, so once the request goes away (here, the plan is
+// reset and its step is Pending again) the collection is reported as
+// outdated, not as never applied.
+func TestCollectionApplyFailureKeepsAppliedMemory(t *testing.T) {
 	oldHash := inlineContentHash(t, fmt.Sprintf(fooTemplate, "old"))
 	rc := templateCollection("template-coll", "new")
 	rc.Status = v1alpha1.ResourceCollectionStatus{
 		ContentHash: oldHash,
+		AppliedHash: oldHash,
+		Conditions: []metav1.Condition{
+			{Type: v1alpha1.ConditionCollectionContentReady, Status: metav1.ConditionTrue, Reason: "Ready"},
+			{Type: v1alpha1.ConditionCollectionApplied, Status: metav1.ConditionTrue, Reason: "Applied"},
+			{Type: v1alpha1.ConditionCollectionReady, Status: metav1.ConditionTrue, Reason: "Ready"},
+		},
+	}
+	plan := planWithStepPhase("test-plan", "template-coll", v1alpha1.StepRequested)
+
+	clients, dyn := recordingClients()
+	dyn.applyErr = errors.New("boom")
+	kubeClient := newCollectionClient(t, rc, plan, readyKitCluster("test-cluster"))
+
+	_, err := reconciler.NewCollectionReconciler(kubeClient, slog.New(slog.DiscardHandler), clients, nil, &stubScriptLoader{}, "", "", nil).
+		Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "template-coll"}})
+	require.Error(t, err)
+
+	var afterFailure v1alpha1.ResourceCollection
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: "template-coll"}, &afterFailure))
+	appliedCond := meta.FindStatusCondition(afterFailure.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+	require.NotNil(t, appliedCond)
+	assert.Equal(t, metav1.ConditionFalse, appliedCond.Status, "a requested apply that fails is reported")
+	assert.Equal(t, oldHash, afterFailure.Status.AppliedHash, "the failed apply must not erase the live content record")
+
+	// The plan is reset: the step is no longer requested.
+	var current v1alpha1.DeploymentPlan
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: "test-plan"}, &current))
+	current.Status.Steps[0].Phase = v1alpha1.StepPending
+	require.NoError(t, kubeClient.Update(context.Background(), &current))
+
+	reconcileCollectionWith(t, kubeClient, clients, "template-coll")
+
+	var updated v1alpha1.ResourceCollection
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: "template-coll"}, &updated))
+	appliedCond = meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+	require.NotNil(t, appliedCond)
+	assert.Equal(t, metav1.ConditionUnknown, appliedCond.Status)
+	assert.Equal(t, v1alpha1.ReasonCollectionAppliedOutdated, appliedCond.Reason,
+		"the old content is still live, so the collection is outdated, not pending")
+	assert.Equal(t, oldHash, updated.Status.AppliedHash)
+}
+
+// unreferencedAppliedCollection returns a collection that was applied at
+// generation 1 and that nothing references anymore.
+func unreferencedAppliedCollection(generation int64) *v1alpha1.ResourceCollection {
+	rc := templateCollection("template-coll", "v1")
+	rc.Generation = generation
+	rc.Status = v1alpha1.ResourceCollectionStatus{
+		ContentHash: "applied-hash",
+		AppliedHash: "applied-hash",
+		Conditions: []metav1.Condition{
+			{Type: v1alpha1.ConditionCollectionContentReady, Status: metav1.ConditionTrue, Reason: "Ready", ObservedGeneration: 1},
+			{Type: v1alpha1.ConditionCollectionApplied, Status: metav1.ConditionTrue, Reason: "Applied", ObservedGeneration: 1},
+			{Type: v1alpha1.ConditionCollectionReady, Status: metav1.ConditionTrue, Reason: "Ready", ObservedGeneration: 1},
+		},
+	}
+	return rc
+}
+
+// TestCollectionNotReferencedEditIsOutdated verifies that an applied
+// collection edited after its last consumer went away is reported as
+// outdated, even though it is not rendered: the spec generation moved
+// past the one at which the apply was last verified.
+func TestCollectionNotReferencedEditIsOutdated(t *testing.T) {
+	kubeClient := newCollectionClient(t, unreferencedAppliedCollection(2), readyKitCluster("test-cluster"))
+	reconcileCollectionWith(t, kubeClient, nil, "template-coll")
+
+	var updated v1alpha1.ResourceCollection
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: "template-coll"}, &updated))
+
+	appliedCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+	require.NotNil(t, appliedCond)
+	assert.Equal(t, metav1.ConditionUnknown, appliedCond.Status)
+	assert.Equal(t, v1alpha1.ReasonCollectionAppliedOutdated, appliedCond.Reason)
+
+	readyCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionReady)
+	require.NotNil(t, readyCond)
+	assert.Equal(t, metav1.ConditionTrue, readyCond.Status, "the last health verdict is kept")
+	assert.Equal(t, "applied-hash", updated.Status.AppliedHash)
+}
+
+// TestCollectionNotReferencedUnchangedStaysApplied verifies that an
+// applied collection whose spec did not change after its last consumer
+// went away keeps Applied=True.
+func TestCollectionNotReferencedUnchangedStaysApplied(t *testing.T) {
+	kubeClient := newCollectionClient(t, unreferencedAppliedCollection(1), readyKitCluster("test-cluster"))
+	reconcileCollectionWith(t, kubeClient, nil, "template-coll")
+
+	var updated v1alpha1.ResourceCollection
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: "template-coll"}, &updated))
+
+	appliedCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+	require.NotNil(t, appliedCond)
+	assert.Equal(t, metav1.ConditionTrue, appliedCond.Status)
+	assert.Equal(t, "Applied", appliedCond.Reason)
+}
+
+// TestCollectionCompletedPlanOutdatedOnEdit verifies that editing a
+// collection after its plan step completed does not reapply: the drift is
+// reflected as Applied=Unknown/AppliedOutdated while AppliedHash keeps
+// describing the live content, and the state is stable across reconciles.
+func TestCollectionCompletedPlanOutdatedOnEdit(t *testing.T) {
+	oldHash := inlineContentHash(t, fmt.Sprintf(fooTemplate, "old"))
+	newHash := inlineContentHash(t, fmt.Sprintf(fooTemplate, "new"))
+	rc := templateCollection("template-coll", "new")
+	rc.Status = v1alpha1.ResourceCollectionStatus{
+		ContentHash: oldHash,
+		AppliedHash: oldHash,
 		Conditions: []metav1.Condition{
 			{Type: v1alpha1.ConditionCollectionContentReady, Status: metav1.ConditionTrue, Reason: "Ready"},
 			{Type: v1alpha1.ConditionCollectionApplied, Status: metav1.ConditionTrue, Reason: "Applied"},
@@ -685,8 +905,68 @@ func TestCollectionCompletedPlanFreezesOnEdit(t *testing.T) {
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: "template-coll"}, &updated))
 
 	assert.Empty(t, dyn.appliedNames, "no reapply after the plan completed")
-	assert.Equal(t, oldHash, updated.Status.ContentHash, "status stays describing the last apply")
-	assert.Len(t, updated.Status.Conditions, 3)
+	assert.Equal(t, newHash, updated.Status.ContentHash, "ContentHash describes the rendered content")
+	assert.Equal(t, oldHash, updated.Status.AppliedHash, "AppliedHash keeps describing the live content")
+
+	appliedCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+	require.NotNil(t, appliedCond, "the drift must be reflected")
+	assert.Equal(t, metav1.ConditionUnknown, appliedCond.Status)
+	assert.Equal(t, v1alpha1.ReasonCollectionAppliedOutdated, appliedCond.Reason)
+
+	readyCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionReady)
+	require.NotNil(t, readyCond)
+	assert.Equal(t, metav1.ConditionTrue, readyCond.Status, "own health must not depend on the drift")
+	assert.Equal(t, "Ready", readyCond.Reason)
+
+	// Second reconcile: the drift is unchanged, the status is stable.
+	reconcileCollectionWith(t, kubeClient, clients, "template-coll")
+
+	var afterSecond v1alpha1.ResourceCollection
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: "template-coll"}, &afterSecond))
+	assert.Equal(t, updated.Status.Conditions, afterSecond.Status.Conditions)
+	assert.Equal(t, oldHash, afterSecond.Status.AppliedHash)
+	assert.Empty(t, dyn.appliedNames, "still no reapply while frozen")
+}
+
+// TestCollectionOutdatedReappliesWhenRequested verifies the end of the
+// freeze cycle: once a plan step requests an outdated collection, the
+// drifted content is applied and the status recovers to Applied=True with
+// the new hash.
+func TestCollectionOutdatedReappliesWhenRequested(t *testing.T) {
+	oldHash := inlineContentHash(t, fmt.Sprintf(fooTemplate, "old"))
+	newHash := inlineContentHash(t, fmt.Sprintf(fooTemplate, "new"))
+	rc := templateCollection("template-coll", "new")
+	rc.Status = v1alpha1.ResourceCollectionStatus{
+		ContentHash: newHash,
+		AppliedHash: oldHash,
+		Conditions: []metav1.Condition{
+			{Type: v1alpha1.ConditionCollectionContentReady, Status: metav1.ConditionTrue, Reason: "Ready"},
+			{Type: v1alpha1.ConditionCollectionApplied, Status: metav1.ConditionUnknown, Reason: v1alpha1.ReasonCollectionAppliedOutdated},
+			{Type: v1alpha1.ConditionCollectionReady, Status: metav1.ConditionTrue, Reason: "Ready"},
+		},
+	}
+	plan := planWithStepPhase("test-plan", "template-coll", v1alpha1.StepRequested)
+
+	clients, dyn := recordingClients()
+	kubeClient := newCollectionClient(t, rc, plan, readyKitCluster("test-cluster"))
+	reconcileCollectionWith(t, kubeClient, clients, "template-coll")
+
+	var updated v1alpha1.ResourceCollection
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKey{Name: "template-coll"}, &updated))
+
+	assert.Equal(t, []string{"demo"}, dyn.appliedNames, "a requesting plan reapplies the drifted content")
+	assert.Equal(t, newHash, updated.Status.ContentHash)
+	assert.Equal(t, newHash, updated.Status.AppliedHash, "a successful apply records the new live content")
+
+	appliedCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+	require.NotNil(t, appliedCond)
+	assert.Equal(t, metav1.ConditionTrue, appliedCond.Status)
+	assert.Equal(t, "Applied", appliedCond.Reason)
+
+	readyCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionReady)
+	require.NotNil(t, readyCond)
+	assert.Equal(t, metav1.ConditionTrue, readyCond.Status)
+	assert.Equal(t, "Ready", readyCond.Reason)
 }
 
 // TestCollectionSteadyStateSkipsStatusWrite verifies that a second

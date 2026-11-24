@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"text/template"
 	"time"
 
@@ -39,6 +40,12 @@ import (
 )
 
 const collectionFinalizer = "kit.openshift.io/collection-protection"
+
+const (
+	collectionHealthyMessage   = "collection is healthy; the Applied condition reports deployment state"
+	appliedPlanPendingMessage  = "referenced by a DeploymentPlan step that has not been reached yet"
+	appliedNotRequestedMessage = "no DeploymentPlan has requested this collection"
+)
 
 // ScriptPackageLoader loads script packages and computes content hashes
 // for a collection and its transitive dependencies.
@@ -127,14 +134,12 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	hasApplyWork := hasCollectionApplyWork(&rc)
-	prevApplied := meta.IsStatusConditionTrue(rc.Status.Conditions, v1alpha1.ConditionCollectionApplied)
-
-	// Frozen: already applied and no live request. The last apply still
-	// describes the cluster, and nothing reapplies until a plan asks
-	// again. Leave the status untouched.
-	if hasApplyWork && prevApplied && !planRefs.requested {
-		return ctrl.Result{}, nil
-	}
+	// Whether some content of this collection is live on the cluster is
+	// recorded in Status.AppliedHash, not inferred from the Applied
+	// condition: Applied=False (a failed apply, or a content failure
+	// while requested) does not remove what an earlier apply left on the
+	// cluster, so the memory must survive it.
+	everApplied := hasApplyWork && rc.Status.AppliedHash != ""
 
 	renderResult, err := r.render(&rc, &kc)
 	if err != nil {
@@ -142,7 +147,7 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if errors.Is(err, collection.ErrSourceMissing) {
 			reason = "SourceMissing"
 		}
-		r.setContentFailure(&rc, reason, err.Error())
+		r.setContentFailure(&rc, planRefs, everApplied, reason, err.Error())
 		return ctrl.Result{}, err
 	}
 
@@ -152,7 +157,7 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if errors.Is(err, collection.ErrSourceMissing) {
 			reason = "SourceMissing"
 		}
-		r.setContentFailure(&rc, reason, err.Error())
+		r.setContentFailure(&rc, planRefs, everApplied, reason, err.Error())
 		return ctrl.Result{}, err
 	}
 
@@ -160,33 +165,54 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// this very content hash. Collections without apply work are
 	// trivially live.
 	applied := !hasApplyWork
-	if hasApplyWork && planRefs.requested {
-		if prevApplied && rc.Status.ContentHash == contentHash && rc.Status.ContentHash != "" {
-			applied = true
-		} else {
-			r.log.Info("applying resource collection", "name", rc.Name, "oldHash", rc.Status.ContentHash, "newHash", contentHash)
-			if err := r.apply(ctx, renderResult); err != nil {
-				r.setApplyFailure(&rc, "ApplyFailed", err.Error())
-				return ctrl.Result{}, err
-			}
-
-			if len(rc.Spec.StatusPatches) > 0 {
-				if err := r.applyStatusPatches(ctx, &rc, &kc, renderResult); err != nil {
-					r.setApplyFailure(&rc, "StatusPatchFailed", err.Error())
+	outdated := false
+	appliedHash := rc.Status.AppliedHash
+	if hasApplyWork {
+		currentContentLive := everApplied && appliedHash == contentHash
+		switch {
+		case planRefs.requested:
+			if currentContentLive {
+				applied = true
+			} else {
+				r.log.Info("applying resource collection", "name", rc.Name, "oldHash", appliedHash, "newHash", contentHash)
+				// On failure AppliedHash is left untouched: whatever an
+				// earlier apply left on the cluster is still there.
+				if err := r.apply(ctx, renderResult); err != nil {
+					r.setApplyFailure(&rc, "ApplyFailed", err.Error())
 					return ctrl.Result{}, err
 				}
+
+				if len(rc.Spec.StatusPatches) > 0 {
+					if err := r.applyStatusPatches(ctx, &rc, &kc, renderResult); err != nil {
+						r.setApplyFailure(&rc, "StatusPatchFailed", err.Error())
+						return ctrl.Result{}, err
+					}
+				}
+				applied = true
+				appliedHash = contentHash
 			}
+		case currentContentLive:
+			// Frozen and current: the last apply still describes the
+			// cluster, and nothing reapplies until a plan asks again.
 			applied = true
+		case everApplied:
+			// Frozen with drift: the applied content is still live but
+			// the rendered content changed. A completed plan does not
+			// reapply, so the drift is only reflected in Applied; the
+			// next plan request sees AppliedHash != ContentHash and
+			// reapplies.
+			outdated = true
 		}
 	}
 
-	desired := desiredCollectionConditions(&rc, hasApplyWork, planRefs.pending, applied)
-	if collectionStatusCurrent(&rc, contentHash, desired) {
+	desired := desiredCollectionConditions(&rc, hasApplyWork, planRefs.pending, applied, outdated)
+	if collectionStatusCurrent(&rc, contentHash, appliedHash, desired) {
 		return ctrl.Result{}, nil
 	}
 
 	base := rc.DeepCopy()
 	rc.Status.ContentHash = contentHash
+	rc.Status.AppliedHash = appliedHash
 	for _, cond := range desired {
 		meta.SetStatusCondition(&rc.Status.Conditions, cond)
 	}
@@ -194,7 +220,7 @@ func (r *collectionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	r.log.Info("reconciled resource collection", "name", rc.Name, "requested", planRefs.requested, "applied", applied)
+	r.log.Info("reconciled resource collection", "name", rc.Name, "requested", planRefs.requested, "applied", applied, "outdated", outdated)
 	return ctrl.Result{}, nil
 }
 
@@ -246,34 +272,69 @@ func hasCollectionApplyWork(rc *v1alpha1.ResourceCollection) bool {
 	return rc.Spec.Source != "" || len(rc.Spec.Inline) > 0 || len(rc.Spec.StatusPatches) > 0
 }
 
-// markNotReferenced stamps a collection that nothing consumes with
-// Ready=Unknown so its lack of status is explicit. Transitional wait
-// states (AppliedPlanPending, AppliedNotRequested) are also rewritten:
-// their messages name consumers that no longer exist, which is reachable
-// by creating and deleting plans on a live cluster. Anything else — in
-// particular a successful last apply — is left untouched.
+// markNotReferenced updates the status of a collection that nothing
+// consumes. Rendering has side effects, so such a collection is never
+// rendered, and this function only works with what the status already
+// records:
+//
+//   - Ready=Unknown/NotReferenced when there is no previous verdict, so
+//     the lack of evaluation is explicit.
+//   - Applied wait states (AppliedPlanPending, AppliedNotRequested) are
+//     rewritten: their messages name consumers that no longer exist.
+//   - Applied=True becomes AppliedOutdated when the spec changed since
+//     the apply was last verified. See below for why the generation is
+//     the signal.
+//
+// Anything else — a healthy or failing Ready, a current Applied=True, an
+// AppliedOutdated — is left untouched: it still describes the cluster.
 func (r *collectionReconciler) markNotReferenced(rc *v1alpha1.ResourceCollection) {
-	ready := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionReady)
-	if ready != nil &&
-		ready.Reason != v1alpha1.ReasonCollectionAppliedPlanPending &&
-		ready.Reason != v1alpha1.ReasonCollectionAppliedNotRequested {
-		return
-	}
-
 	base := rc.DeepCopy()
 	stampNotReferenced := func(condType string) {
 		meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
 			Type:               condType,
 			Status:             metav1.ConditionUnknown,
-			Reason:             "NotReferenced",
+			Reason:             v1alpha1.ReasonCollectionNotReferenced,
 			Message:            "no plan, agent, or collection references this collection",
 			ObservedGeneration: rc.Generation,
 		})
 	}
-	stampNotReferenced(v1alpha1.ConditionCollectionReady)
-	if applied := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionApplied); applied != nil &&
-		(applied.Reason == v1alpha1.ReasonCollectionAppliedPlanPending || applied.Reason == v1alpha1.ReasonCollectionAppliedNotRequested) {
+
+	ready := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionReady)
+	if ready == nil || ready.Reason == v1alpha1.ReasonCollectionNotReferenced {
+		stampNotReferenced(v1alpha1.ConditionCollectionReady)
+	}
+	applied := meta.FindStatusCondition(rc.Status.Conditions, v1alpha1.ConditionCollectionApplied)
+	switch {
+	case applied == nil:
+	case applied.Reason == v1alpha1.ReasonCollectionAppliedPlanPending ||
+		applied.Reason == v1alpha1.ReasonCollectionAppliedNotRequested:
 		stampNotReferenced(v1alpha1.ConditionCollectionApplied)
+	case applied.Status == metav1.ConditionTrue && rc.Status.AppliedHash != "" &&
+		applied.ObservedGeneration != rc.Generation:
+		// The drift cannot be checked by hash here: that would need a
+		// render. The generation is used instead. Applied=True is only
+		// written after checking that the live content matches the
+		// rendered one, and it records the generation of that check. Every
+		// spec field feeds the content hash, so a newer generation means
+		// the declared content most likely changed after the check.
+		//
+		// This only sees changes to the ResourceCollection object.
+		// Changes that do not bump the generation — editing the files
+		// of a source collection on disk, or the content of a
+		// scriptCollections dependency — are not detected while nothing
+		// consumes the collection. They are detected as soon as a
+		// consumer appears and the collection is rendered again.
+		meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
+			Type:               v1alpha1.ConditionCollectionApplied,
+			Status:             metav1.ConditionUnknown,
+			Reason:             v1alpha1.ReasonCollectionAppliedOutdated,
+			Message:            "the spec changed after the last apply; the previously applied content is still live and the collection is not re-evaluated while nothing references it",
+			ObservedGeneration: rc.Generation,
+		})
+	}
+
+	if reflect.DeepEqual(base.Status.Conditions, rc.Status.Conditions) {
+		return
 	}
 	if err := r.client.Status().Patch(context.Background(), rc, client.MergeFrom(base)); err != nil {
 		r.log.Error("patching collection status", "name", rc.Name, "error", err)
@@ -281,24 +342,31 @@ func (r *collectionReconciler) markNotReferenced(rc *v1alpha1.ResourceCollection
 }
 
 // desiredCollectionConditions computes the conditions describing the
-// collection's own state after a successful render: ContentReady reflects
-// content validity, Applied reports whether the apply work (templates and
-// status patches) is live on the cluster — Unknown while no plan has
-// requested it — and Ready aggregates both.
-func desiredCollectionConditions(rc *v1alpha1.ResourceCollection, hasApplyWork, planPending, applied bool) []metav1.Condition {
-	conds := []metav1.Condition{{
-		Type:               v1alpha1.ConditionCollectionContentReady,
-		Status:             metav1.ConditionTrue,
-		Reason:             "Ready",
-		ObservedGeneration: rc.Generation,
-	}}
+// collection after a successful render and hash. ContentReady and Ready
+// are True: Ready reports the collection's own health, independent of
+// consumers and of the apply (only content failures set it False).
+// Applied is the deployment fact the DeploymentPlan reconciler waits on:
+// whether the apply work is live on the cluster — Unknown while no plan
+// has requested it, or when the live content is an outdated apply.
+func desiredCollectionConditions(rc *v1alpha1.ResourceCollection, hasApplyWork, planPending, applied, outdated bool) []metav1.Condition {
+	conds := []metav1.Condition{
+		{
+			Type:               v1alpha1.ConditionCollectionContentReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             "Ready",
+			ObservedGeneration: rc.Generation,
+		},
+		{
+			Type:               v1alpha1.ConditionCollectionReady,
+			Status:             metav1.ConditionTrue,
+			Reason:             "Ready",
+			Message:            collectionHealthyMessage,
+			ObservedGeneration: rc.Generation,
+		},
+	}
 
 	appliedCond := metav1.Condition{
 		Type:               v1alpha1.ConditionCollectionApplied,
-		ObservedGeneration: rc.Generation,
-	}
-	readyCond := metav1.Condition{
-		Type:               v1alpha1.ConditionCollectionReady,
 		ObservedGeneration: rc.Generation,
 	}
 	switch {
@@ -309,26 +377,24 @@ func desiredCollectionConditions(rc *v1alpha1.ResourceCollection, hasApplyWork, 
 		} else {
 			appliedCond.Status, appliedCond.Reason = metav1.ConditionTrue, "Applied"
 		}
-		readyCond.Status, readyCond.Reason = metav1.ConditionTrue, "Ready"
+	case outdated:
+		appliedCond.Status, appliedCond.Reason = metav1.ConditionUnknown, v1alpha1.ReasonCollectionAppliedOutdated
+		appliedCond.Message = "rendered content changed; the applied content is still live and the reapply waits for a DeploymentPlan request"
 	case planPending:
 		appliedCond.Status, appliedCond.Reason = metav1.ConditionUnknown, v1alpha1.ReasonCollectionAppliedPlanPending
-		appliedCond.Message = "referenced by a DeploymentPlan step that has not been reached yet"
-		readyCond.Status, readyCond.Reason = metav1.ConditionUnknown, v1alpha1.ReasonCollectionAppliedPlanPending
-		readyCond.Message = appliedCond.Message
+		appliedCond.Message = appliedPlanPendingMessage
 	default:
 		appliedCond.Status, appliedCond.Reason = metav1.ConditionUnknown, v1alpha1.ReasonCollectionAppliedNotRequested
-		appliedCond.Message = "no DeploymentPlan has requested this collection"
-		readyCond.Status, readyCond.Reason = metav1.ConditionUnknown, v1alpha1.ReasonCollectionAppliedNotRequested
-		readyCond.Message = appliedCond.Message
+		appliedCond.Message = appliedNotRequestedMessage
 	}
-	return append(conds, appliedCond, readyCond)
+	return append(conds, appliedCond)
 }
 
 // collectionStatusCurrent reports whether the stored status already
-// describes the desired conditions for contentHash, so the reconciler can
-// skip the status write (and the reconcile it would trigger).
-func collectionStatusCurrent(rc *v1alpha1.ResourceCollection, contentHash string, desired []metav1.Condition) bool {
-	if contentHash == "" || rc.Status.ContentHash != contentHash {
+// describes the desired hashes and conditions, so the reconciler can skip
+// the status write (and the reconcile it would trigger).
+func collectionStatusCurrent(rc *v1alpha1.ResourceCollection, contentHash, appliedHash string, desired []metav1.Condition) bool {
+	if contentHash == "" || rc.Status.ContentHash != contentHash || rc.Status.AppliedHash != appliedHash {
 		return false
 	}
 	for _, want := range desired {
@@ -344,17 +410,19 @@ func collectionStatusCurrent(rc *v1alpha1.ResourceCollection, contentHash string
 	return true
 }
 
-// setContentFailure records a content failure (render or hash): the Ready
-// aggregate mirrors it and Applied is marked False so a requesting
-// DeploymentPlan step fails fast with the content error instead of
-// waiting. ContentHash is left untouched: it still describes the last
-// content that rendered successfully.
-func (r *collectionReconciler) setContentFailure(rc *v1alpha1.ResourceCollection, reason, message string) {
+// setContentFailure records a content failure (render or hash). Ready and
+// ContentReady report it as the collection's own health. Applied is False
+// only while a DeploymentPlan step requests the collection, so the step
+// fails fast with the content error instead of waiting. Otherwise nothing
+// was attempted: a previously applied collection is outdated (the old
+// content is still live) and a never-applied one keeps its wait state.
+// Neither hash is touched: ContentHash still describes the last content
+// that rendered successfully, and AppliedHash the content that is live.
+func (r *collectionReconciler) setContentFailure(rc *v1alpha1.ResourceCollection, planRefs planReferences, everApplied bool, reason, message string) {
 	base := rc.DeepCopy()
 	for _, condType := range []string{
 		v1alpha1.ConditionCollectionContentReady,
 		v1alpha1.ConditionCollectionReady,
-		v1alpha1.ConditionCollectionApplied,
 	} {
 		meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
 			Type:               condType,
@@ -364,13 +432,36 @@ func (r *collectionReconciler) setContentFailure(rc *v1alpha1.ResourceCollection
 			ObservedGeneration: rc.Generation,
 		})
 	}
+
+	appliedCond := metav1.Condition{
+		Type:               v1alpha1.ConditionCollectionApplied,
+		ObservedGeneration: rc.Generation,
+	}
+	switch {
+	case planRefs.requested:
+		appliedCond.Status, appliedCond.Reason, appliedCond.Message = metav1.ConditionFalse, reason, message
+	case everApplied:
+		appliedCond.Status, appliedCond.Reason = metav1.ConditionUnknown, v1alpha1.ReasonCollectionAppliedOutdated
+		appliedCond.Message = fmt.Sprintf("content no longer renders (%s); the previously applied content is still live", message)
+	case planRefs.pending:
+		appliedCond.Status, appliedCond.Reason, appliedCond.Message = metav1.ConditionUnknown, v1alpha1.ReasonCollectionAppliedPlanPending, appliedPlanPendingMessage
+	default:
+		appliedCond.Status, appliedCond.Reason, appliedCond.Message = metav1.ConditionUnknown, v1alpha1.ReasonCollectionAppliedNotRequested, appliedNotRequestedMessage
+	}
+	meta.SetStatusCondition(&rc.Status.Conditions, appliedCond)
+
 	if err := r.client.Status().Patch(context.Background(), rc, client.MergeFrom(base)); err != nil {
 		r.log.Error("patching collection status", "name", rc.Name, "error", err)
 	}
 }
 
 // setApplyFailure records an apply failure: content is valid but not
-// live on the cluster.
+// live on the cluster. Only Applied reports it — applies run on plan
+// request, so the collection's own health (Ready) must not depend on
+// them. The failing plan step carries the message to its consumers.
+// AppliedHash is not touched: a failed apply does not remove what an
+// earlier one left on the cluster, so if the request goes away the
+// collection is reported as outdated, not as never applied.
 func (r *collectionReconciler) setApplyFailure(rc *v1alpha1.ResourceCollection, reason, message string) {
 	base := rc.DeepCopy()
 	meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
@@ -379,18 +470,20 @@ func (r *collectionReconciler) setApplyFailure(rc *v1alpha1.ResourceCollection, 
 		Reason:             "Ready",
 		ObservedGeneration: rc.Generation,
 	})
-	for _, condType := range []string{
-		v1alpha1.ConditionCollectionApplied,
-		v1alpha1.ConditionCollectionReady,
-	} {
-		meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
-			Type:               condType,
-			Status:             metav1.ConditionFalse,
-			Reason:             reason,
-			Message:            message,
-			ObservedGeneration: rc.Generation,
-		})
-	}
+	meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionCollectionReady,
+		Status:             metav1.ConditionTrue,
+		Reason:             "Ready",
+		Message:            collectionHealthyMessage,
+		ObservedGeneration: rc.Generation,
+	})
+	meta.SetStatusCondition(&rc.Status.Conditions, metav1.Condition{
+		Type:               v1alpha1.ConditionCollectionApplied,
+		Status:             metav1.ConditionFalse,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: rc.Generation,
+	})
 	if err := r.client.Status().Patch(context.Background(), rc, client.MergeFrom(base)); err != nil {
 		r.log.Error("patching collection status", "name", rc.Name, "error", err)
 	}

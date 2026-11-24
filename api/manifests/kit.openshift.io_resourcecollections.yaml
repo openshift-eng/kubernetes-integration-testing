@@ -262,6 +262,12 @@ spec:
                 size(s.root) > 0) || has(self.source)'
           status:
             properties:
+              appliedHash:
+                description: |-
+                  AppliedHash is the ContentHash of the content that is live on the
+                  cluster; empty means the collection was never applied. It differs
+                  from ContentHash when the content changed after the last apply.
+                type: string
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current
@@ -324,12 +330,7 @@ spec:
               contentHash:
                 description: |-
                   ContentHash is a deterministic hash of the collection's declared
-                  content: rendered manifests, loaded scripts (with local package
-                  membership), and status patch declarations. It does not include
-                  Agent-level values, runtime, or timeout — those affect
-                  BundleDigest, not ContentHash. It is written together with the
-                  status conditions, and the reconciler skips the apply when it
-                  already matches the rendered content of an applied collection.
+                  content: rendered manifests, scripts, and status patches.
                 type: string
             type: object
         required:

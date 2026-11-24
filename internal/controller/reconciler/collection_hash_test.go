@@ -241,12 +241,12 @@ func TestReconcileSourceMissingFromScriptLoader(t *testing.T) {
 	assert.Equal(t, "SourceMissing", cond.Reason)
 
 	appliedCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionApplied)
-	require.NotNil(t, appliedCond, "Applied should report the content failure")
-	assert.Equal(t, metav1.ConditionFalse, appliedCond.Status)
-	assert.Equal(t, "SourceMissing", appliedCond.Reason)
+	require.NotNil(t, appliedCond)
+	assert.Equal(t, metav1.ConditionUnknown, appliedCond.Status, "nothing requested an apply, so Applied must not look degraded")
+	assert.Equal(t, v1alpha1.ReasonCollectionAppliedNotRequested, appliedCond.Reason)
 
 	readyCond := meta.FindStatusCondition(updated.Status.Conditions, v1alpha1.ConditionCollectionReady)
-	require.NotNil(t, readyCond, "Ready should mirror the content failure")
+	require.NotNil(t, readyCond, "Ready should report the content failure")
 	assert.Equal(t, metav1.ConditionFalse, readyCond.Status)
 	assert.Equal(t, "SourceMissing", readyCond.Reason)
 }

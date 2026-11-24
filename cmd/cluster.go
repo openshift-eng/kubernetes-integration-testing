@@ -2,21 +2,14 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"time"
 
-	"golang.org/x/sys/unix"
-
-	pb "github.com/openshift-eng/kubernetes-integration-testing/api/grpc"
-	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
-	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/daemon"
 	"github.com/spf13/cobra"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/openshift-eng/kubernetes-integration-testing/pkg/client"
 )
 
 var (
@@ -25,6 +18,9 @@ var (
 	clusterWorkers    int
 	clusterImage      string
 	clusterFeatureSet string
+	clusterFiles      []string
+	clusterNoWait     bool
+	clusterTimeout    time.Duration
 )
 
 var clusterCmd = &cobra.Command{
@@ -37,44 +33,40 @@ var clusterCreateCmd = &cobra.Command{
 	Short: "Create a cluster",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client, conn, err := daemonClient()
+		// The resource timeout bounds apply and readiness waits; the RPC
+		// gets that plus room for the cluster provisioning itself.
+		ctx, cancel := context.WithTimeout(context.Background(), clusterTimeout+15*time.Minute)
+		defer cancel()
+
+		c, err := client.Connect(ctx)
 		if err != nil {
 			return err
 		}
-		defer func() {
-			if err := conn.Close(); err != nil {
-				log.Warn("closing connection", "error", err)
-			}
-		}()
+		defer closeDaemon(c)
 
-		kc := v1alpha1.KitCluster{
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: v1alpha1.GroupVersion.String(),
-				Kind:       "KitCluster",
-			},
-			ObjectMeta: metav1.ObjectMeta{Name: "cluster"},
-			Spec: v1alpha1.KitClusterSpec{
-				ClusterName: args[0],
-				Provider:    clusterProvider,
-				Image:       clusterImage,
-				FeatureSet:  clusterFeatureSet,
-				Workers:     clusterWorkers,
-			},
+		opts := []client.CreateOption{
+			client.WithName(args[0]),
+			client.WithProvider(clusterProvider),
+			client.WithImage(clusterImage),
+			client.WithFeatureSet(clusterFeatureSet),
+			client.WithWorkers(clusterWorkers),
+			client.WithPullSecret(clusterPullSecret),
+			client.WithWait(!clusterNoWait),
+			client.WithTimeout(clusterTimeout),
 		}
-		manifest, err := json.Marshal(kc)
-		if err != nil {
-			return fmt.Errorf("marshaling KitCluster: %w", err)
+		if len(clusterFiles) > 0 {
+			opts = append(opts, client.WithResources(client.FromFiles(clusterFiles...)))
 		}
 
-		resp, err := client.CreateCluster(context.Background(), &pb.CreateClusterRequest{
-			Manifest:   manifest,
-			PullSecret: clusterPullSecret,
-		})
+		cl, err := c.Create(ctx, opts...)
 		if err != nil {
 			return grpcError(err)
 		}
 
-		fmt.Printf("Cluster created (kubeconfig: %s)\n", resp.GetKubeconfig())
+		fmt.Printf("Cluster created (kubeconfig: %s)\n", cl.Kubeconfig)
+		if cl.AppliedResources > 0 {
+			fmt.Printf("  applied %d kit resources\n", cl.AppliedResources)
+		}
 		return nil
 	},
 }
@@ -84,21 +76,19 @@ var clusterListCmd = &cobra.Command{
 	Short: "List clusters",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client, conn, err := daemonClient()
+		ctx := context.Background()
+
+		c, err := client.Connect(ctx)
 		if err != nil {
 			return err
 		}
-		defer func() {
-			if err := conn.Close(); err != nil {
-				log.Warn("closing connection", "error", err)
-			}
-		}()
+		defer closeDaemon(c)
 
-		resp, err := client.ListClusters(context.Background(), &pb.ListClustersRequest{})
+		names, err := c.List(ctx)
 		if err != nil {
 			return grpcError(err)
 		}
-		for _, name := range resp.GetNames() {
+		for _, name := range names {
 			fmt.Println(name)
 		}
 		return nil
@@ -110,17 +100,15 @@ var clusterDestroyCmd = &cobra.Command{
 	Short: "Destroy a cluster",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client, conn, err := daemonClient()
+		ctx := context.Background()
+
+		c, err := client.Connect(ctx)
 		if err != nil {
 			return err
 		}
-		defer func() {
-			if err := conn.Close(); err != nil {
-				log.Warn("closing connection", "error", err)
-			}
-		}()
+		defer closeDaemon(c)
 
-		if _, err := client.DestroyCluster(context.Background(), &pb.DestroyClusterRequest{Name: args[0]}); err != nil {
+		if err := c.Destroy(ctx, args[0]); err != nil {
 			return grpcError(err)
 		}
 
@@ -129,44 +117,15 @@ var clusterDestroyCmd = &cobra.Command{
 	},
 }
 
-func ensureDaemon() error {
-	f, err := os.OpenFile(appPaths.Lock(), os.O_CREATE|os.O_RDONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("opening lock file: %w", err)
+func closeDaemon(c *client.Client) {
+	if err := c.Close(); err != nil {
+		log.Warn("closing connection", "error", err)
 	}
-	defer func() { _ = f.Close() }()
-
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
-		return fmt.Errorf("acquiring lock: %w", err)
-	}
-	defer func() { _ = unix.Flock(int(f.Fd()), unix.LOCK_UN) }()
-
-	if _, running := daemon.IsRunning(appFs, appPaths.Pid(), appPaths.Socket()); running {
-		return nil
-	}
-
-	log.Warn("not running, starting...")
-	if err := runBackground(); err != nil {
-		return fmt.Errorf("could not start daemon: %w", err)
-	}
-
-	sock := appPaths.Socket()
-	for range 600 {
-		if _, err := os.Stat(sock); err == nil {
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return fmt.Errorf("daemon started but socket not ready")
 }
 
-func daemonClient() (pb.DaemonClient, *grpc.ClientConn, error) {
-	if err := ensureDaemon(); err != nil {
-		return nil, nil, err
-	}
-	return daemon.NewClient(appPaths.Socket())
-}
-
+// grpcError renders daemon errors as user-facing messages. The client
+// returns raw gRPC errors to preserve their cause; translating them for
+// humans belongs to this presentation layer.
 func grpcError(err error) error {
 	if s, ok := status.FromError(err); ok {
 		if s.Code() == codes.Unavailable {
@@ -186,29 +145,28 @@ var clusterKubeconfigCmd = &cobra.Command{
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client, conn, err := daemonClient()
+		ctx := context.Background()
+
+		c, err := client.Connect(ctx)
 		if err != nil {
 			return err
 		}
-		defer func() {
-			if err := conn.Close(); err != nil {
-				log.Warn("closing connection", "error", err)
-			}
-		}()
+		defer closeDaemon(c)
 
-		resp, err := client.GetClusterKubeConfig(context.Background(), &pb.GetClusterKubeConfigRequest{
-			Name:    args[0],
-			Content: kubeconfigOutput,
-		})
+		if kubeconfigOutput {
+			content, err := c.KubeconfigContent(ctx, args[0])
+			if err != nil {
+				return grpcError(err)
+			}
+			fmt.Print(content)
+			return nil
+		}
+
+		path, err := c.KubeconfigPath(ctx, args[0])
 		if err != nil {
 			return grpcError(err)
 		}
-
-		if kubeconfigOutput {
-			fmt.Print(resp.GetContent())
-		} else {
-			fmt.Println(resp.GetPath())
-		}
+		fmt.Println(path)
 		return nil
 	},
 }
@@ -219,6 +177,9 @@ func init() {
 	clusterCreateCmd.Flags().IntVar(&clusterWorkers, "workers", 1, "number of worker nodes")
 	clusterCreateCmd.Flags().StringVar(&clusterImage, "image", "", "release image to deploy operators from")
 	clusterCreateCmd.Flags().StringVar(&clusterFeatureSet, "feature-set", "", "feature set (Default, TechPreviewNoUpgrade)")
+	clusterCreateCmd.Flags().StringArrayVarP(&clusterFiles, "file", "f", nil, "kit CR manifest file, directory, or '-' for stdin; may be repeated")
+	clusterCreateCmd.Flags().BoolVar(&clusterNoWait, "no-wait", false, "apply resources but do not wait for them to become ready")
+	clusterCreateCmd.Flags().DurationVar(&clusterTimeout, "timeout", 10*time.Minute, "time bound for applying resources and waiting for them to become ready")
 	clusterKubeconfigCmd.Flags().BoolVar(&kubeconfigOutput, "output", false, "print kubeconfig content instead of path")
 	clusterCmd.AddCommand(clusterCreateCmd)
 	clusterCmd.AddCommand(clusterDestroyCmd)

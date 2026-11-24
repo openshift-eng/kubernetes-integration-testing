@@ -4,50 +4,50 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/openshift-eng/kubernetes-integration-testing/pkg/version"
 	"io"
 	"log/slog"
 	"net"
 	"os"
 	"time"
 
-	"github.com/spf13/afero"
+	"google.golang.org/grpc"
 
 	pb "github.com/openshift-eng/kubernetes-integration-testing/api/grpc"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/cluster"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/daemonstate"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/imageref"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/host/store"
 	"github.com/openshift-eng/kubernetes-integration-testing/internal/podman"
-	"google.golang.org/grpc"
+	"github.com/openshift-eng/kubernetes-integration-testing/pkg/version"
 )
 
 type ProviderFactory func(ctx context.Context, log *slog.Logger) cluster.Provider
 
 type Daemon struct {
-	paths   Paths
-	fs      afero.Fs
-	manager cluster.Manager
-	log     *slog.Logger
+	paths    daemonstate.Paths
+	manager  cluster.Manager
+	log      *slog.Logger
+	shutdown func()
 }
 
-func New(paths Paths, fs afero.Fs, manager cluster.Manager, log *slog.Logger) *Daemon {
-	return &Daemon{paths: paths, fs: fs, manager: manager, log: log}
+func New(paths daemonstate.Paths, manager cluster.Manager, log *slog.Logger, shutdown func()) *Daemon {
+	return &Daemon{paths: paths, manager: manager, log: log, shutdown: shutdown}
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
 	pidPath := d.paths.Pid()
 	sockPath := d.paths.Socket()
 
-	if err := WritePid(d.fs, pidPath, os.Getpid()); err != nil {
+	if err := daemonstate.WritePid(d.paths, os.Getpid()); err != nil {
 		return err
 	}
 	defer func() {
-		if err := d.fs.Remove(pidPath); err != nil {
+		if err := os.Remove(pidPath); err != nil {
 			d.log.Warn("removing pid file", "error", err)
 		}
 	}()
 
-	if err := d.fs.Remove(sockPath); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
 		d.log.Warn("removing stale socket", "error", err)
 	}
 	lis, err := net.Listen("unix", sockPath)
@@ -58,7 +58,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return errors.Join(fmt.Errorf("restricting socket permissions: %w", err), lis.Close())
 	}
 	defer func() {
-		if err := d.fs.Remove(sockPath); err != nil {
+		if err := os.Remove(sockPath); err != nil {
 			d.log.Warn("removing socket", "error", err)
 		}
 	}()
@@ -67,6 +67,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	srv := &server{
 		clusterManager: d.manager,
+		shutdown:       d.shutdown,
 		log:            d.log.With("module", "grpc"),
 	}
 	grpcServer := grpc.NewServer()
@@ -99,7 +100,11 @@ func controllerImageRef() (imageref.Requested, error) {
 	return imageref.ParseRequested(raw)
 }
 
-func Start(ctx context.Context, paths Paths, appStore store.Store, podmanClient podman.Client, factories map[string]ProviderFactory) error {
+func Start(ctx context.Context, paths daemonstate.Paths, appStore store.Store, podmanClient podman.Client, factories map[string]ProviderFactory) error {
+	if err := os.MkdirAll(paths.Root, 0o700); err != nil {
+		return fmt.Errorf("creating state directory: %w", err)
+	}
+
 	logFile, err := os.OpenFile(paths.Log(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
@@ -118,6 +123,21 @@ func Start(ctx context.Context, paths Paths, appStore store.Store, podmanClient 
 	slog.SetDefault(slog.New(handler))
 
 	log := slog.New(handler).With("module", "daemon")
+
+	// The instance lock is acquired before anything else initializes and
+	// held until the daemon exits. It is what guarantees a single daemon:
+	// a second one started concurrently fails here instead of racing the
+	// first one for the pid file and the socket. The kernel releases the
+	// lock if the process dies.
+	instanceLock, err := daemonstate.AcquireInstanceLock(paths)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := instanceLock.Release(); err != nil {
+			log.Warn("releasing instance lock", "error", err)
+		}
+	}()
 
 	controllerImage, err := controllerImageRef()
 	if err != nil {
@@ -139,6 +159,11 @@ func Start(ctx context.Context, paths Paths, appStore store.Store, podmanClient 
 	resolver := imageref.NewPodmanResolver(podmanClient, controllerImage, log)
 	manager := cluster.NewClusterManager(ctx, log, "kwok", providers, resolver, launcher)
 
-	d := New(paths, afero.NewOsFs(), manager, log)
-	return d.Run(ctx)
+	// runCtx is cancelled both by the caller's context (signals) and by
+	// the Shutdown RPC.
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	d := New(paths, manager, log, cancel)
+	return d.Run(runCtx)
 }
