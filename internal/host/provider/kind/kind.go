@@ -30,7 +30,7 @@ const (
 )
 
 type ImageSaver interface {
-	SaveOCIArchive(ctx context.Context, image, path string) error
+	SaveDockerArchive(ctx context.Context, image, path string) error
 }
 
 type provider struct {
@@ -233,7 +233,16 @@ func (c *kindCluster) ControllerConfig() cluster.ControllerConfig {
 	}
 }
 
+// LoadImage makes the controller image available to the cluster. The
+// image travels as a docker archive named by its tag: the kind node
+// names imports after the archive's repo tags, and a digest reference
+// would be lost (the archive round-trip rewrites digests anyway).
 func (c *kindCluster) LoadImage(ctx context.Context, image imageref.Resolved) error {
+	tagged := image.Tagged()
+	if tagged == "" {
+		return fmt.Errorf("the kind provider requires a tagged controller image")
+	}
+
 	fs := c.store.Fs()
 	dir, err := c.store.ClusterDir(c.name)
 	if err != nil {
@@ -251,14 +260,14 @@ func (c *kindCluster) LoadImage(ctx context.Context, image imageref.Resolved) er
 	}()
 
 	archivePath := filepath.Join(archiveDir, "image.tar")
-	if err := c.imageSaver.SaveOCIArchive(ctx, image.String(), archivePath); err != nil {
-		return fmt.Errorf("saving image %s: %w", image, err)
+	if err := c.imageSaver.SaveDockerArchive(ctx, tagged, archivePath); err != nil {
+		return fmt.Errorf("saving image %s: %w", tagged, err)
 	}
 
 	if err := run(ctx, c.log, c.bin, "load", "image-archive", archivePath, "--name", prefixed(c.name)); err != nil {
 		return fmt.Errorf("loading image into kind cluster: %w", err)
 	}
-	c.log.Info("loaded controller image into kind cluster", "cluster", c.name, "image", image.String())
+	c.log.Info("loaded controller image into kind cluster", "cluster", c.name, "image", tagged)
 	return nil
 }
 

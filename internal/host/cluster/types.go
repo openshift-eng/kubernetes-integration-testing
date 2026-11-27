@@ -25,8 +25,11 @@ type Cluster interface {
 }
 
 type ControllerLauncher interface {
-	Launch(ctx context.Context, name string, c Cluster, image imageref.Resolved) (stop func(), err error)
+	Launch(ctx context.Context, name string, c Cluster, image imageref.Resolved) error
 	WaitHealthy(ctx context.Context, name string) error
+	// Stopper returns a best-effort force-stop for the cluster's
+	// controller container.
+	Stopper(name string) func()
 }
 
 type ImageLoader interface {

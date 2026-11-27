@@ -296,9 +296,10 @@ func (m *Materializer) buildWOSpec(ag *v1alpha1.Agent, bundleURL, digest, saName
 		// TODO: EnvOverride needs ValueFrom support so container override mode
 		// can declare pod identity env vars the same way ReplacePod does.
 		spec.Containers = []v1alpha1.ContainerOverride{{
-			Name:    ag.Spec.Target.Container,
-			Image:   m.agentImage,
-			Command: []string{"/usr/bin/kit-agent"},
+			Name:       ag.Spec.Target.Container,
+			Image:      m.agentImage,
+			PullPolicy: corev1.PullIfNotPresent,
+			Command:    []string{"/usr/bin/kit-agent"},
 			Env: []v1alpha1.EnvOverride{
 				{Name: "KIT_AGENT_BUNDLE_URL", Value: bundleURL},
 				{Name: "KIT_AGENT_BUNDLE_SHA256", Value: digest},
@@ -306,9 +307,10 @@ func (m *Materializer) buildWOSpec(ag *v1alpha1.Agent, bundleURL, digest, saName
 		}}
 	default:
 		spec.ReplacePod = &v1alpha1.PodReplacement{
-			Name:    "kit-agent",
-			Image:   m.agentImage,
-			Command: []string{"/usr/bin/kit-agent"},
+			Name:       "kit-agent",
+			Image:      m.agentImage,
+			PullPolicy: corev1.PullIfNotPresent,
+			Command:    []string{"/usr/bin/kit-agent"},
 			Env: append(podIdentityEnvVars(), []corev1.EnvVar{
 				{Name: "KIT_AGENT_BUNDLE_URL", Value: bundleURL},
 				{Name: "KIT_AGENT_BUNDLE_SHA256", Value: digest},

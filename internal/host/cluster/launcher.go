@@ -26,33 +26,33 @@ func NewPodmanControllerLauncher(client podman.Client, cacheDir, collectionsDir 
 	return &PodmanControllerLauncher{client: client, cacheDir: cacheDir, collectionsDir: collectionsDir, log: log}
 }
 
-func (l *PodmanControllerLauncher) Launch(ctx context.Context, name string, c Cluster, image imageref.Resolved) (func(), error) {
+// Launch ensures the controller container runs image. An existing
+// container running a different image is refused: recreate the cluster
+// to use the new image.
+func (l *PodmanControllerLauncher) Launch(ctx context.Context, name string, c Cluster, image imageref.Resolved) error {
 	containerName := naming.ContainerName(name)
-
-	var containerID string
 
 	existing, err := l.client.ContainerInspect(ctx, containerName)
 	if err != nil {
-		return nil, fmt.Errorf("inspecting controller container %s: %w", containerName, err)
+		return fmt.Errorf("inspecting controller container %s: %w", containerName, err)
 	}
 	if existing != nil {
-		if err := l.handleExisting(existing, containerName, name, image.Digest()); err != nil {
-			return nil, err
-		}
-		containerID = existing.ID
-	} else {
-		containerID, err = l.create(ctx, name, c, image.String(), containerName)
-		if err != nil {
-			return nil, err
-		}
+		return l.handleExisting(existing, containerName, name, image.Digest())
 	}
 
-	stop := func() {
-		l.log.Info("stopping controller container", "name", containerName, "id", containerID)
-		_ = l.client.Stop(context.Background(), containerID, 10)
-		_ = l.client.Remove(context.Background(), containerID, true)
+	_, err = l.create(ctx, name, c, image.String(), containerName)
+	return err
+}
+
+// Stopper returns a best-effort force-stop for the cluster's controller
+// container.
+func (l *PodmanControllerLauncher) Stopper(name string) func() {
+	containerName := naming.ContainerName(name)
+	return func() {
+		l.log.Info("stopping controller container", "name", containerName)
+		_ = l.client.Stop(context.Background(), containerName, 10)
+		_ = l.client.Remove(context.Background(), containerName, true)
 	}
-	return stop, nil
 }
 
 func (l *PodmanControllerLauncher) handleExisting(info *podman.ContainerInfo, containerName, clusterName, expectedDigest string) error {
