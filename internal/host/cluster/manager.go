@@ -64,49 +64,42 @@ func (cm *clusterManager) Recover(ctx context.Context) {
 				continue
 			}
 
-			image, err := cm.loadControllerImage(ctx, c)
-			if err != nil {
-				cm.log.Warn("could not load bootstrap data for cluster; recreate it", "cluster", name, "error", err)
-				continue
+			// Every cluster is registered with the same force-stop
+			// for its controller; recovering the controller is best
+			// effort.
+			stop := cm.launcher.Stopper(name)
+			if err := cm.recoverController(ctx, name, c); err != nil {
+				cm.log.Warn("controller not recovered", "cluster", name, "error", err)
 			}
 
-			cm.log.Info("recovering cluster", "cluster", name, "image", image)
-			stop, err := cm.launcher.Launch(ctx, name, c, image)
-			if err != nil {
-				cm.log.Warn("could not recover controller", "cluster", name, "error", err)
-				continue
-			}
-			if err := cm.launcher.WaitHealthy(ctx, name); err != nil {
-				cm.log.Warn("controller not healthy after recover", "cluster", name, "error", err)
-				stop()
-				continue
-			}
 			cm.mu.Lock()
 			cm.clusters[name] = &managedCluster{Cluster: c, stopController: stop}
 			cm.mu.Unlock()
-			cm.log.Info("cluster recovered", "cluster", name)
 		}
 	}
 }
 
-func (cm *clusterManager) loadControllerImage(ctx context.Context, c Cluster) (imageref.Resolved, error) {
-	clusterKC, err := kube.New(c.KubeConfig(), "")
+// recoverController relaunches or adopts the controller of a cluster.
+// An unavailable controller image is not an error: the cluster keeps
+// whatever controller it has.
+func (cm *clusterManager) recoverController(ctx context.Context, name string, c Cluster) error {
+	// The image is re-resolved from the current configuration: the
+	// launcher refuses a stale controller container.
+	image, err := cm.imageResolver.Resolve(ctx)
 	if err != nil {
-		return imageref.Resolved{}, fmt.Errorf("building kubeconfig: %w", err)
+		cm.log.Info("controller not re-created: no controller image", "cluster", name, "error", err)
+		return nil
 	}
-	data, err := bootstrap.Load(ctx, clusterKC)
-	if err != nil {
-		return imageref.Resolved{}, fmt.Errorf("loading bootstrap data: %w", err)
+
+	cm.log.Info("recovering cluster", "cluster", name, "image", image)
+	if err := cm.launcher.Launch(ctx, name, c, image); err != nil {
+		return err
 	}
-	ref := data.ClusterConfig.ControllerImageRef
-	if ref == "" {
-		return imageref.Resolved{}, fmt.Errorf("controller image not recorded in bootstrap data")
+	if err := cm.launcher.WaitHealthy(ctx, name); err != nil {
+		cm.log.Warn("controller not healthy after recover", "cluster", name, "error", err)
 	}
-	resolved, err := imageref.Parse(ref)
-	if err != nil {
-		return imageref.Resolved{}, fmt.Errorf("invalid controller image in bootstrap data: %w", err)
-	}
-	return resolved, nil
+	cm.log.Info("cluster recovered", "cluster", name)
+	return nil
 }
 
 func (cm *clusterManager) clusterLock(name string) *sync.Mutex {
@@ -151,6 +144,13 @@ func (cm *clusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 		return nil, fmt.Errorf("resolving controller image: %w", err)
 	}
 
+	// The cluster resolves the image by tag: provider image loading
+	// goes through archives, which rewrite digests.
+	clusterImage := controllerImage.Tagged()
+	if clusterImage == "" {
+		return nil, fmt.Errorf("the controller image must be tagged")
+	}
+
 	c, err := p.Create(ctx, kc, &ps)
 	if err != nil {
 		return nil, err
@@ -178,7 +178,7 @@ func (cm *clusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 
 	ccfg := c.ControllerConfig()
 	if err := bootstrap.Store(ctx, clusterKC, bootstrap.ClusterConfig{
-		ControllerImageRef: controllerImage.String(),
+		ControllerImageRef: clusterImage,
 		Network:            ccfg.Network,
 		LogsDir:            ccfg.LogsDir,
 		VolumesDir:         ccfg.VolumesDir,
@@ -189,8 +189,11 @@ func (cm *clusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 		return nil, errors.Join(fmt.Errorf("storing bootstrap config: %w", err), destroyErr)
 	}
 
-	stop, err := cm.launcher.Launch(cm.ctx, name, c, controllerImage)
-	if err != nil {
+	stop := cm.launcher.Stopper(name)
+	if err := cm.launcher.Launch(cm.ctx, name, c, controllerImage); err != nil {
+		// A refused stale controller container would block any
+		// recreate of this cluster name.
+		stop()
 		destroyErr := p.Destroy(ctx, name)
 		return nil, errors.Join(fmt.Errorf("launching controller: %w", err), destroyErr)
 	}
@@ -228,9 +231,7 @@ func (cm *clusterManager) Destroy(ctx context.Context, name string) error {
 		if err := cm.deleteKitCluster(ctx, mc.Cluster, name); err != nil {
 			cm.log.Warn("failed to delete KitCluster CR, proceeding with teardown", "cluster", name, "error", err)
 		}
-		if mc.stopController != nil {
-			mc.stopController()
-		}
+		mc.stopController()
 	}
 
 	for _, p := range cm.providers {

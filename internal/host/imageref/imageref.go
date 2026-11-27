@@ -31,22 +31,19 @@ func (r Requested) String() string {
 
 type Resolved struct {
 	canonical reference.Canonical
+	tagged    reference.Named
 }
 
-func Parse(s string) (Resolved, error) {
-	parsed, err := reference.ParseAnyReference(s)
-	if err != nil {
-		return Resolved{}, fmt.Errorf("parsing image reference %s: %w", s, err)
+// Tagged returns a tagged form of the resolved image when the
+// requested reference carried a tag; empty otherwise.
+func (r Resolved) Tagged() string {
+	if r.tagged == nil {
+		return ""
 	}
-	canonical, ok := parsed.(reference.Canonical)
-	if !ok {
-		return Resolved{}, fmt.Errorf("%s is not a canonical digest reference", s)
+	if _, ok := r.tagged.(reference.Canonical); ok {
+		return ""
 	}
-	normalized, err := reference.WithDigest(reference.TrimNamed(canonical), canonical.Digest())
-	if err != nil {
-		return Resolved{}, fmt.Errorf("normalizing canonical reference %s: %w", s, err)
-	}
-	return Resolved{canonical: normalized}, nil
+	return r.tagged.String()
 }
 
 func (r Resolved) String() string {
@@ -132,6 +129,7 @@ func (r *podmanResolver) resolve(ctx context.Context) (Resolved, error) {
 	if err != nil {
 		return Resolved{}, fmt.Errorf("resolving digest for %s: %w", image, err)
 	}
+	ref.tagged = r.requested.named
 	return ref, nil
 }
 
