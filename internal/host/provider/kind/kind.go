@@ -233,25 +233,26 @@ func (c *kindCluster) ControllerConfig() cluster.ControllerConfig {
 	}
 }
 
-// LoadImage makes the controller image available to the cluster. The
-// image travels as a docker archive named by its tag: the kind node
-// names imports after the archive's repo tags, and a digest reference
-// would be lost (the archive round-trip rewrites digests anyway).
-func (c *kindCluster) LoadImage(ctx context.Context, image imageref.Resolved) error {
+// LoadImage makes the controller image available to the cluster and
+// returns the reference cluster workloads must use for it. The image
+// travels as a docker archive named by its tag: the kind node names
+// imports after the archive's repo tags, and a digest reference would
+// be lost (the archive round-trip rewrites digests anyway).
+func (c *kindCluster) LoadImage(ctx context.Context, image imageref.Resolved) (string, error) {
 	tagged := image.Tagged()
 	if tagged == "" {
-		return fmt.Errorf("the kind provider requires a tagged controller image")
+		return "", fmt.Errorf("the kind provider requires a tagged controller image")
 	}
 
 	fs := c.store.Fs()
 	dir, err := c.store.ClusterDir(c.name)
 	if err != nil {
-		return fmt.Errorf("getting cluster dir: %w", err)
+		return "", fmt.Errorf("getting cluster dir: %w", err)
 	}
 
 	archiveDir, err := afero.TempDir(fs, dir, "controller-image-*")
 	if err != nil {
-		return fmt.Errorf("creating temp dir for image archive: %w", err)
+		return "", fmt.Errorf("creating temp dir for image archive: %w", err)
 	}
 	defer func() {
 		if err := fs.RemoveAll(archiveDir); err != nil {
@@ -261,14 +262,14 @@ func (c *kindCluster) LoadImage(ctx context.Context, image imageref.Resolved) er
 
 	archivePath := filepath.Join(archiveDir, "image.tar")
 	if err := c.imageSaver.SaveDockerArchive(ctx, tagged, archivePath); err != nil {
-		return fmt.Errorf("saving image %s: %w", tagged, err)
+		return "", fmt.Errorf("saving image %s: %w", tagged, err)
 	}
 
 	if err := run(ctx, c.log, c.bin, "load", "image-archive", archivePath, "--name", prefixed(c.name)); err != nil {
-		return fmt.Errorf("loading image into kind cluster: %w", err)
+		return "", fmt.Errorf("loading image into kind cluster: %w", err)
 	}
 	c.log.Info("loaded controller image into kind cluster", "cluster", c.name, "image", tagged)
-	return nil
+	return tagged, nil
 }
 
 func (c *kindCluster) Teardown(ctx context.Context) error {

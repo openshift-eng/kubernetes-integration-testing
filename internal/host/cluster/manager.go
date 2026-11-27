@@ -144,20 +144,15 @@ func (cm *clusterManager) Create(ctx context.Context, kc *v1alpha1.KitCluster, p
 		return nil, fmt.Errorf("resolving controller image: %w", err)
 	}
 
-	// The cluster resolves the image by tag: provider image loading
-	// goes through archives, which rewrite digests.
-	clusterImage := controllerImage.Tagged()
-	if clusterImage == "" {
-		return nil, fmt.Errorf("the controller image must be tagged")
-	}
-
 	c, err := p.Create(ctx, kc, &ps)
 	if err != nil {
 		return nil, err
 	}
 
+	clusterImage := controllerImage.String()
 	if loader, ok := c.(ImageLoader); ok {
-		if err := loader.LoadImage(ctx, controllerImage); err != nil {
+		var err error
+		if clusterImage, err = loader.LoadImage(ctx, controllerImage); err != nil {
 			destroyErr := p.Destroy(ctx, name)
 			return nil, errors.Join(fmt.Errorf("loading controller image: %w", err), destroyErr)
 		}

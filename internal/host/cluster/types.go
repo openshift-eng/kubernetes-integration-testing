@@ -33,7 +33,9 @@ type ControllerLauncher interface {
 }
 
 type ImageLoader interface {
-	LoadImage(ctx context.Context, image imageref.Resolved) error
+	// LoadImage makes the image available to the cluster and returns
+	// the reference cluster workloads must use for it.
+	LoadImage(ctx context.Context, image imageref.Resolved) (string, error)
 }
 
 type Provider interface {
