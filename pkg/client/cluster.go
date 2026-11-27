@@ -10,6 +10,7 @@ import (
 
 	pb "github.com/openshift-eng/kubernetes-integration-testing/api/grpc"
 	v1alpha1 "github.com/openshift-eng/kubernetes-integration-testing/api/k8s/v1alpha1"
+	"github.com/openshift-eng/kubernetes-integration-testing/internal/kube"
 	"github.com/openshift-eng/kubernetes-integration-testing/pkg/naming"
 )
 
@@ -29,15 +30,16 @@ type Cluster struct {
 type CreateOption func(*createOptions)
 
 type createOptions struct {
-	name       string
-	provider   string
-	image      string
-	featureSet string
-	workers    int
-	pullSecret string
-	resources  []ResourceSource
-	wait       bool
-	timeout    time.Duration
+	name        string
+	provider    string
+	image       string
+	kubeVersion string
+	featureSet  string
+	workers     int
+	pullSecret  string
+	resources   []ResourceSource
+	wait        bool
+	timeout     time.Duration
 }
 
 // WithName sets the cluster name. Required.
@@ -53,6 +55,12 @@ func WithProvider(provider string) CreateOption {
 // WithImage sets the release image to deploy operators from.
 func WithImage(image string) CreateOption {
 	return func(o *createOptions) { o.image = image }
+}
+
+// WithKubeVersion sets the Kubernetes version of the cluster control
+// plane, e.g. v1.36 or v1.36.4.
+func WithKubeVersion(version string) CreateOption {
+	return func(o *createOptions) { o.kubeVersion = version }
 }
 
 // WithFeatureSet sets the feature set (Default, TechPreviewNoUpgrade).
@@ -104,6 +112,14 @@ func (c *Client) Create(ctx context.Context, opts ...CreateOption) (*Cluster, er
 	if err := naming.ValidateClusterName(o.name); err != nil {
 		return nil, err
 	}
+	kubeVersion := o.kubeVersion
+	if kubeVersion != "" {
+		v, err := kube.ParseVersion(kubeVersion)
+		if err != nil {
+			return nil, fmt.Errorf("invalid kube version %q: expected vMAJOR.MINOR[.PATCH], e.g. v1.36 or v1.36.4", kubeVersion)
+		}
+		kubeVersion = v.String()
+	}
 
 	var resources [][]byte
 	for _, src := range o.resources {
@@ -113,7 +129,7 @@ func (c *Client) Create(ctx context.Context, opts ...CreateOption) (*Cluster, er
 		}
 		for _, m := range ms {
 			if m.Kind == "KitCluster" {
-				return nil, fmt.Errorf("%s %s: the KitCluster is configured through the create options (name, provider, image, feature set, workers), not through resources", m.Kind, m.Name)
+				return nil, fmt.Errorf("%s %s must be configured through the create options, not through resources", m.Kind, m.Name)
 			}
 			resources = append(resources, m.JSON)
 		}
@@ -129,6 +145,7 @@ func (c *Client) Create(ctx context.Context, opts ...CreateOption) (*Cluster, er
 			ClusterName: o.name,
 			Provider:    o.provider,
 			Image:       o.image,
+			KubeVersion: kubeVersion,
 			FeatureSet:  o.featureSet,
 			Workers:     o.workers,
 		},

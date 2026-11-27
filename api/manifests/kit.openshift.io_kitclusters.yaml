@@ -60,6 +60,16 @@ spec:
                 x-kubernetes-validations:
                 - message: image is immutable
                   rule: self == oldSelf
+              kubeVersion:
+                description: |-
+                  kubeVersion is the Kubernetes version of the cluster control
+                  plane, e.g. v1.36 or v1.36.4; a minor resolves to the latest
+                  published patch. When empty, the provider picks its default.
+                pattern: ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?$
+                type: string
+                x-kubernetes-validations:
+                - message: kubeVersion is immutable
+                  rule: self == oldSelf
               provider:
                 enum:
                 - kwok
@@ -139,6 +149,14 @@ spec:
                 type: array
               defaultCA:
                 type: string
+              kubeVersion:
+                description: |-
+                  kubeVersion is the Kubernetes version the control plane runs, as
+                  reported by the API server.
+                pattern: ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$
+                type: string
+            required:
+            - kubeVersion
             type: object
         required:
         - spec

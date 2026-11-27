@@ -13,14 +13,15 @@ import (
 )
 
 var (
-	clusterProvider   string
-	clusterPullSecret string
-	clusterWorkers    int
-	clusterImage      string
-	clusterFeatureSet string
-	clusterFiles      []string
-	clusterNoWait     bool
-	clusterTimeout    time.Duration
+	clusterProvider    string
+	clusterPullSecret  string
+	clusterWorkers     int
+	clusterImage       string
+	clusterKubeVersion string
+	clusterFeatureSet  string
+	clusterFiles       []string
+	clusterNoWait      bool
+	clusterTimeout     time.Duration
 )
 
 var clusterCmd = &cobra.Command{
@@ -48,6 +49,7 @@ var clusterCreateCmd = &cobra.Command{
 			client.WithName(args[0]),
 			client.WithProvider(clusterProvider),
 			client.WithImage(clusterImage),
+			client.WithKubeVersion(clusterKubeVersion),
 			client.WithFeatureSet(clusterFeatureSet),
 			client.WithWorkers(clusterWorkers),
 			client.WithPullSecret(clusterPullSecret),
@@ -176,6 +178,7 @@ func init() {
 	clusterCreateCmd.Flags().StringVar(&clusterPullSecret, "pull-secret", "", "path to pull secret")
 	clusterCreateCmd.Flags().IntVar(&clusterWorkers, "workers", 1, "number of worker nodes")
 	clusterCreateCmd.Flags().StringVar(&clusterImage, "image", "", "release image to deploy operators from")
+	clusterCreateCmd.Flags().StringVar(&clusterKubeVersion, "kube-version", "", "Kubernetes version of the cluster control plane, e.g. v1.36 or v1.36.4")
 	clusterCreateCmd.Flags().StringVar(&clusterFeatureSet, "feature-set", "", "feature set (Default, TechPreviewNoUpgrade)")
 	clusterCreateCmd.Flags().StringArrayVarP(&clusterFiles, "file", "f", nil, "kit CR manifest file, directory, or '-' for stdin; may be repeated")
 	clusterCreateCmd.Flags().BoolVar(&clusterNoWait, "no-wait", false, "apply resources but do not wait for them to become ready")

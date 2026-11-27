@@ -126,6 +126,11 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 	rel := release.NewReleaseManifests(registry, log)
 	crdMgr := NewCRDManager(clients.Extensions.ApiextensionsV1().CustomResourceDefinitions(), log)
 
+	kubeVersion, err := kube.ServerKubeVersion(ctx, clients)
+	if err != nil {
+		return fmt.Errorf("determining cluster Kubernetes version: %w", err)
+	}
+
 	reconcilers := []struct {
 		name  string
 		setup func() error
@@ -137,6 +142,7 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, clients *kube.Clien
 				release:              rel,
 				apiServerURL:         clients.REST.Host,
 				apiServerExternalURL: cfg.KubeConfig.OriginalServerURL(),
+				kubeVersion:          kubeVersion,
 				shutdowner:           shutdowner,
 				log:                  log,
 			}).SetupWithManager(mgr)

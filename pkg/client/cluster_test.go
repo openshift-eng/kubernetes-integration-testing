@@ -72,6 +72,7 @@ func TestCreateBuildsKitClusterRequest(t *testing.T) {
 		WithName("my-cluster"),
 		WithProvider("kind"),
 		WithImage("registry.example/ocp/release:5.1"),
+		WithKubeVersion("v1.36.1"),
 		WithFeatureSet("TechPreviewNoUpgrade"),
 		WithWorkers(3),
 		WithPullSecret("/secrets/pull-secret"),
@@ -89,6 +90,7 @@ func TestCreateBuildsKitClusterRequest(t *testing.T) {
 	assert.Equal(t, "my-cluster", kc.Spec.ClusterName)
 	assert.Equal(t, "kind", kc.Spec.Provider)
 	assert.Equal(t, "registry.example/ocp/release:5.1", kc.Spec.Image)
+	assert.Equal(t, "v1.36.1", kc.Spec.KubeVersion)
 	assert.Equal(t, "TechPreviewNoUpgrade", kc.Spec.FeatureSet)
 	assert.Equal(t, 3, kc.Spec.Workers)
 
@@ -109,7 +111,34 @@ func TestCreateDefaults(t *testing.T) {
 	assert.Equal(t, "kwok", kc.Spec.Provider)
 	assert.Equal(t, 1, kc.Spec.Workers)
 	assert.Empty(t, kc.Spec.Image)
+	assert.Empty(t, kc.Spec.KubeVersion)
 	assert.Empty(t, kc.Spec.FeatureSet)
+}
+
+func TestCreateKubeVersion(t *testing.T) {
+	t.Run("normalizes to the canonical v-prefixed form", func(t *testing.T) {
+		fake := &fakeDaemon{
+			createResp: &pb.CreateClusterResponse{Kubeconfig: "/tmp/kubeconfig"},
+		}
+		c := newTestClient(fake)
+
+		_, err := c.Create(context.Background(), WithName("kv"), WithKubeVersion("1.36"))
+		require.NoError(t, err)
+
+		var kc v1alpha1.KitCluster
+		require.NoError(t, json.Unmarshal(fake.createReq.GetManifest(), &kc))
+		assert.Equal(t, "v1.36", kc.Spec.KubeVersion)
+	})
+
+	t.Run("rejects invalid versions", func(t *testing.T) {
+		fake := &fakeDaemon{}
+		c := newTestClient(fake)
+
+		_, err := c.Create(context.Background(), WithName("kv"), WithKubeVersion("1"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `invalid kube version "1"`)
+		assert.Zero(t, fake.createCalls)
+	})
 }
 
 func TestCreateRequiresName(t *testing.T) {

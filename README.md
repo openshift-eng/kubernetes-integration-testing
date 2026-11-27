@@ -64,6 +64,10 @@ There are two providers: **kwok** (lightweight, simulated control plane) and **k
   --workers 2
 ```
 
+#### Kubernetes version
+
+Both providers accept `--kube-version` to pin the Kubernetes version of the cluster control plane, either a minor (e.g. `v1.36`) or an exact version (e.g. `v1.36.4`). The version the control plane ends up running is reported in `KitCluster.status.kubeVersion`.
+
 ### Deploying operators
 
 Operator deployment is driven by `KitCluster` spec and `DeploymentPlan` resources. The simplest path is passing the release image and the kit CRs (deployment plans, resource collections) directly to `create`: the cluster comes up with everything applied and ready, in one command.
