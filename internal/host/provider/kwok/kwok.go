@@ -30,7 +30,7 @@ import (
 
 const (
 	clusterPrefix  = "kit-"
-	defaultVersion = "0.7.0"
+	toolVersion    = "0.8.0"
 	releaseBaseURL = "https://github.com/kubernetes-sigs/kwok/releases/download"
 )
 
@@ -58,17 +58,17 @@ type provider struct {
 }
 
 func NewProvider(ctx context.Context, s store.Store, log *slog.Logger) cluster.Provider {
-	registerBinaries(s, defaultVersion)
+	registerBinaries(s, toolVersion)
 	p := &provider{store: s, log: log, clusters: make(map[string]*kwokCluster), ports: newPortPool()}
 	p.recover(ctx)
 	return p
 }
 
 func (p *provider) recover(ctx context.Context) {
-	if !p.store.Has(binID("kwokctl", defaultVersion)) {
+	if !p.store.Has(binID("kwokctl", toolVersion)) {
 		return
 	}
-	bin, err := p.kwokctl(defaultVersion)
+	bin, err := p.kwokctl()
 	if err != nil {
 		p.log.Warn("could not resolve kwokctl", "error", err)
 		return
@@ -102,12 +102,8 @@ func (p *provider) recover(ctx context.Context) {
 	}
 }
 
-func (p *provider) kwokctl(version string) (string, error) {
-	if version == "" {
-		version = defaultVersion
-	}
-	registerBinaries(p.store, version)
-	return p.store.Get(binID("kwokctl", version))
+func (p *provider) kwokctl() (string, error) {
+	return p.store.Get(binID("kwokctl", toolVersion))
 }
 
 func (p *provider) Get(name string) (cluster.Cluster, bool) {
@@ -155,7 +151,7 @@ func (p *provider) Create(ctx context.Context, kc *v1alpha1.KitCluster, ps *pull
 	}
 	p.mu.Unlock()
 
-	bin, err := p.kwokctl("")
+	bin, err := p.kwokctl()
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +167,14 @@ func (p *provider) Create(ctx context.Context, kc *v1alpha1.KitCluster, ps *pull
 	}
 
 	kwokCfgPath := filepath.Join(dir, "kwok-config.yaml")
-	if err := writeKwokConfig(kwokCfgPath, logsDir); err != nil {
+	kubeVersion := ""
+	if kc.Spec.KubeVersion != "" {
+		var err error
+		if kubeVersion, err = resolveKubeVersion(ctx, kc.Spec.KubeVersion); err != nil {
+			return nil, err
+		}
+	}
+	if err := writeKwokConfig(kwokCfgPath, logsDir, kubeVersion); err != nil {
 		return nil, fmt.Errorf("writing kwok config: %w", err)
 	}
 
@@ -385,52 +388,6 @@ func setupCluster(ctx context.Context, kubeconfigPath string, workers int) error
 	}
 
 	return nil
-}
-
-// writeKwokConfig writes the kwok configuration. It includes a custom
-// pod-delete Stage so that kwokctl skips generating default pod stages
-// (notably pod-ready, which would auto-set all pods to Running before
-// the kit controller has a chance to start the actual containers).
-// It also patches the kwok-controller component to mount the logsDir
-// so that kubectl logs can read container logs from inside the container.
-func writeKwokConfig(path, logsDir string) error {
-	config := fmt.Sprintf(`apiVersion: config.kwok.x-k8s.io/v1alpha1
-kind: KwokctlConfiguration
-componentsPatches:
-- name: kwok-controller
-  extraVolumes:
-  - name: kit-logs
-    hostPath: %s
-    mountPath: %s
-    pathType: DirectoryOrCreate
----
-apiVersion: config.kwok.x-k8s.io/v1alpha1
-kind: KwokConfiguration
-metadata:
-  name: kwok
-options:
-  enableCRDs:
-    - Logs
----
-apiVersion: kwok.x-k8s.io/v1alpha1
-kind: Stage
-metadata:
-  name: pod-delete
-spec:
-  resourceRef:
-    apiGroup: v1
-    kind: Pod
-  selector:
-    matchExpressions:
-    - jq:
-        key: .metadata.deletionTimestamp
-        operator: Exists
-  next:
-    delete: true
-    finalizers:
-      empty: true
-`, logsDir, logsDir)
-	return os.WriteFile(path, []byte(config), 0o644)
 }
 
 func installLogsCRD(ctx context.Context, cfg *rest.Config) error {

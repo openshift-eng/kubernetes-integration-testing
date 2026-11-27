@@ -32,6 +32,14 @@ type KitClusterSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="image is immutable"
 	Image string `json:"image,omitempty"`
 
+	// kubeVersion is the Kubernetes version of the cluster control
+	// plane, e.g. v1.36 or v1.36.4; a minor resolves to the latest
+	// published patch. When empty, the provider picks its default.
+	// +optional
+	// +kubebuilder:validation:Pattern=`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="kubeVersion is immutable"
+	KubeVersion string `json:"kubeVersion,omitempty"`
+
 	// +kubebuilder:validation:Enum=Default;TechPreviewNoUpgrade
 	FeatureSet string `json:"featureSet,omitempty"`
 
@@ -48,10 +56,16 @@ const (
 )
 
 type KitClusterStatus struct {
-	APIServerURL         string             `json:"apiServerURL,omitempty"`
-	APIServerExternalURL string             `json:"apiServerExternalURL,omitempty"`
-	DefaultCA            string             `json:"defaultCA,omitempty"`
-	Conditions           []metav1.Condition `json:"conditions,omitempty"`
+	APIServerURL         string `json:"apiServerURL,omitempty"`
+	APIServerExternalURL string `json:"apiServerExternalURL,omitempty"`
+
+	// kubeVersion is the Kubernetes version the control plane runs, as
+	// reported by the API server.
+	// +kubebuilder:validation:Pattern=`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`
+	KubeVersion string `json:"kubeVersion"`
+
+	DefaultCA  string             `json:"defaultCA,omitempty"`
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true

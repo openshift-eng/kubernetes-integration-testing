@@ -25,7 +25,7 @@ import (
 
 const (
 	clusterPrefix  = "kit-"
-	defaultVersion = "0.27.0"
+	toolVersion    = "0.33.0"
 	releaseBaseURL = "https://github.com/kubernetes-sigs/kind/releases/download"
 )
 
@@ -42,7 +42,7 @@ type provider struct {
 }
 
 func NewProvider(ctx context.Context, s store.Store, imageSaver ImageSaver, log *slog.Logger) cluster.Provider {
-	registerBinary(s, defaultVersion)
+	registerBinary(s, toolVersion)
 	p := &provider{store: s, imageSaver: imageSaver, log: log, clusters: make(map[string]*kindCluster)}
 	p.recover(ctx)
 	return p
@@ -60,19 +60,15 @@ func binID(version string) string {
 	return fmt.Sprintf("kind-%s", version)
 }
 
-func (p *provider) kindBin(version string) (string, error) {
-	if version == "" {
-		version = defaultVersion
-	}
-	registerBinary(p.store, version)
-	return p.store.Get(binID(version))
+func (p *provider) kindBin() (string, error) {
+	return p.store.Get(binID(toolVersion))
 }
 
 func (p *provider) recover(ctx context.Context) {
-	if !p.store.Has(binID(defaultVersion)) {
+	if !p.store.Has(binID(toolVersion)) {
 		return
 	}
-	bin, err := p.kindBin(defaultVersion)
+	bin, err := p.kindBin()
 	if err != nil {
 		p.log.Warn("could not resolve kind", "error", err)
 		return
@@ -133,7 +129,7 @@ func (p *provider) Create(ctx context.Context, kc *v1alpha1.KitCluster, ps *pull
 	}
 	p.mu.Unlock()
 
-	bin, err := p.kindBin("")
+	bin, err := p.kindBin()
 	if err != nil {
 		return nil, err
 	}
@@ -146,6 +142,14 @@ func (p *provider) Create(ctx context.Context, kc *v1alpha1.KitCluster, ps *pull
 
 	toolName := prefixed(name)
 	args := []string{"create", "cluster", "--name", toolName, "--kubeconfig", kubeconfigPath}
+	// The node image pins the Kubernetes version of the control plane.
+	if kc.Spec.KubeVersion != "" {
+		version, err := resolveKubeVersion(ctx, kc.Spec.KubeVersion)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, "--image", "docker.io/kindest/node:"+version)
+	}
 
 	cfgPath := filepath.Join(dir, "kind-config.yaml")
 	if err := writeKindConfig(cfgPath, kc.Spec.Workers, ps.Data()); err != nil {

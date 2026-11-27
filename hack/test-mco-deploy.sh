@@ -5,9 +5,10 @@ PULL_SECRET="${PULL_SECRET:-$HOME/mco-dev/pull-secret}"
 RELEASE_IMAGE="quay.io/openshift-release-dev/ocp-release:5.0.0-x86_64"
 CLUSTER_NAME="test-cluster"
 PROVIDER="${PROVIDER:-kwok}"
+KUBE_VERSION="${KUBE_VERSION:-}"
 
 usage() {
-  echo "Usage: $0 [provider] [--provider kwok|kind]" >&2
+  echo "Usage: $0 [provider] [--provider kwok|kind] [--kube-version v1.36.4]" >&2
 }
 
 if [[ $# -ge 1 && "$1" != --* ]]; then
@@ -24,6 +25,15 @@ while [[ $# -gt 0 ]]; do
       ;;
     --provider=*)
       PROVIDER="${1#*=}"
+      shift
+      ;;
+    --kube-version)
+      [[ $# -ge 2 ]] || { usage; exit 2; }
+      KUBE_VERSION="$2"
+      shift 2
+      ;;
+    --kube-version=*)
+      KUBE_VERSION="${1#*=}"
       shift
       ;;
     -h|--help)
@@ -70,7 +80,12 @@ fi
 
 echo "=== Creating cluster ==="
 echo "Provider: $PROVIDER"
-./bin/kit cluster create "$CLUSTER_NAME" --provider "$PROVIDER" --pull-secret "$PULL_SECRET"
+CREATE_ARGS=(--provider "$PROVIDER" --pull-secret "$PULL_SECRET")
+if [[ -n "$KUBE_VERSION" ]]; then
+  echo "Kube version: $KUBE_VERSION"
+  CREATE_ARGS+=(--kube-version "$KUBE_VERSION")
+fi
+./bin/kit cluster create "$CLUSTER_NAME" "${CREATE_ARGS[@]}"
 
 export KUBECONFIG="$HOME/.local/share/openshift-kit/clusters/$CLUSTER_NAME/kubeconfig"
 

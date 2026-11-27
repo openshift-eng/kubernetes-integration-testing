@@ -39,6 +39,7 @@ type kitClusterReconciler struct {
 	release              *release.ReleaseManifests
 	apiServerURL         string
 	apiServerExternalURL string
+	kubeVersion          string
 	shutdowner           common.Shutdowner
 	log                  *slog.Logger
 }
@@ -66,10 +67,11 @@ func (r *kitClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	if kc.Status.APIServerURL != r.apiServerURL || kc.Status.APIServerExternalURL != r.apiServerExternalURL {
+	if kc.Status.APIServerURL != r.apiServerURL || kc.Status.APIServerExternalURL != r.apiServerExternalURL || kc.Status.KubeVersion != r.kubeVersion {
 		base := kc.DeepCopy()
 		kc.Status.APIServerURL = r.apiServerURL
 		kc.Status.APIServerExternalURL = r.apiServerExternalURL
+		kc.Status.KubeVersion = r.kubeVersion
 		if err := r.client.Status().Patch(ctx, &kc, client.MergeFrom(base)); err != nil {
 			return ctrl.Result{}, err
 		}

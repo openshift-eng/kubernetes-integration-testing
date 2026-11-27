@@ -1,0 +1,36 @@
+apiVersion: config.kwok.x-k8s.io/v1alpha1
+kind: KwokctlConfiguration
+{{- if .KubeVersion }}
+options:
+  kubeVersion: {{ .KubeVersion }}
+{{- end }}
+componentsPatches:
+- name: kwok-controller
+  extraArgs:
+  - key: enable-crds
+    value: Logs
+  extraVolumes:
+  - name: kit-logs
+    hostPath: {{ .LogsDir }}
+    mountPath: {{ .LogsDir }}
+    pathType: DirectoryOrCreate
+---
+# kit manages pods itself; this Stage replaces kwok's default pod
+# stages, which would set every pod Running before kit starts it.
+apiVersion: kwok.x-k8s.io/v1alpha1
+kind: Stage
+metadata:
+  name: pod-delete
+spec:
+  resourceRef:
+    apiGroup: v1
+    kind: Pod
+  selector:
+    matchExpressions:
+    - jq:
+        key: .metadata.deletionTimestamp
+        operator: Exists
+  next:
+    delete: true
+    finalizers:
+      empty: true
